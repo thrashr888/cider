@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,10 +58,21 @@ jobs:
             --generate-notes \
             cider-*.tar.gz
 
+  crates-io:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io via OIDC
+        run: cargo publish
+
   homebrew:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -69,15 +81,16 @@ jobs:
         run: |
           echo "aarch64=$(sha256sum cider-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "x86_64=$(sha256sum cider-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - name: Update Homebrew formula
+      - name: Generate and push Homebrew formula
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
           SHA_ARM64: ${{ steps.sha.outputs.aarch64 }}
           SHA_X86: ${{ steps.sha.outputs.x86_64 }}
         run: |
           VERSION="${TAG_NAME#v}"
-          cat > cider.rb << FORMULA
+          mkdir -p /tmp/formula
+          cat > /tmp/formula/cider.rb << FORMULA
           class Cider < Formula
             desc "Manage macOS Apple apps from the command line"
             homepage "https://github.com/thrashr888/cider"
@@ -104,30 +117,24 @@ jobs:
           end
           FORMULA
 
-          # Push formula to homebrew tap repo
-          gh repo clone thrashr888/homebrew-cider /tmp/homebrew-cider 2>/dev/null || true
-          if [ -d /tmp/homebrew-cider ]; then
-            cp cider.rb /tmp/homebrew-cider/Formula/cider.rb
-            cd /tmp/homebrew-cider
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add Formula/cider.rb
-            git commit -m "Update cider to ${TAG_NAME}" || true
-            git push || echo "Homebrew tap push failed - create the repo first"
-          else
-            echo "homebrew-cider repo not found, skipping tap update"
-            echo "Create it with: gh repo create thrashr888/homebrew-cider --public"
-            echo "Formula content saved to cider.rb"
-            cat cider.rb
-          fi
+          echo "Generated formula:"
+          cat /tmp/formula/cider.rb
 
-  crates-io:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty || echo "Publish failed - check CARGO_REGISTRY_TOKEN secret"
+          # Push to homebrew tap using GitHub API (no PAT needed, uses GITHUB_TOKEN)
+          FORMULA_CONTENT=$(base64 -w0 /tmp/formula/cider.rb)
+
+          # Get current file SHA if it exists
+          EXISTING_SHA=$(gh api "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" \
+              -f message="Update cider to ${TAG_NAME}" \
+              -f content="$FORMULA_CONTENT" \
+              -f sha="$EXISTING_SHA" \
+              -f branch="main" || echo "Homebrew tap update failed"
+          else
+            gh api --method PUT "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" \
+              -f message="Update cider to ${TAG_NAME}" \
+              -f content="$FORMULA_CONTENT" \
+              -f branch="main" || echo "Homebrew tap update failed"
+          fi
