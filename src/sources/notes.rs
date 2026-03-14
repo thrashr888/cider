@@ -109,7 +109,10 @@ pub async fn get(id: &str) -> anyhow::Result<Note> {
             set nId to id of note id "{escaped_id}"
             set nName to name of note id "{escaped_id}"
             set nMod to modification date of note id "{escaped_id}"
-            set nFolder to name of container of note id "{escaped_id}"
+            set nFolder to ""
+            try
+                set nFolder to name of container of note id "{escaped_id}"
+            end try
             set nBody to ""
             try
                 set nBody to plaintext of note id "{escaped_id}"

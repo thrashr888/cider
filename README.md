@@ -15,7 +15,7 @@ These commands support subcommands (`list`, `create`, `delete`, etc.). Running t
 | `cider mail` | `list`, `get`, `read`, `unread`, `trash`, `mailboxes`, `send` |
 | `cider messages` | `list`, `send` |
 | `cider music` | `list`, `play`, `pause`, `next`, `previous`, `status`, `playlists` |
-| `cider shortcuts` | `list`, `run` |
+| `cider shortcuts` | `list`, `run`, `view`, `sign` |
 | `cider screenshots` | `list`, `capture` |
 | `cider time-machine` | `status`, `list`, `start`, `stop` |
 | `cider screen-sharing` | `status`, `enable`, `disable` |
@@ -78,6 +78,8 @@ cider screenshots capture --selection
 cider time-machine start
 cider system-info defaults-read com.apple.dock autohide
 cider shortcuts run --name "Morning Routine"
+cider shortcuts view --name "Morning Routine"
+cider shortcuts sign --input ./MyShortcut.shortcut --output ./MyShortcut-signed.shortcut --mode anyone
 
 # Pretty-print any command
 cider contacts list --search Smith --pretty
@@ -94,6 +96,72 @@ cider outputs structured JSON on stdout and errors/progress on stderr, following
 - Each command is independent — no shared state
 - Broken pipe handled gracefully (safe to pipe to `head`)
 
+## JXA Workarounds / Preferred Primitives
+
+cider should avoid JXA wherever possible. Preferred order:
+
+1. Native CLI tools (`shortcuts`, `tmutil`, `log`, `screencapture`, `scutil`, `defaults`)
+2. SQLite / plist / filesystem reads
+3. AppleScript for narrow writes on one object at a time
+4. JXA only as a last resort for narrow app automation
+
+Current examples:
+- Reminders reads use SQLite; reminder mutations now prefer AppleScript over broad JXA scans
+- Calendar reads prefer local databases when available
+- Safari Reading List uses plist parsing
+- Voice Memos uses SQLite
+- Photo Booth uses filesystem inspection
+- Shortcuts uses Apple's native `shortcuts` CLI instead of scripting
+
+## Coverage Matrix
+
+| Area | Read | Write/Automation | Status | Notes |
+|------|------|------------------|--------|-------|
+| Reminders | SQLite | AppleScript | strong | Reads avoid JXA; scoped create/complete/delete verified |
+| Calendar | DB + fallback | AppleScript | strong | Reads prefer DB; scoped create/delete verified |
+| Contacts | JXA | JXA | partial | Works, but still too JXA-heavy and a replacement target |
+| Notes | AppleScript | AppleScript | strong | list/get/create/update/delete working; folder metadata can be inconsistent |
+| Mail | JXA | JXA + Mail app send | partial | Works, but still a JXA reduction target |
+| Messages | SQLite | AppleScript/JXA send | strong | Reads are local DB-backed |
+| Music | JXA | JXA | partial | Works, but live-app control likely remains scripting-based |
+| Shortcuts | native CLI | native CLI | strong | list/run/view/sign supported; no true CRUD in Apple CLI |
+| Voice Memos | SQLite | none | strong | Read coverage good; no public write API |
+| Photo Booth | filesystem | none | strong | Simple filesystem-backed read model |
+| Reading List | plist | none | strong | Read-only plist parsing |
+| Photos | SQLite | none | partial | Good metadata reads; writes likely need native Swift/Photos.framework |
+| Home | blocked | blocked | blocked | Likely needs native Swift + entitlements |
+| Journal | blocked | blocked | blocked | Encrypted/private |
+| Weather | blocked | blocked | blocked | Encrypted/private cache |
+
+## Dry-run plan for dangerous commands
+
+Recommended future `--dry-run` support:
+
+- mail send
+  - return resolved recipient/subject/body without sending
+- messages send
+  - return recipient/text without sending
+- reminders create/complete/delete
+  - return target list/title/action without mutating
+- calendar create/delete
+  - return resolved calendar/title/date/times without mutating
+- shortcuts run
+  - hard to guarantee because shortcut side effects are arbitrary; document as not safely dry-runnable
+- screen-sharing enable/disable
+  - print the `launchctl` command that would run
+- system-info set-name / defaults-write
+  - print exact system mutation command
+- time-machine start/stop
+  - print exact `tmutil` invocation
+- screenshots capture
+  - print resolved output path and mode flags
+
+Implementation suggestion:
+- add global `--dry-run` flag
+- thread it through mutating subcommands only
+- return normal `ActionResult` JSON with `ok: true`, `action`, and a `message` describing the skipped mutation
+- never fake success for commands that need validation from the live app; instead say `would run ...`
+
 ## Write Limitations
 
 The following cannot support write operations without compiled Swift binaries or private entitlements:
@@ -108,6 +176,7 @@ The following cannot support write operations without compiled Swift binaries or
 | `find-my` | Locked behind private APIs |
 | `fonts` | No scripting dictionary |
 | `home` | Requires compiled Swift with entitlements. Use `cider shortcuts run` as workaround |
+| `shortcuts` | Apple CLI supports invocation/discovery (`list`, `run`, `view`, `sign`) but not true create/update/delete CRUD |
 | `journal` | Encrypted, no API |
 | `maps` | Minimal scripting dictionary |
 | `news` | Read-only SQLite cache |

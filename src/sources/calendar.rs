@@ -122,9 +122,8 @@ pub async fn delete(
     let script = format!(
         r#"
 const app = Application("Calendar");
-const targetDate = new Date("{}");
-const dayStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
-const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
+const targetDate = new Date("{}T00:00:00");
+const targetKey = [targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate()].join("-");
 {}
 let found = false;
 for (let i = 0; i < cals.length; i++) {{
@@ -134,7 +133,8 @@ for (let i = 0; i < cals.length; i++) {{
         try {{
             const ev = events[j];
             const sd = ev.startDate();
-            if (ev.summary() === "{}" && sd >= dayStart && sd < dayEnd) {{
+            const sdKey = [sd.getFullYear(), sd.getMonth(), sd.getDate()].join("-");
+            if (ev.summary() === "{}" && sdKey === targetKey) {{
                 app.delete(ev);
                 found = true;
                 break;

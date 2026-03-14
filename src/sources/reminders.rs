@@ -1,6 +1,6 @@
 use super::util::{
-    escape_jxa, run_command_with_timeout, run_jxa_with_timeout, slug, truncate_for_title,
-    ActionResult, APPLE_EPOCH,
+    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, slug,
+    truncate_for_title, ActionResult, APPLE_EPOCH,
 };
 use chrono::DateTime;
 use serde::Serialize;
@@ -105,7 +105,7 @@ LIMIT 500;
     Ok(all)
 }
 
-/// Create a new reminder via JXA.
+/// Create a new reminder via AppleScript.
 pub async fn create(
     title: &str,
     list: Option<&str>,
@@ -113,86 +113,66 @@ pub async fn create(
     priority: Option<i32>,
     notes: Option<&str>,
 ) -> anyhow::Result<ActionResult> {
-    let escaped_title = escape_jxa(title);
-    let list_name = list.unwrap_or("");
-    let escaped_list = escape_jxa(list_name);
+    let escaped_title = escape_applescript(title);
+    let list_clause = if let Some(list_name) = list {
+        let escaped_list = escape_applescript(list_name);
+        format!("set theList to list \"{}\"", escaped_list)
+    } else {
+        "set theList to first list".to_string()
+    };
 
-    let mut props = format!("name: \"{}\"", escaped_title);
-
-    if let Some(due_str) = due {
-        let escaped_due = escape_jxa(due_str);
-        props.push_str(&format!(", dueDate: new Date(\"{}\")", escaped_due));
-    }
-
-    if let Some(p) = priority {
-        props.push_str(&format!(", priority: {}", p));
-    }
-
+    let mut property_parts = vec![format!("name:\"{}\"", escaped_title)];
     if let Some(n) = notes {
-        let escaped_notes = escape_jxa(n);
-        props.push_str(&format!(", body: \"{}\"", escaped_notes));
+        property_parts.push(format!("body:\"{}\"", escape_applescript(n)));
     }
+    if let Some(p) = priority {
+        property_parts.push(format!("priority:{}", p));
+    }
+    if let Some(due_str) = due {
+        property_parts.push(format!("due date:date \"{}\"", escape_applescript(due_str)));
+    }
+    let properties = property_parts.join(", ");
 
     let script = format!(
         r#"
-const app = Application("Reminders");
-let list;
-if ("{}") {{
-    list = app.lists.byName("{}");
-}} else {{
-    const lists = app.lists();
-    if (!lists || lists.length === 0) throw new Error("No reminder lists available");
-    list = lists[0];
-}}
-const r = app.Reminder({{ {} }});
-list.reminders.push(r);
-r.name();
-"#,
-        escaped_list, escaped_list, props
+        tell application "Reminders"
+            {}
+            set newReminder to make new reminder at end of reminders of theList with properties {{{}}}
+            return name of newReminder
+        end tell
+    "#,
+        list_clause, properties
     );
 
-    let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
-
-    let id = slug(&output);
+    let output = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let id = slug(output.trim());
     Ok(ActionResult::success_with_id("created", &id))
 }
 
-/// Mark a reminder as complete by title via JXA.
+/// Mark a reminder as complete by title via AppleScript.
 pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
-    let escaped_title = escape_jxa(title);
-    let list_setup = if let Some(list_name) = list {
-        let escaped_list = escape_jxa(list_name);
-        format!("const lists = [app.lists.byName(\"{}\")];", escaped_list)
+    let escaped_title = escape_applescript(title);
+    let list_clause = if let Some(list_name) = list {
+        let escaped_list = escape_applescript(list_name);
+        format!("set theList to list \"{}\"", escaped_list)
     } else {
-        "const lists = app.lists();".to_string()
+        "set theList to first list".to_string()
     };
 
     let script = format!(
         r#"
-const app = Application("Reminders");
-{}
-let found = false;
-for (let i = 0; i < lists.length; i++) {{
-    let rems;
-    try {{ rems = lists[i].reminders(); }} catch(e) {{ continue; }}
-    for (let j = 0; j < rems.length; j++) {{
-        try {{
-            if (rems[j].name() === "{}") {{
-                rems[j].completed = true;
-                found = true;
-                break;
-            }}
-        }} catch(e) {{ continue; }}
-    }}
-    if (found) break;
-}}
-if (!found) throw new Error("Reminder not found: {}");
-"completed"
-"#,
-        list_setup, escaped_title, escaped_title
+        tell application "Reminders"
+            {}
+            set matches to (every reminder of theList whose name is "{}")
+            if (count of matches) is 0 then error "Reminder not found: {}"
+            set completed of item 1 of matches to true
+            return "completed"
+        end tell
+    "#,
+        list_clause, escaped_title, escaped_title
     );
 
-    run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
     Ok(ActionResult::success_with_message(
         "completed",
@@ -200,42 +180,30 @@ if (!found) throw new Error("Reminder not found: {}");
     ))
 }
 
-/// Delete a reminder by title via JXA.
+/// Delete a reminder by title via AppleScript.
 pub async fn delete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
-    let escaped_title = escape_jxa(title);
-    let list_setup = if let Some(list_name) = list {
-        let escaped_list = escape_jxa(list_name);
-        format!("const lists = [app.lists.byName(\"{}\")];", escaped_list)
+    let escaped_title = escape_applescript(title);
+    let list_clause = if let Some(list_name) = list {
+        let escaped_list = escape_applescript(list_name);
+        format!("set theList to list \"{}\"", escaped_list)
     } else {
-        "const lists = app.lists();".to_string()
+        "set theList to first list".to_string()
     };
 
     let script = format!(
         r#"
-const app = Application("Reminders");
-{}
-let found = false;
-for (let i = 0; i < lists.length; i++) {{
-    let rems;
-    try {{ rems = lists[i].reminders(); }} catch(e) {{ continue; }}
-    for (let j = 0; j < rems.length; j++) {{
-        try {{
-            if (rems[j].name() === "{}") {{
-                app.delete(rems[j]);
-                found = true;
-                break;
-            }}
-        }} catch(e) {{ continue; }}
-    }}
-    if (found) break;
-}}
-if (!found) throw new Error("Reminder not found: {}");
-"deleted"
-"#,
-        list_setup, escaped_title, escaped_title
+        tell application "Reminders"
+            {}
+            set matches to (every reminder of theList whose name is "{}")
+            if (count of matches) is 0 then error "Reminder not found: {}"
+            delete item 1 of matches
+            return "deleted"
+        end tell
+    "#,
+        list_clause, escaped_title, escaped_title
     );
 
-    run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
     Ok(ActionResult::success_with_message(
         "deleted",
@@ -243,15 +211,17 @@ if (!found) throw new Error("Reminder not found: {}");
     ))
 }
 
-/// List all reminder list names via JXA.
+/// List all reminder list names via AppleScript.
 pub async fn lists() -> anyhow::Result<Vec<String>> {
     let script = r#"
-const app = Application("Reminders");
-const names = app.lists.name();
-names.join("\n");
-"#;
+        tell application "Reminders"
+            set listNames to name of every list
+            set AppleScript's text item delimiters to linefeed
+            return listNames as string
+        end tell
+    "#;
 
-    let output = run_jxa_with_timeout(script, std::time::Duration::from_secs(30)).await?;
+    let output = run_osascript_with_timeout(script, std::time::Duration::from_secs(30)).await?;
 
     Ok(output
         .lines()

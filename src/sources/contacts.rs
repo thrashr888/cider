@@ -1,4 +1,4 @@
-use super::util::{escape_jxa, run_jxa, run_jxa_with_timeout, slug, ActionResult};
+use super::util::{escape_jxa, run_command_with_timeout, run_jxa, slug, ActionResult};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -24,132 +24,42 @@ pub struct ContactGroup {
 
 /// List all contacts, optionally filtering by name search.
 pub async fn list(search: Option<&str>) -> anyhow::Result<Vec<Contact>> {
-    if let Some(query) = search {
-        return search_contacts(query).await;
+    let query_filter = search.map(|q| q.to_lowercase());
+    let mut records = query_contact_dbs().await?;
+
+    if let Some(q) = query_filter {
+        records.retain(|c| {
+            c.name.to_lowercase().contains(&q)
+                || c.first_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&q)
+                || c.last_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&q)
+                || c.organization
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&q)
+                || c.email.as_deref().unwrap_or("").to_lowercase().contains(&q)
+                || c.phone.as_deref().unwrap_or("").to_lowercase().contains(&q)
+        });
     }
 
-    let count_str = run_jxa(r#"Application("Contacts").people().length"#).await?;
-    let total: usize = count_str.trim().parse().unwrap_or(0);
-    if total == 0 {
-        return Ok(vec![]);
-    }
-
-    let chunk_size = 200usize;
-    let mut all_lines = Vec::new();
-
-    for start in (0..total).step_by(chunk_size) {
-        let end = (start + chunk_size).min(total);
-
-        let jxa_script = format!(
-            r#"
-const app = Application("Contacts");
-const results = [];
-const people = app.people();
-const end = Math.min({end}, people.length);
-
-for (let i = {start}; i < end; i++) {{
-    const p = people[i];
-    let firstName = "", lastName = "", org = "", email = "", phone = "";
-    try {{ firstName = (p.firstName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    try {{ lastName = (p.lastName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    try {{ org = (p.organization() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    try {{
-        const emails = p.emails();
-        if (emails.length > 0) email = emails[0].value() || "";
-    }} catch(e) {{}}
-    try {{
-        const phones = p.phones();
-        if (phones.length > 0) phone = phones[0].value() || "";
-    }} catch(e) {{}}
-    results.push([p.id(), firstName, lastName, org, email, phone].join("\t"));
-}}
-results.join("\n")
-"#,
-            start = start,
-            end = end,
-        );
-
-        match run_jxa_with_timeout(&jxa_script, std::time::Duration::from_secs(120)).await {
-            Ok(chunk) => {
-                if !chunk.is_empty() {
-                    all_lines.extend(chunk.lines().map(String::from));
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Ok(parse_output(&all_lines))
-}
-
-/// Search contacts by name using `whose` clause.
-async fn search_contacts(query: &str) -> anyhow::Result<Vec<Contact>> {
-    let escaped = escape_jxa(query);
-    let jxa_script = format!(
-        r#"
-const app = Application("Contacts");
-const results = [];
-const q = "{escaped}".toLowerCase();
-const people = app.people();
-for (let i = 0; i < people.length; i++) {{
-    const p = people[i];
-    let firstName = "", lastName = "", org = "", email = "", phone = "";
-    try {{ firstName = (p.firstName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    try {{ lastName = (p.lastName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    try {{ org = (p.organization() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    const fullName = (firstName + " " + lastName).toLowerCase();
-    if (fullName.indexOf(q) === -1 && org.toLowerCase().indexOf(q) === -1) continue;
-    try {{
-        const emails = p.emails();
-        if (emails.length > 0) email = emails[0].value() || "";
-    }} catch(e) {{}}
-    try {{
-        const phones = p.phones();
-        if (phones.length > 0) phone = phones[0].value() || "";
-    }} catch(e) {{}}
-    results.push([p.id(), firstName, lastName, org, email, phone].join("\t"));
-}}
-results.join("\n")
-"#
-    );
-
-    let raw = run_jxa_with_timeout(&jxa_script, std::time::Duration::from_secs(120)).await?;
-    if raw.is_empty() {
-        return Ok(vec![]);
-    }
-    let lines: Vec<String> = raw.lines().map(String::from).collect();
-    Ok(parse_output(&lines))
+    Ok(records)
 }
 
 /// Get a single contact by ID with full details.
 pub async fn get(id: &str) -> anyhow::Result<Contact> {
-    let escaped_id = escape_jxa(id);
-    let jxa_script = format!(
-        r#"
-const app = Application("Contacts");
-const p = app.people.byId("{escaped_id}");
-let firstName = "", lastName = "", org = "", email = "", phone = "";
-try {{ firstName = (p.firstName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-try {{ lastName = (p.lastName() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-try {{ org = (p.organization() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-try {{
-    const emails = p.emails();
-    if (emails.length > 0) email = emails[0].value() || "";
-}} catch(e) {{}}
-try {{
-    const phones = p.phones();
-    if (phones.length > 0) phone = phones[0].value() || "";
-}} catch(e) {{}}
-[p.id(), firstName, lastName, org, email, phone].join("\t")
-"#
-    );
-
-    let raw = run_jxa(&jxa_script).await?;
-    let lines: Vec<String> = raw.lines().map(String::from).collect();
-    let contacts = parse_output(&lines);
-    contacts
+    let needle = slug(id);
+    query_contact_dbs()
+        .await?
         .into_iter()
-        .next()
+        .find(|c| c.id == needle)
         .ok_or_else(|| anyhow::anyhow!("Contact not found: {id}"))
 }
 
@@ -311,6 +221,75 @@ results.join("\n")
         })
         .collect();
     Ok(groups)
+}
+
+async fn query_contact_dbs() -> anyhow::Result<Vec<Contact>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut db_paths = vec![format!(
+        "{home}/Library/Application Support/AddressBook/AddressBook-v22.abcddb"
+    )];
+
+    if let Ok(source_paths) = run_command_with_timeout(
+        "sh",
+        &["-c", "find \"$HOME/Library/Application Support/AddressBook/Sources\" -name 'AddressBook-v22.abcddb' 2>/dev/null | sort"],
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    {
+        db_paths.extend(source_paths.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    }
+
+    db_paths.sort();
+    db_paths.dedup();
+
+    let query = r#"
+SELECT
+    lower(COALESCE(r.ZUNIQUEID, '')),
+    COALESCE(r.ZFIRSTNAME, ''),
+    COALESCE(r.ZLASTNAME, ''),
+    COALESCE(r.ZORGANIZATION, ''),
+    COALESCE((
+        SELECT e.ZADDRESS
+        FROM ZABCDEMAILADDRESS e
+        WHERE e.ZOWNER = r.Z_PK
+        ORDER BY e.ZISPRIMARY DESC, e.ZORDERINGINDEX ASC, e.Z_PK ASC
+        LIMIT 1
+    ), ''),
+    COALESCE((
+        SELECT p.ZFULLNUMBER
+        FROM ZABCDPHONENUMBER p
+        WHERE p.ZOWNER = r.Z_PK
+        ORDER BY p.ZISPRIMARY DESC, p.ZORDERINGINDEX ASC, p.Z_PK ASC
+        LIMIT 1
+    ), '')
+FROM ZABCDRECORD r
+WHERE r.Z_ENT = 22
+  AND (r.ZFIRSTNAME IS NOT NULL OR r.ZLASTNAME IS NOT NULL OR r.ZORGANIZATION IS NOT NULL)
+ORDER BY r.ZLASTNAME, r.ZFIRSTNAME, r.ZORGANIZATION;
+"#;
+
+    let mut all = Vec::new();
+    for db_path in db_paths {
+        if tokio::fs::metadata(&db_path).await.is_err() {
+            continue;
+        }
+        let stdout = match run_command_with_timeout(
+            "sqlite3",
+            &["-separator", "\t", &db_path, query.trim()],
+            std::time::Duration::from_secs(20),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let lines: Vec<String> = stdout.lines().map(String::from).collect();
+        all.extend(parse_output(&lines));
+    }
+
+    all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    all.dedup_by(|a, b| a.id == b.id);
+    Ok(all)
 }
 
 fn parse_output(lines: &[String]) -> Vec<Contact> {

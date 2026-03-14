@@ -1,10 +1,19 @@
 [package]
-name = "cider"
+name = "cider-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Read Apple app data from the command line — Reminders, Notes, Contacts, Messages, Books, Safari Reading List"
+description = "Manage macOS Apple apps from the command line — Reminders, Calendar, Contacts, Notes, Mail, Music, Keychain, Safari, and 30+ more"
 license = "MIT"
 repository = "https://github.com/thrashr888/cider"
+homepage = "https://github.com/thrashr888/cider"
+readme = "README.md"
+keywords = ["macos", "apple", "cli", "automation", "keychain"]
+categories = ["command-line-utilities", "os::macos-apis"]
+rust-version = "1.70"
+
+[[bin]]
+name = "cider"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

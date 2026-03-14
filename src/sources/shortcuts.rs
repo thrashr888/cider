@@ -65,6 +65,39 @@ pub async fn run(name: &str, input: Option<&str>) -> anyhow::Result<ActionResult
     }
 }
 
+pub async fn view(name: &str) -> anyhow::Result<ActionResult> {
+    run_command_with_timeout(
+        "shortcuts",
+        &["view", name],
+        std::time::Duration::from_secs(15),
+    )
+    .await?;
+
+    Ok(ActionResult::success_with_message(
+        "view",
+        &format!("Opened shortcut '{name}' in Shortcuts"),
+    ))
+}
+
+pub async fn sign(input: &str, output: &str, mode: Option<&str>) -> anyhow::Result<ActionResult> {
+    let mut args = vec!["sign"];
+    if let Some(m) = mode {
+        args.push("--mode");
+        args.push(m);
+    }
+    args.push("--input");
+    args.push(input);
+    args.push("--output");
+    args.push(output);
+
+    run_command_with_timeout("shortcuts", &args, std::time::Duration::from_secs(30)).await?;
+
+    Ok(ActionResult::success_with_message(
+        "sign",
+        &format!("Signed shortcut file to '{output}'"),
+    ))
+}
+
 fn parse_output(output: &str) -> Vec<Shortcut> {
     output
         .lines()

@@ -122,7 +122,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cider"
+name = "cider-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",

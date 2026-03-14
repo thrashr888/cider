@@ -38,8 +38,8 @@ pub async fn fetch() -> anyhow::Result<Vec<VoiceMemo>> {
 async fn fetch_from_db(db_path: &str) -> anyhow::Result<Vec<VoiceMemo>> {
     let query = r#"
 SELECT
-    ZUUID,
-    ZENCRYPTEDTITLE,
+    ZUNIQUEID,
+    COALESCE(ZCUSTOMLABEL, ZENCRYPTEDTITLE, ''),
     ZDATE,
     ZDURATION,
     ZPATH

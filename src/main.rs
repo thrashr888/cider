@@ -471,6 +471,24 @@ enum ShortcutsAction {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Open a shortcut in the Shortcuts app
+    View {
+        /// Shortcut name
+        #[arg(long)]
+        name: String,
+    },
+    /// Sign a shortcut file
+    Sign {
+        /// Input shortcut file path
+        #[arg(long)]
+        input: String,
+        /// Output signed shortcut file path
+        #[arg(long)]
+        output: String,
+        /// Signing mode: anyone or people-who-know-me
+        #[arg(long)]
+        mode: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -999,6 +1017,18 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(ShortcutsAction::Run { name, input }) => {
                 let result = sources::shortcuts::run(&name, input.as_deref()).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ShortcutsAction::View { name }) => {
+                let result = sources::shortcuts::view(&name).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ShortcutsAction::Sign {
+                input,
+                output,
+                mode,
+            }) => {
+                let result = sources::shortcuts::sign(&input, &output, mode.as_deref()).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },

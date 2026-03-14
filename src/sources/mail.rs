@@ -1,4 +1,4 @@
-use super::util::{escape_jxa, run_jxa, run_jxa_with_timeout, ActionResult};
+use super::util::{escape_jxa, run_command_with_timeout, run_jxa, ActionResult};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -10,7 +10,7 @@ pub struct MailMessage {
     pub mailbox: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MailMessageDetail {
     pub subject: String,
     pub sender: String,
@@ -27,115 +27,28 @@ pub struct Mailbox {
 }
 
 pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
-    // Use JXA instead of AppleScript — avoids `read` keyword conflicts
-    // and is faster for bulk property access.
-    let script = r#"
-const app = Application("Mail");
-const inbox = app.inbox();
-const msgSpec = inbox.messages;
-const total = msgSpec.length;
-if (total === 0) { ""; } else {
-    const subjects = msgSpec.subject();
-    const senders = msgSpec.sender();
-    const dates = msgSpec.dateReceived();
-    const readStatuses = msgSpec.readStatus();
-
-    const rows = [];
-    for (let i = 0; i < total; i++) {
-        rows.push({
-            subject: subjects[i] || "",
-            sender: senders[i] || "",
-            date: dates[i] || null,
-            isRead: !!readStatuses[i],
-        });
-    }
-
-    rows.sort((a, b) => {
-        const aTime = a.date ? a.date.getTime() : 0;
-        const bTime = b.date ? b.date.getTime() : 0;
-        return bTime - aTime;
-    });
-
-    rows.slice(0, 50).map((row) => {
-        const subj = row.subject.replace(/[\t\n\r]/g, " ");
-        const sndr = row.sender.replace(/[\t\n\r]/g, " ");
-        const dt = row.date ? row.date.toISOString() : "";
-        const rd = row.isRead ? "1" : "0";
-        return [subj, sndr, dt, rd].join("\t");
-    }).join("\n");
-}
-"#;
-
-    let output = run_jxa_with_timeout(script, std::time::Duration::from_secs(60)).await?;
-    if output.is_empty() {
+    let records = query_inbox_messages(50).await?;
+    if records.is_empty() {
         anyhow::bail!("Mail inbox is empty or Mail.app is not configured");
     }
-    Ok(parse_output(&output))
+    Ok(records
+        .into_iter()
+        .map(|m| MailMessage {
+            subject: m.subject,
+            sender: m.sender,
+            date_received: m.date_received,
+            is_read: m.is_read,
+            mailbox: m.mailbox,
+        })
+        .collect())
 }
 
 pub async fn get(idx: usize) -> anyhow::Result<MailMessageDetail> {
-    let script = format!(
-        r#"
-const app = Application("Mail");
-const inbox = app.inbox();
-const msgs = inbox.messages;
-const total = msgs.length;
-const i = {} - 1;
-if (i < 0 || i >= total) {{
-    "ERROR: Message index out of range";
-}} else {{
-    const subjects = msgs.subject();
-    const senders = msgs.sender();
-    const dates = msgs.dateReceived();
-    const readStatuses = msgs.readStatus();
-    const rows = [];
-    for (let j = 0; j < total; j++) {{
-        rows.push({{
-            msg: msgs[j],
-            subject: subjects[j] || "",
-            sender: senders[j] || "",
-            date: dates[j] || null,
-            isRead: !!readStatuses[j],
-        }});
-    }}
-    rows.sort((a, b) => {{
-        const aTime = a.date ? a.date.getTime() : 0;
-        const bTime = b.date ? b.date.getTime() : 0;
-        return bTime - aTime;
-    }});
-    const m = rows[i].msg;
-    const subj = (rows[i].subject || "").replace(/[\t\n\r]/g, " ");
-    const sndr = (rows[i].sender || "").replace(/[\t\n\r]/g, " ");
-    const dt = rows[i].date ? rows[i].date.toISOString() : "";
-    const rd = rows[i].isRead ? "1" : "0";
-    let body = "";
-    try {{ body = (m.content() || "").substring(0, 500).replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-    [subj, sndr, dt, rd, body].join("\t");
-}}
-"#,
-        idx
-    );
-
-    let output = run_jxa(&script).await?;
-    if output.starts_with("ERROR:") {
-        anyhow::bail!("{}", output);
+    let records = query_inbox_messages(50).await?;
+    if idx == 0 || idx > records.len() {
+        anyhow::bail!("Message index out of range");
     }
-
-    let parts: Vec<&str> = output.split('\t').collect();
-    if parts.len() < 4 {
-        anyhow::bail!("Unexpected output from Mail.app");
-    }
-
-    let body = parts.get(4).map(|s| s.trim().to_string());
-
-    Ok(MailMessageDetail {
-        subject: parts[0].trim().to_string(),
-        sender: parts[1].trim().to_string(),
-        date_received: parts[2].trim().to_string(),
-        is_read: parts[3].trim() == "1",
-        mailbox: "INBOX".to_string(),
-        body_preview: body.filter(|s| !s.is_empty()),
-    })
+    Ok(records[idx - 1].clone())
 }
 
 pub async fn read(idx: usize) -> anyhow::Result<ActionResult> {
@@ -244,13 +157,17 @@ if (i < 0 || i >= total) {{
 }
 
 pub async fn mailboxes() -> anyhow::Result<Vec<Mailbox>> {
-    let script = r#"
-const app = Application("Mail");
-const names = app.mailboxes.name();
-names.join("\n");
+    let db_path = mail_db_path()?;
+    let query = r#"
+SELECT url FROM mailboxes ORDER BY ROWID ASC;
 "#;
+    let output = run_command_with_timeout(
+        "sqlite3",
+        &[&db_path, query.trim()],
+        std::time::Duration::from_secs(10),
+    )
+    .await?;
 
-    let output = run_jxa(script).await?;
     Ok(output
         .lines()
         .map(|l| l.trim())
@@ -286,50 +203,68 @@ msg.send();
     ))
 }
 
-fn parse_output(output: &str) -> Vec<MailMessage> {
+fn mail_db_path() -> anyhow::Result<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = format!("{home}/Library/Mail/V10/MailData/Envelope Index");
+    if std::path::Path::new(&path).exists() {
+        Ok(path)
+    } else {
+        anyhow::bail!("Mail envelope index not found")
+    }
+}
+
+async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageDetail>> {
+    let db_path = mail_db_path()?;
+    let query = format!(
+        r#"
+SELECT
+    COALESCE(s.subject, ''),
+    COALESCE(a.address, ''),
+    datetime(m.date_received, 'unixepoch'),
+    m.read,
+    COALESCE(mb.url, 'INBOX'),
+    COALESCE(sm.summary, '')
+FROM messages m
+LEFT JOIN addresses a ON m.sender = a.ROWID
+LEFT JOIN subjects s ON m.subject = s.ROWID
+LEFT JOIN summaries sm ON m.summary = sm.ROWID
+LEFT JOIN mailboxes mb ON m.mailbox = mb.ROWID
+WHERE m.mailbox IN (SELECT ROWID FROM mailboxes WHERE url LIKE '%/INBOX')
+  AND m.deleted = 0
+ORDER BY m.date_received DESC
+LIMIT {limit};
+"#
+    );
+    let output = run_command_with_timeout(
+        "sqlite3",
+        &["-separator", "\t", &db_path, query.trim()],
+        std::time::Duration::from_secs(20),
+    )
+    .await?;
+
     let mut records = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 4 {
+        if parts.len() < 5 {
             continue;
         }
-        let subject = parts[0].trim();
-        if subject.is_empty() {
-            continue;
-        }
-        let sender = parts[1].trim();
-        let date_received = parts[2].trim();
+        let subject = parts[0].trim().to_string();
+        let sender = parts[1].trim().to_string();
+        let date_received = parts[2].trim().to_string();
         let is_read = parts[3].trim() == "1";
-
-        records.push(MailMessage {
-            subject: subject.to_string(),
-            sender: sender.to_string(),
-            date_received: date_received.to_string(),
+        let mailbox = parts[4].trim().to_string();
+        let body_preview = parts
+            .get(5)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        records.push(MailMessageDetail {
+            subject,
+            sender,
+            date_received,
             is_read,
-            mailbox: "INBOX".to_string(),
+            mailbox,
+            body_preview,
         });
     }
-    records
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_output() {
-        let output = "Hello World\tjohn@example.com\t2026-03-14T10:30:00.000Z\t1\n\
-                       Meeting invite\tboss@work.com\t2026-03-13T15:00:00.000Z\t0\n";
-        let records = parse_output(output);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].subject, "Hello World");
-        assert_eq!(records[0].sender, "john@example.com");
-        assert!(records[0].is_read);
-        assert!(!records[1].is_read);
-    }
-
-    #[test]
-    fn test_parse_output_empty() {
-        assert!(parse_output("").is_empty());
-    }
+    Ok(records)
 }
