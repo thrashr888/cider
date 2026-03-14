@@ -18,17 +18,64 @@ pub struct CalendarEvent {
 
 pub async fn fetch() -> anyhow::Result<Vec<CalendarEvent>> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let db_path = format!("{home}/Library/Calendars/Calendar Cache");
 
-    if tokio::fs::metadata(&db_path).await.is_ok() {
-        return fetch_from_sqlite(&db_path).await;
+    // Try Group Container database first (modern macOS)
+    let group_db =
+        format!("{home}/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb");
+    if tokio::fs::metadata(&group_db).await.is_ok() {
+        return fetch_from_group_db(&group_db).await;
     }
 
-    // Fall back to JXA — slower but works when Calendar Cache doesn't exist
+    // Try legacy Calendar Cache
+    let cache_db = format!("{home}/Library/Calendars/Calendar Cache");
+    if tokio::fs::metadata(&cache_db).await.is_ok() {
+        return fetch_from_cache_db(&cache_db).await;
+    }
+
+    // Fall back to JXA — slower but works when no local database exists
     fetch_from_jxa().await
 }
 
-async fn fetch_from_sqlite(db_path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
+/// Modern macOS: ~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb
+async fn fetch_from_group_db(db_path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::days(7);
+    let end = now + chrono::Duration::days(30);
+    let start_cd = start.timestamp() - 978_307_200;
+    let end_cd = end.timestamp() - 978_307_200;
+
+    let query = format!(
+        r#"
+SELECT
+    COALESCE(ci.summary, ''),
+    COALESCE(c.title, ''),
+    COALESCE(l.title, ''),
+    datetime(ci.start_date + 978307200, 'unixepoch'),
+    datetime(ci.end_date + 978307200, 'unixepoch'),
+    COALESCE(ci.all_day, 0),
+    COALESCE(SUBSTR(ci.description, 1, 500), '')
+FROM CalendarItem ci
+LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
+LEFT JOIN Location l ON ci.location_id = l.ROWID
+WHERE ci.start_date >= {start_cd}
+  AND ci.start_date <= {end_cd}
+ORDER BY ci.start_date ASC
+LIMIT 500;
+"#
+    );
+
+    let stdout = run_command_with_timeout(
+        "sqlite3",
+        &["-separator", "\t", db_path, query.trim()],
+        std::time::Duration::from_secs(10),
+    )
+    .await?;
+
+    Ok(parse_output(&stdout))
+}
+
+/// Legacy macOS: ~/Library/Calendars/Calendar Cache (Core Data format)
+async fn fetch_from_cache_db(db_path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::days(7);
     let end = now + chrono::Duration::days(30);
