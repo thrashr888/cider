@@ -105,59 +105,34 @@ pub async fn get(id: &str) -> anyhow::Result<Note> {
     let escaped_id = escape_applescript(id);
     let script = format!(
         r#"
-        set output to ""
         tell application "Notes"
-            set n to note id "{escaped_id}"
-            set nId to id of n
-            set nName to name of n
-            set nMod to modification date of n
-            set nFolder to name of container of n
+            set nId to id of note id "{escaped_id}"
+            set nName to name of note id "{escaped_id}"
+            set nMod to modification date of note id "{escaped_id}"
+            set nFolder to name of container of note id "{escaped_id}"
             set nBody to ""
             try
-                set nBody to plaintext of n
+                set nBody to plaintext of note id "{escaped_id}"
             end try
-
-            set nName to my escapeJSON(nName)
-            set nFolder to my escapeJSON(nFolder)
-            set nBody to my escapeJSON(nBody)
-
-            set output to "{{"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & nFolder & "\", \"body\": \"" & nBody & "\"}}"
+            return nName & tab & (nMod as string) & tab & nId & tab & nFolder & tab & nBody
         end tell
-        return output
-
-        on escapeJSON(txt)
-            set txt to my replaceText(txt, "\\", "\\\\")
-            set txt to my replaceText(txt, "\"", "\\\"")
-            set txt to my replaceText(txt, return, "\\n")
-            set txt to my replaceText(txt, linefeed, "\\n")
-            set txt to my replaceText(txt, tab, "\\t")
-            return txt
-        end escapeJSON
-
-        on replaceText(theText, searchString, replacementString)
-            set AppleScript's text item delimiters to searchString
-            set theTextItems to every text item of theText
-            set AppleScript's text item delimiters to replacementString
-            set theText to theTextItems as string
-            set AppleScript's text item delimiters to ""
-            return theText
-        end replaceText
     "#
     );
 
     let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
-    let item: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("Failed to parse note: {e}"))?;
+    let parts: Vec<&str> = raw.split('\t').collect();
+    if parts.is_empty() {
+        anyhow::bail!("Note not found: {id}");
+    }
 
-    let note_id = item["id"].as_str().unwrap_or("").trim();
-    let name = item["name"].as_str().unwrap_or("").trim();
-    let mod_str = item["modified"].as_str().unwrap_or("").trim();
-    let folder = item["folder"].as_str().unwrap_or("").trim();
-    let body_text = item["body"].as_str().unwrap_or("").trim();
-
+    let name = parts.first().copied().unwrap_or("").trim();
     if name.is_empty() {
         anyhow::bail!("Note not found: {id}");
     }
+    let mod_str = parts.get(1).copied().unwrap_or("").trim();
+    let note_id = parts.get(2).copied().unwrap_or("").trim();
+    let folder = parts.get(3).copied().unwrap_or("").trim();
+    let body_text = parts.get(4).copied().unwrap_or("").trim();
 
     let modified = if mod_str.is_empty() {
         None

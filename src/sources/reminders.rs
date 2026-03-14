@@ -114,7 +114,7 @@ pub async fn create(
     notes: Option<&str>,
 ) -> anyhow::Result<ActionResult> {
     let escaped_title = escape_jxa(title);
-    let list_name = list.unwrap_or("Reminders");
+    let list_name = list.unwrap_or("");
     let escaped_list = escape_jxa(list_name);
 
     let mut props = format!("name: \"{}\"", escaped_title);
@@ -136,12 +136,19 @@ pub async fn create(
     let script = format!(
         r#"
 const app = Application("Reminders");
-const list = app.lists.byName("{}");
+let list;
+if ("{}") {{
+    list = app.lists.byName("{}");
+}} else {{
+    const lists = app.lists();
+    if (!lists || lists.length === 0) throw new Error("No reminder lists available");
+    list = lists[0];
+}}
 const r = app.Reminder({{ {} }});
 list.reminders.push(r);
 r.name();
 "#,
-        escaped_list, props
+        escaped_list, escaped_list, props
     );
 
     let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
@@ -151,13 +158,19 @@ r.name();
 }
 
 /// Mark a reminder as complete by title via JXA.
-pub async fn complete(title: &str) -> anyhow::Result<ActionResult> {
+pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
     let escaped_title = escape_jxa(title);
+    let list_setup = if let Some(list_name) = list {
+        let escaped_list = escape_jxa(list_name);
+        format!("const lists = [app.lists.byName(\"{}\")];", escaped_list)
+    } else {
+        "const lists = app.lists();".to_string()
+    };
 
     let script = format!(
         r#"
 const app = Application("Reminders");
-const lists = app.lists();
+{}
 let found = false;
 for (let i = 0; i < lists.length; i++) {{
     let rems;
@@ -176,10 +189,10 @@ for (let i = 0; i < lists.length; i++) {{
 if (!found) throw new Error("Reminder not found: {}");
 "completed"
 "#,
-        escaped_title, escaped_title
+        list_setup, escaped_title, escaped_title
     );
 
-    run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
 
     Ok(ActionResult::success_with_message(
         "completed",
@@ -188,13 +201,19 @@ if (!found) throw new Error("Reminder not found: {}");
 }
 
 /// Delete a reminder by title via JXA.
-pub async fn delete(title: &str) -> anyhow::Result<ActionResult> {
+pub async fn delete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
     let escaped_title = escape_jxa(title);
+    let list_setup = if let Some(list_name) = list {
+        let escaped_list = escape_jxa(list_name);
+        format!("const lists = [app.lists.byName(\"{}\")];", escaped_list)
+    } else {
+        "const lists = app.lists();".to_string()
+    };
 
     let script = format!(
         r#"
 const app = Application("Reminders");
-const lists = app.lists();
+{}
 let found = false;
 for (let i = 0; i < lists.length; i++) {{
     let rems;
@@ -213,10 +232,10 @@ for (let i = 0; i < lists.length; i++) {{
 if (!found) throw new Error("Reminder not found: {}");
 "deleted"
 "#,
-        escaped_title, escaped_title
+        list_setup, escaped_title, escaped_title
     );
 
-    run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
 
     Ok(ActionResult::success_with_message(
         "deleted",

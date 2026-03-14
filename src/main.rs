@@ -32,6 +32,8 @@ enum Commands {
     Apps,
     /// List Automator workflows
     Automator,
+    /// List paired Bluetooth devices
+    Bluetooth,
     /// Fetch books from Apple Books
     Books,
     /// Interact with Calendar events
@@ -52,6 +54,8 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ContactsAction>,
     },
+    /// List mounted disks and volumes (Disk Utility)
+    Disks,
     /// Fetch devices from Find My
     #[command(name = "find-my")]
     FindMy,
@@ -61,6 +65,11 @@ enum Commands {
     Home,
     /// Fetch journal entries
     Journal,
+    /// Manage Keychain passwords
+    Keychain {
+        #[command(subcommand)]
+        action: Option<KeychainAction>,
+    },
     /// Interact with Apple Mail
     Mail {
         #[command(subcommand)]
@@ -90,9 +99,11 @@ enum Commands {
     PhotoBooth,
     /// Fetch recent photos metadata from Photos
     Photos,
-    /// Fetch items from Safari Reading List
-    #[command(name = "reading-list")]
-    ReadingList,
+    /// Safari bookmarks, history, tabs, and reading list
+    Safari {
+        #[command(subcommand)]
+        action: Option<SafariAction>,
+    },
     /// Interact with Apple Reminders
     Reminders {
         #[command(subcommand)]
@@ -116,6 +127,15 @@ enum Commands {
     },
     /// Fetch sticky notes from Stickies
     Stickies,
+    /// Search files with Spotlight
+    Spotlight {
+        /// Search query
+        #[arg(long)]
+        query: String,
+        /// Limit search to directory
+        #[arg(long)]
+        directory: Option<String>,
+    },
     /// Fetch stock watchlist from Stocks
     Stocks,
     /// Show and manage system information
@@ -135,6 +155,12 @@ enum Commands {
     VoiceMemos,
     /// Fetch weather data
     Weather,
+    /// Wi-Fi status and known networks
+    #[command(name = "wifi")]
+    Wifi {
+        #[command(subcommand)]
+        action: Option<WifiAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -183,6 +209,9 @@ enum CalendarAction {
         /// Date of the event (ISO 8601 date)
         #[arg(long)]
         date: String,
+        /// Optional calendar name to narrow the search
+        #[arg(long)]
+        calendar: Option<String>,
     },
     /// List all calendar names
     Calendars,
@@ -324,12 +353,18 @@ enum RemindersAction {
         /// Reminder title to complete
         #[arg(long)]
         title: String,
+        /// List to search in
+        #[arg(long)]
+        list: Option<String>,
     },
     /// Delete a reminder
     Delete {
         /// Reminder title to delete
         #[arg(long)]
         title: String,
+        /// List to search in
+        #[arg(long)]
+        list: Option<String>,
     },
     /// List all reminder lists
     Lists,
@@ -503,12 +538,102 @@ enum SystemInfoAction {
 enum TimeMachineAction {
     /// Show Time Machine status
     Status,
-    /// List backup paths (default)
+    /// List backup paths
     List,
     /// Start a backup
     Start,
     /// Stop a running backup
     Stop,
+}
+
+#[derive(Subcommand)]
+enum KeychainAction {
+    /// List keychain items (metadata only, no passwords)
+    List {
+        /// Filter by kind: generic-password, internet-password, certificate, key
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Search keychain items by service, server, or account name
+    Search {
+        /// Search query
+        #[arg(long)]
+        query: String,
+        /// Filter by kind
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Get a password for a generic (app) password. Triggers macOS security dialog.
+    #[command(name = "get-password")]
+    GetPassword {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Get a password for an internet password
+    #[command(name = "get-internet-password")]
+    GetInternetPassword {
+        /// Server name
+        #[arg(long)]
+        server: String,
+        /// Account name
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Add a generic password to the keychain
+    Add {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name
+        #[arg(long)]
+        account: String,
+        /// Password value
+        #[arg(long)]
+        password: String,
+        /// Label
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Delete a generic password from the keychain
+    Delete {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// List all keychains
+    Keychains,
+}
+
+#[derive(Subcommand)]
+enum SafariAction {
+    /// List Safari bookmarks (default)
+    Bookmarks,
+    /// List browsing history
+    History {
+        /// Max results
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
+    /// List currently open tabs
+    Tabs,
+    /// List Safari Reading List items
+    #[command(name = "reading-list")]
+    ReadingList,
+}
+
+#[derive(Subcommand)]
+enum WifiAction {
+    /// Show current Wi-Fi connection status (default)
+    Status,
+    /// List known/preferred Wi-Fi networks
+    Networks,
 }
 
 fn print_output(value: &serde_json::Value, human: bool) -> anyhow::Result<()> {
@@ -536,6 +661,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::ActivityMonitor => run_source!(sources::activity_monitor::fetch(), cli.pretty),
         Commands::Apps => run_source!(sources::apps::fetch(), cli.pretty),
         Commands::Automator => run_source!(sources::automator::fetch(), cli.pretty),
+        Commands::Bluetooth => run_source!(sources::bluetooth::list(), cli.pretty),
         Commands::Books => run_source!(sources::books::fetch(), cli.pretty),
         Commands::Calendar { action } => match action {
             None => {
@@ -572,8 +698,12 @@ async fn run() -> anyhow::Result<()> {
                 .await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
-            Some(CalendarAction::Delete { title, date }) => {
-                let result = sources::calendar::delete(&title, &date).await?;
+            Some(CalendarAction::Delete {
+                title,
+                date,
+                calendar,
+            }) => {
+                let result = sources::calendar::delete(&title, &date, calendar.as_deref()).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(CalendarAction::Calendars) => {
@@ -637,10 +767,51 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::contacts::groups(), cli.pretty)
             }
         },
+        Commands::Disks => run_source!(sources::disks::list(), cli.pretty),
         Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty),
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty),
         Commands::Home => run_source!(sources::home::fetch(), cli.pretty),
         Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty),
+        Commands::Keychain { action } => match action {
+            None | Some(KeychainAction::List { kind: None }) => {
+                run_source!(sources::keychain::list(None), cli.pretty)
+            }
+            Some(KeychainAction::List { kind }) => {
+                run_source!(sources::keychain::list(kind.as_deref()), cli.pretty)
+            }
+            Some(KeychainAction::Search { query, kind }) => {
+                run_source!(
+                    sources::keychain::search(&query, kind.as_deref()),
+                    cli.pretty
+                )
+            }
+            Some(KeychainAction::GetPassword { service, account }) => {
+                let pw = sources::keychain::get_password(&service, account.as_deref()).await?;
+                print_output(&serde_json::to_value(&pw)?, cli.pretty)?;
+            }
+            Some(KeychainAction::GetInternetPassword { server, account }) => {
+                let pw =
+                    sources::keychain::get_internet_password(&server, account.as_deref()).await?;
+                print_output(&serde_json::to_value(&pw)?, cli.pretty)?;
+            }
+            Some(KeychainAction::Add {
+                service,
+                account,
+                password,
+                label,
+            }) => {
+                let result =
+                    sources::keychain::add(&service, &account, &password, label.as_deref()).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(KeychainAction::Delete { service, account }) => {
+                let result = sources::keychain::delete(&service, account.as_deref()).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(KeychainAction::Keychains) => {
+                run_source!(sources::keychain::keychains(), cli.pretty)
+            }
+        },
         Commands::Mail { action } => match action {
             None | Some(MailAction::List) => {
                 run_source!(sources::mail::list(), cli.pretty)
@@ -745,7 +916,20 @@ async fn run() -> anyhow::Result<()> {
         },
         Commands::PhotoBooth => run_source!(sources::photo_booth::fetch(), cli.pretty),
         Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty),
-        Commands::ReadingList => run_source!(sources::reading_list::fetch(), cli.pretty),
+        Commands::Safari { action } => match action {
+            None | Some(SafariAction::Bookmarks) => {
+                run_source!(sources::safari::bookmarks(), cli.pretty)
+            }
+            Some(SafariAction::History { limit }) => {
+                run_source!(sources::safari::history(Some(limit)), cli.pretty)
+            }
+            Some(SafariAction::Tabs) => {
+                run_source!(sources::safari::tabs(), cli.pretty)
+            }
+            Some(SafariAction::ReadingList) => {
+                run_source!(sources::reading_list::fetch(), cli.pretty)
+            }
+        },
         Commands::Reminders { action } => match action {
             None => {
                 run_source!(sources::reminders::list(None), cli.pretty)
@@ -770,12 +954,12 @@ async fn run() -> anyhow::Result<()> {
                 .await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
-            Some(RemindersAction::Complete { title }) => {
-                let result = sources::reminders::complete(&title).await?;
+            Some(RemindersAction::Complete { title, list }) => {
+                let result = sources::reminders::complete(&title, list.as_deref()).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
-            Some(RemindersAction::Delete { title }) => {
-                let result = sources::reminders::delete(&title).await?;
+            Some(RemindersAction::Delete { title, list }) => {
+                let result = sources::reminders::delete(&title, list.as_deref()).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(RemindersAction::Lists) => {
@@ -818,6 +1002,12 @@ async fn run() -> anyhow::Result<()> {
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
+        Commands::Spotlight { query, directory } => {
+            run_source!(
+                sources::spotlight::search(&query, directory.as_deref()),
+                cli.pretty
+            )
+        }
         Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty),
         Commands::Stocks => run_source!(sources::stocks::fetch(), cli.pretty),
         Commands::SystemInfo { action } => match action {
@@ -855,6 +1045,14 @@ async fn run() -> anyhow::Result<()> {
         },
         Commands::VoiceMemos => run_source!(sources::voice_memos::fetch(), cli.pretty),
         Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty),
+        Commands::Wifi { action } => match action {
+            None | Some(WifiAction::Status) => {
+                run_source!(sources::wifi::status(), cli.pretty)
+            }
+            Some(WifiAction::Networks) => {
+                run_source!(sources::wifi::networks(), cli.pretty)
+            }
+        },
     }
 
     Ok(())

@@ -102,9 +102,22 @@ ev.summary();
 }
 
 /// Delete a calendar event by title and date via JXA.
-pub async fn delete(title: &str, date: &str) -> anyhow::Result<ActionResult> {
+pub async fn delete(
+    title: &str,
+    date: &str,
+    calendar: Option<&str>,
+) -> anyhow::Result<ActionResult> {
     let escaped_title = escape_jxa(title);
     let escaped_date = escape_jxa(date);
+    let calendar_setup = if let Some(calendar_name) = calendar {
+        let escaped_calendar = escape_jxa(calendar_name);
+        format!(
+            "const cals = [app.calendars.byName(\"{}\")];",
+            escaped_calendar
+        )
+    } else {
+        "const cals = app.calendars();".to_string()
+    };
 
     let script = format!(
         r#"
@@ -112,7 +125,7 @@ const app = Application("Calendar");
 const targetDate = new Date("{}");
 const dayStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
 const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
-const cals = app.calendars();
+{}
 let found = false;
 for (let i = 0; i < cals.length; i++) {{
     let events;
@@ -133,10 +146,10 @@ for (let i = 0; i < cals.length; i++) {{
 if (!found) throw new Error("Event not found: {} on {}");
 "deleted"
 "#,
-        escaped_date, escaped_title, escaped_title, escaped_date
+        escaped_date, calendar_setup, escaped_title, escaped_title, escaped_date
     );
 
-    run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
 
     Ok(ActionResult::success_with_message(
         "deleted",
