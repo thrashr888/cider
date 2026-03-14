@@ -713,7 +713,15 @@ enum WifiAction {
     Networks,
 }
 
-fn print_output(value: &serde_json::Value, human: bool) -> anyhow::Result<()> {
+fn print_output(value: &serde_json::Value, human: bool, envelope: bool) -> anyhow::Result<()> {
+    let wrapped;
+    let value = if envelope {
+        wrapped = serde_json::json!({"ok": true, "data": value});
+        &wrapped
+    } else {
+        value
+    };
+
     let mut out = io::stdout().lock();
     if human {
         pretty::render(&mut out, value)
@@ -721,6 +729,15 @@ fn print_output(value: &serde_json::Value, human: bool) -> anyhow::Result<()> {
         serde_json::to_writer(&mut out, value)?;
         writeln!(out)?;
         Ok(())
+    }
+}
+
+fn paginate_vec<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
+    let offset = offset.unwrap_or(0);
+    let iter = items.into_iter().skip(offset);
+    match limit {
+        Some(limit) => iter.take(limit).collect(),
+        None => iter.collect(),
     }
 }
 
@@ -733,35 +750,67 @@ struct DryRunResult {
     message: Option<String>,
 }
 
-fn print_dry_run(action: &str, message: impl Into<String>, human: bool) -> anyhow::Result<()> {
+fn print_dry_run(
+    action: &str,
+    message: impl Into<String>,
+    human: bool,
+    envelope: bool,
+) -> anyhow::Result<()> {
     let result = DryRunResult {
         ok: true,
         dry_run: true,
         action: action.to_string(),
         message: Some(message.into()),
     };
-    print_output(&serde_json::to_value(&result)?, human)
+    print_output(&serde_json::to_value(&result)?, human, envelope)
 }
 
 macro_rules! run_source {
-    ($source:expr, $pretty:expr) => {{
+    ($source:expr, $pretty:expr, $envelope:expr) => {{
         let records = $source.await?;
-        print_output(&serde_json::to_value(&records)?, $pretty)?;
+        print_output(&serde_json::to_value(&records)?, $pretty, $envelope)?;
     }};
+}
+
+fn build_schema(source: Option<&str>) -> serde_json::Value {
+    let commands = vec![
+        serde_json::json!({"source":"schema","supports_dry_run":false,"capabilities":["schema"]}),
+        serde_json::json!({"source":"contacts","supports_dry_run":true,"list_args":["search","offset","limit"],"stable_ids":true}),
+        serde_json::json!({"source":"mail","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":true,"friendly_mailboxes":true}),
+        serde_json::json!({"source":"messages","supports_dry_run":true,"list_args":["days","offset","limit"],"stable_ids":true}),
+        serde_json::json!({"source":"notes","supports_dry_run":true,"list_args":["folder","offset","limit"],"stable_ids":true}),
+        serde_json::json!({"source":"reminders","supports_dry_run":true,"list_args":["list","offset","limit"],"stable_ids":false}),
+        serde_json::json!({"source":"shortcuts","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
+        serde_json::json!({"source":"screenshots","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
+    ];
+
+    match source {
+        Some(source) => commands
+            .into_iter()
+            .find(|item| item.get("source").and_then(|s| s.as_str()) == Some(source))
+            .unwrap_or_else(|| serde_json::json!({"source":source,"error":"unknown_source"})),
+        None => serde_json::json!({"commands":commands}),
+    }
 }
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::ActivityMonitor => run_source!(sources::activity_monitor::fetch(), cli.pretty),
-        Commands::Apps => run_source!(sources::apps::fetch(), cli.pretty),
-        Commands::Automator => run_source!(sources::automator::fetch(), cli.pretty),
-        Commands::Bluetooth => run_source!(sources::bluetooth::list(), cli.pretty),
-        Commands::Books => run_source!(sources::books::fetch(), cli.pretty),
+        Commands::ActivityMonitor => {
+            run_source!(sources::activity_monitor::fetch(), cli.pretty, cli.envelope)
+        }
+        Commands::Apps => run_source!(sources::apps::fetch(), cli.pretty, cli.envelope),
+        Commands::Automator => run_source!(sources::automator::fetch(), cli.pretty, cli.envelope),
+        Commands::Bluetooth => run_source!(sources::bluetooth::list(), cli.pretty, cli.envelope),
+        Commands::Books => run_source!(sources::books::fetch(), cli.pretty, cli.envelope),
         Commands::Calendar { action } => match action {
             None => {
-                run_source!(sources::calendar::list(None, None, None), cli.pretty)
+                run_source!(
+                    sources::calendar::list(None, None, None),
+                    cli.pretty,
+                    cli.envelope
+                )
             }
             Some(CalendarAction::List {
                 days_back,
@@ -770,7 +819,8 @@ async fn run() -> anyhow::Result<()> {
             }) => {
                 run_source!(
                     sources::calendar::list(days_back, days_ahead, calendar.as_deref()),
-                    cli.pretty
+                    cli.pretty,
+                    cli.envelope
                 )
             }
             Some(CalendarAction::Create {
@@ -787,6 +837,7 @@ async fn run() -> anyhow::Result<()> {
                         "calendar.create",
                         format!("Would create event '{title}' starting {start} ending {end}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::calendar::create(
@@ -799,7 +850,7 @@ async fn run() -> anyhow::Result<()> {
                         all_day,
                     )
                     .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(CalendarAction::Delete {
@@ -812,31 +863,45 @@ async fn run() -> anyhow::Result<()> {
                         "calendar.delete",
                         format!("Would delete event '{title}' on {date}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result =
                         sources::calendar::delete(&title, &date, calendar.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(CalendarAction::Calendars) => {
-                run_source!(sources::calendar::calendars(), cli.pretty)
+                run_source!(sources::calendar::calendars(), cli.pretty, cli.envelope)
             }
         },
-        Commands::Clock => run_source!(sources::clock::fetch(), cli.pretty),
+        Commands::Clock => run_source!(sources::clock::fetch(), cli.pretty, cli.envelope),
         Commands::Console { minutes } => {
-            run_source!(sources::console_logs::fetch(minutes), cli.pretty)
+            run_source!(
+                sources::console_logs::fetch(minutes),
+                cli.pretty,
+                cli.envelope
+            )
         }
         Commands::Contacts { action } => match action {
             None => {
-                run_source!(sources::contacts::list(None), cli.pretty)
+                run_source!(sources::contacts::list(None), cli.pretty, cli.envelope)
             }
-            Some(ContactsAction::List { search }) => {
-                run_source!(sources::contacts::list(search.as_deref()), cli.pretty)
+            Some(ContactsAction::List {
+                search,
+                offset,
+                limit,
+            }) => {
+                let records = paginate_vec(
+                    sources::contacts::list(search.as_deref()).await?,
+                    offset,
+                    limit,
+                );
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(ContactsAction::Get { id }) => {
                 let result = sources::contacts::get(&id).await?;
-                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(ContactsAction::Create {
                 first,
@@ -850,6 +915,7 @@ async fn run() -> anyhow::Result<()> {
                         "contacts.create",
                         format!("Would create contact '{} {}'", first, last),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::contacts::create(
@@ -860,7 +926,7 @@ async fn run() -> anyhow::Result<()> {
                         org.as_deref(),
                     )
                     .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ContactsAction::Update {
@@ -875,6 +941,7 @@ async fn run() -> anyhow::Result<()> {
                         "contacts.update",
                         format!("Would update contact '{id}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::contacts::update(
@@ -885,7 +952,7 @@ async fn run() -> anyhow::Result<()> {
                         phone.as_deref(),
                     )
                     .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ContactsAction::Delete { id }) => {
@@ -894,42 +961,48 @@ async fn run() -> anyhow::Result<()> {
                         "contacts.delete",
                         format!("Would delete contact '{id}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::contacts::delete(&id).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ContactsAction::Groups) => {
-                run_source!(sources::contacts::groups(), cli.pretty)
+                run_source!(sources::contacts::groups(), cli.pretty, cli.envelope)
             }
         },
-        Commands::Disks => run_source!(sources::disks::list(), cli.pretty),
-        Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty),
-        Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty),
-        Commands::Home => run_source!(sources::home::fetch(), cli.pretty),
-        Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty),
+        Commands::Disks => run_source!(sources::disks::list(), cli.pretty, cli.envelope),
+        Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty, cli.envelope),
+        Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty, cli.envelope),
+        Commands::Home => run_source!(sources::home::fetch(), cli.pretty, cli.envelope),
+        Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty, cli.envelope),
         Commands::Keychain { action } => match action {
             None | Some(KeychainAction::List { kind: None }) => {
-                run_source!(sources::keychain::list(None), cli.pretty)
+                run_source!(sources::keychain::list(None), cli.pretty, cli.envelope)
             }
             Some(KeychainAction::List { kind }) => {
-                run_source!(sources::keychain::list(kind.as_deref()), cli.pretty)
+                run_source!(
+                    sources::keychain::list(kind.as_deref()),
+                    cli.pretty,
+                    cli.envelope
+                )
             }
             Some(KeychainAction::Search { query, kind }) => {
                 run_source!(
                     sources::keychain::search(&query, kind.as_deref()),
-                    cli.pretty
+                    cli.pretty,
+                    cli.envelope
                 )
             }
             Some(KeychainAction::GetPassword { service, account }) => {
                 let pw = sources::keychain::get_password(&service, account.as_deref()).await?;
-                print_output(&serde_json::to_value(&pw)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&pw)?, cli.pretty, cli.envelope)?;
             }
             Some(KeychainAction::GetInternetPassword { server, account }) => {
                 let pw =
                     sources::keychain::get_internet_password(&server, account.as_deref()).await?;
-                print_output(&serde_json::to_value(&pw)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&pw)?, cli.pretty, cli.envelope)?;
             }
             Some(KeychainAction::Add {
                 service,
@@ -942,12 +1015,13 @@ async fn run() -> anyhow::Result<()> {
                         "keychain.add",
                         format!("Would add keychain password for {service}/{account}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result =
                         sources::keychain::add(&service, &account, &password, label.as_deref())
                             .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(KeychainAction::Delete { service, account }) => {
@@ -956,23 +1030,29 @@ async fn run() -> anyhow::Result<()> {
                         "keychain.delete",
                         format!("Would delete keychain password for {service}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::keychain::delete(&service, account.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(KeychainAction::Keychains) => {
-                run_source!(sources::keychain::keychains(), cli.pretty)
+                run_source!(sources::keychain::keychains(), cli.pretty, cli.envelope)
             }
         },
         Commands::Mail { action } => match action {
-            None | Some(MailAction::List) => {
-                run_source!(sources::mail::list(), cli.pretty)
+            None => {
+                let records = paginate_vec(sources::mail::list().await?, None, None);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
+            }
+            Some(MailAction::List { offset, limit }) => {
+                let records = paginate_vec(sources::mail::list().await?, offset, limit);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(MailAction::Get { index }) => {
                 let result = sources::mail::get(index).await?;
-                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(MailAction::Read { index }) => {
                 if cli.no_op {
@@ -980,10 +1060,11 @@ async fn run() -> anyhow::Result<()> {
                         "mail.read",
                         format!("Would mark inbox message #{index} as read"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::mail::read(index).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MailAction::Unread { index }) => {
@@ -992,10 +1073,11 @@ async fn run() -> anyhow::Result<()> {
                         "mail.unread",
                         format!("Would mark inbox message #{index} as unread"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::mail::unread(index).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MailAction::Trash { index }) => {
@@ -1004,14 +1086,15 @@ async fn run() -> anyhow::Result<()> {
                         "mail.trash",
                         format!("Would trash inbox message #{index}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::mail::trash(index).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MailAction::Mailboxes) => {
-                run_source!(sources::mail::mailboxes(), cli.pretty)
+                run_source!(sources::mail::mailboxes(), cli.pretty, cli.envelope)
             }
             Some(MailAction::Send { to, subject, body }) => {
                 if cli.no_op {
@@ -1019,20 +1102,26 @@ async fn run() -> anyhow::Result<()> {
                         "mail.send",
                         format!("Would send mail to {to} with subject '{subject}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::mail::send(&to, &subject, &body).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
-        Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty),
+        Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty, cli.envelope),
         Commands::Messages { action } => match action {
             None => {
-                run_source!(sources::messages::list(30), cli.pretty)
+                run_source!(sources::messages::list(30), cli.pretty, cli.envelope)
             }
-            Some(MessagesAction::List { days }) => {
-                run_source!(sources::messages::list(days), cli.pretty)
+            Some(MessagesAction::List {
+                days,
+                offset,
+                limit,
+            }) => {
+                let records = paginate_vec(sources::messages::list(days).await?, offset, limit);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(MessagesAction::Send { to, text }) => {
                 if cli.no_op {
@@ -1040,69 +1129,99 @@ async fn run() -> anyhow::Result<()> {
                         "messages.send",
                         format!("Would send message to {to}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::messages::send(&to, &text).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
         Commands::Music { action } => match action {
             None | Some(MusicAction::List) => {
-                run_source!(sources::music::list(), cli.pretty)
+                run_source!(sources::music::list(), cli.pretty, cli.envelope)
             }
             Some(MusicAction::Play { track, playlist }) => {
                 if cli.no_op {
-                    print_dry_run("music.play", "Would start Music playback", cli.pretty)?;
+                    print_dry_run(
+                        "music.play",
+                        "Would start Music playback",
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
                 } else {
                     let result =
                         sources::music::play(track.as_deref(), playlist.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MusicAction::Pause) => {
                 if cli.no_op {
-                    print_dry_run("music.pause", "Would pause Music playback", cli.pretty)?;
+                    print_dry_run(
+                        "music.pause",
+                        "Would pause Music playback",
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
                 } else {
                     let result = sources::music::pause().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MusicAction::Next) => {
                 if cli.no_op {
-                    print_dry_run("music.next", "Would skip to next track", cli.pretty)?;
+                    print_dry_run(
+                        "music.next",
+                        "Would skip to next track",
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
                 } else {
                     let result = sources::music::next().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MusicAction::Previous) => {
                 if cli.no_op {
-                    print_dry_run("music.previous", "Would go to previous track", cli.pretty)?;
+                    print_dry_run(
+                        "music.previous",
+                        "Would go to previous track",
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
                 } else {
                     let result = sources::music::previous().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MusicAction::Status) => {
                 let result = sources::music::status().await?;
-                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(MusicAction::Playlists) => {
-                run_source!(sources::music::playlists(), cli.pretty)
+                run_source!(sources::music::playlists(), cli.pretty, cli.envelope)
             }
         },
-        Commands::News => run_source!(sources::news::fetch(), cli.pretty),
+        Commands::News => run_source!(sources::news::fetch(), cli.pretty, cli.envelope),
         Commands::Notes { action } => match action {
             None => {
-                run_source!(sources::notes::list(None), cli.pretty)
+                run_source!(sources::notes::list(None), cli.pretty, cli.envelope)
             }
-            Some(NotesAction::List { folder }) => {
-                run_source!(sources::notes::list(folder.as_deref()), cli.pretty)
+            Some(NotesAction::List {
+                folder,
+                offset,
+                limit,
+            }) => {
+                let records = paginate_vec(
+                    sources::notes::list(folder.as_deref()).await?,
+                    offset,
+                    limit,
+                );
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(NotesAction::Get { id }) => {
                 let result = sources::notes::get(&id).await?;
-                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(NotesAction::Create {
                 title,
@@ -1114,11 +1233,12 @@ async fn run() -> anyhow::Result<()> {
                         "notes.create",
                         format!("Would create note '{title}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result =
                         sources::notes::create(&title, body.as_deref(), folder.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(NotesAction::Update { id, body }) => {
@@ -1127,10 +1247,11 @@ async fn run() -> anyhow::Result<()> {
                         "notes.update",
                         format!("Would update note '{id}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::notes::update(&id, &body).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(NotesAction::Delete { id }) => {
@@ -1139,38 +1260,54 @@ async fn run() -> anyhow::Result<()> {
                         "notes.delete",
                         format!("Would delete note '{id}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::notes::delete(&id).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(NotesAction::Folders) => {
-                run_source!(sources::notes::folders(), cli.pretty)
+                run_source!(sources::notes::folders(), cli.pretty, cli.envelope)
             }
         },
-        Commands::PhotoBooth => run_source!(sources::photo_booth::fetch(), cli.pretty),
-        Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty),
+        Commands::PhotoBooth => {
+            run_source!(sources::photo_booth::fetch(), cli.pretty, cli.envelope)
+        }
+        Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty, cli.envelope),
         Commands::Safari { action } => match action {
             None | Some(SafariAction::Bookmarks) => {
-                run_source!(sources::safari::bookmarks(), cli.pretty)
+                run_source!(sources::safari::bookmarks(), cli.pretty, cli.envelope)
             }
             Some(SafariAction::History { limit }) => {
-                run_source!(sources::safari::history(Some(limit)), cli.pretty)
+                run_source!(
+                    sources::safari::history(Some(limit)),
+                    cli.pretty,
+                    cli.envelope
+                )
             }
             Some(SafariAction::Tabs) => {
-                run_source!(sources::safari::tabs(), cli.pretty)
+                run_source!(sources::safari::tabs(), cli.pretty, cli.envelope)
             }
             Some(SafariAction::ReadingList) => {
-                run_source!(sources::reading_list::fetch(), cli.pretty)
+                run_source!(sources::reading_list::fetch(), cli.pretty, cli.envelope)
             }
         },
         Commands::Reminders { action } => match action {
             None => {
-                run_source!(sources::reminders::list(None), cli.pretty)
+                run_source!(sources::reminders::list(None), cli.pretty, cli.envelope)
             }
-            Some(RemindersAction::List { list }) => {
-                run_source!(sources::reminders::list(list.as_deref()), cli.pretty)
+            Some(RemindersAction::List {
+                list,
+                offset,
+                limit,
+            }) => {
+                let records = paginate_vec(
+                    sources::reminders::list(list.as_deref()).await?,
+                    offset,
+                    limit,
+                );
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(RemindersAction::Create {
                 title,
@@ -1184,6 +1321,7 @@ async fn run() -> anyhow::Result<()> {
                         "reminders.create",
                         format!("Would create reminder '{title}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::reminders::create(
@@ -1194,7 +1332,7 @@ async fn run() -> anyhow::Result<()> {
                         notes.as_deref(),
                     )
                     .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(RemindersAction::Complete { title, list }) => {
@@ -1203,10 +1341,11 @@ async fn run() -> anyhow::Result<()> {
                         "reminders.complete",
                         format!("Would complete reminder '{title}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::reminders::complete(&title, list.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(RemindersAction::Delete { title, list }) => {
@@ -1215,19 +1354,20 @@ async fn run() -> anyhow::Result<()> {
                         "reminders.delete",
                         format!("Would delete reminder '{title}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::reminders::delete(&title, list.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(RemindersAction::Lists) => {
-                run_source!(sources::reminders::lists(), cli.pretty)
+                run_source!(sources::reminders::lists(), cli.pretty, cli.envelope)
             }
         },
         Commands::ScreenSharing { action } => match action {
             None | Some(ScreenSharingAction::Status) => {
-                run_source!(sources::screen_sharing::status(), cli.pretty)
+                run_source!(sources::screen_sharing::status(), cli.pretty, cli.envelope)
             }
             Some(ScreenSharingAction::Enable) => {
                 if cli.no_op {
@@ -1235,10 +1375,11 @@ async fn run() -> anyhow::Result<()> {
                         "screen-sharing.enable",
                         "Would enable screen sharing",
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::screen_sharing::enable().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ScreenSharingAction::Disable) => {
@@ -1247,16 +1388,22 @@ async fn run() -> anyhow::Result<()> {
                         "screen-sharing.disable",
                         "Would disable screen sharing",
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::screen_sharing::disable().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
         Commands::Screenshots { action } => match action {
-            None | Some(ScreenshotsAction::List) => {
-                run_source!(sources::screenshots::list(), cli.pretty)
+            None => {
+                let records = paginate_vec(sources::screenshots::list().await?, None, None);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
+            }
+            Some(ScreenshotsAction::List { offset, limit }) => {
+                let records = paginate_vec(sources::screenshots::list().await?, offset, limit);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(ScreenshotsAction::Capture {
                 selection,
@@ -1268,17 +1415,23 @@ async fn run() -> anyhow::Result<()> {
                         "screenshots.capture",
                         "Would capture a screenshot",
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result =
                         sources::screenshots::capture(selection, window, path.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
         Commands::Shortcuts { action } => match action {
-            None | Some(ShortcutsAction::List) => {
-                run_source!(sources::shortcuts::list(), cli.pretty)
+            None => {
+                let records = paginate_vec(sources::shortcuts::list().await?, None, None);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
+            }
+            Some(ShortcutsAction::List { offset, limit }) => {
+                let records = paginate_vec(sources::shortcuts::list().await?, offset, limit);
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(ShortcutsAction::Run { name, input }) => {
                 if cli.no_op {
@@ -1286,10 +1439,11 @@ async fn run() -> anyhow::Result<()> {
                         "shortcuts.run",
                         format!("Would run shortcut '{name}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::shortcuts::run(&name, input.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ShortcutsAction::View { name }) => {
@@ -1298,10 +1452,11 @@ async fn run() -> anyhow::Result<()> {
                         "shortcuts.view",
                         format!("Would open shortcut '{name}' in Shortcuts"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::shortcuts::view(&name).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(ShortcutsAction::Sign {
@@ -1314,24 +1469,26 @@ async fn run() -> anyhow::Result<()> {
                         "shortcuts.sign",
                         format!("Would sign shortcut file '{input}' to '{output}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::shortcuts::sign(&input, &output, mode.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
         Commands::Spotlight { query, directory } => {
             run_source!(
                 sources::spotlight::search(&query, directory.as_deref()),
-                cli.pretty
+                cli.pretty,
+                cli.envelope
             )
         }
-        Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty),
-        Commands::Stocks => run_source!(sources::stocks::fetch(), cli.pretty),
+        Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty, cli.envelope),
+        Commands::Stocks => run_source!(sources::stocks::fetch(), cli.pretty, cli.envelope),
         Commands::SystemInfo { action } => match action {
             None | Some(SystemInfoAction::Show) => {
-                run_source!(sources::system_info::show(), cli.pretty)
+                run_source!(sources::system_info::show(), cli.pretty, cli.envelope)
             }
             Some(SystemInfoAction::SetName { name }) => {
                 if cli.no_op {
@@ -1339,15 +1496,16 @@ async fn run() -> anyhow::Result<()> {
                         "system-info.set-name",
                         format!("Would set computer name to '{name}'"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::system_info::set_computer_name(&name).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(SystemInfoAction::DefaultsRead { domain, key }) => {
                 let result = sources::system_info::defaults_read(&domain, key.as_deref()).await?;
-                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(SystemInfoAction::DefaultsWrite { domain, key, value }) => {
                 if cli.no_op {
@@ -1355,20 +1513,21 @@ async fn run() -> anyhow::Result<()> {
                         "system-info.defaults-write",
                         format!("Would write default {domain} {key}={value}"),
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result =
                         sources::system_info::defaults_write(&domain, &key, &value).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
         Commands::TimeMachine { action } => match action {
             None | Some(TimeMachineAction::Status) => {
-                run_source!(sources::time_machine::status(), cli.pretty)
+                run_source!(sources::time_machine::status(), cli.pretty, cli.envelope)
             }
             Some(TimeMachineAction::List) => {
-                run_source!(sources::time_machine::list(), cli.pretty)
+                run_source!(sources::time_machine::list(), cli.pretty, cli.envelope)
             }
             Some(TimeMachineAction::Start) => {
                 if cli.no_op {
@@ -1376,10 +1535,11 @@ async fn run() -> anyhow::Result<()> {
                         "time-machine.start",
                         "Would start a Time Machine backup",
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::time_machine::start().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
             Some(TimeMachineAction::Stop) => {
@@ -1388,23 +1548,30 @@ async fn run() -> anyhow::Result<()> {
                         "time-machine.stop",
                         "Would stop the current Time Machine backup",
                         cli.pretty,
+                        cli.envelope,
                     )?;
                 } else {
                     let result = sources::time_machine::stop().await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty)?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
         },
-        Commands::VoiceMemos => run_source!(sources::voice_memos::fetch(), cli.pretty),
-        Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty),
+        Commands::VoiceMemos => {
+            run_source!(sources::voice_memos::fetch(), cli.pretty, cli.envelope)
+        }
+        Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty, cli.envelope),
         Commands::Wifi { action } => match action {
             None | Some(WifiAction::Status) => {
-                run_source!(sources::wifi::status(), cli.pretty)
+                run_source!(sources::wifi::status(), cli.pretty, cli.envelope)
             }
             Some(WifiAction::Networks) => {
-                run_source!(sources::wifi::networks(), cli.pretty)
+                run_source!(sources::wifi::networks(), cli.pretty, cli.envelope)
             }
         },
+        Commands::Schema { source } => {
+            let schema = build_schema(source.as_deref());
+            print_output(&schema, cli.pretty, cli.envelope)?;
+        }
     }
 
     Ok(())
@@ -1418,11 +1585,36 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
+fn classify_error_code(err: &anyhow::Error) -> &'static str {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("not found") {
+        "not_found"
+    } else if msg.contains("permission") || msg.contains("full disk access") {
+        "permission_denied"
+    } else if msg.contains("out of range") || msg.contains("invalid") {
+        "invalid_input"
+    } else if msg.contains("timed out") {
+        "timeout"
+    } else {
+        "operation_failed"
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match run().await {
         Ok(()) => Ok(()),
         Err(err) if is_broken_pipe(&err) => Ok(()),
-        Err(err) => Err(err),
+        Err(err) => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "error": {
+                    "code": classify_error_code(&err),
+                    "message": err.to_string(),
+                }
+            });
+            eprintln!("{}", payload);
+            std::process::exit(1);
+        }
     }
 }

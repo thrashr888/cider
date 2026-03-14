@@ -5,20 +5,24 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct MailMessage {
+    pub id: String,
     pub subject: String,
     pub sender: String,
     pub date_received: String,
     pub is_read: bool,
     pub mailbox: String,
+    pub mailbox_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MailMessageDetail {
+    pub id: String,
     pub subject: String,
     pub sender: String,
     pub date_received: String,
     pub is_read: bool,
     pub mailbox: String,
+    pub mailbox_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_preview: Option<String>,
 }
@@ -32,6 +36,7 @@ struct MailMessageRecord {
 #[derive(Debug, Serialize)]
 pub struct Mailbox {
     pub name: String,
+    pub url: String,
 }
 
 pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
@@ -42,11 +47,13 @@ pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
     Ok(records
         .into_iter()
         .map(|m| MailMessage {
+            id: m.apple_mail_id.to_string(),
             subject: m.detail.subject,
             sender: m.detail.sender,
             date_received: m.detail.date_received,
             is_read: m.detail.is_read,
             mailbox: m.detail.mailbox,
+            mailbox_url: m.detail.mailbox_url,
         })
         .collect())
 }
@@ -96,7 +103,8 @@ SELECT url FROM mailboxes ORDER BY ROWID ASC;
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .map(|l| Mailbox {
-            name: l.to_string(),
+            name: mailbox_display_name(l),
+            url: l.to_string(),
         })
         .collect())
 }
@@ -223,17 +231,31 @@ LIMIT {limit};
             .get(6)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let id = apple_mail_id.to_string();
+        let mailbox_url = mailbox.clone();
         records.push(MailMessageRecord {
             apple_mail_id,
             detail: MailMessageDetail {
+                id,
                 subject,
                 sender,
                 date_received,
                 is_read,
-                mailbox,
+                mailbox: mailbox_display_name(&mailbox),
+                mailbox_url,
                 body_preview,
             },
         });
     }
     Ok(records)
+}
+
+fn mailbox_display_name(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(url)
+        .to_string()
 }
