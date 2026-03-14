@@ -1,4 +1,4 @@
-use super::util::run_command_with_timeout;
+use super::util::{run_command_with_timeout, ActionResult};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -27,7 +27,7 @@ pub struct SystemInfo {
     pub display_resolution: Option<String>,
 }
 
-pub async fn fetch() -> anyhow::Result<Vec<SystemInfo>> {
+pub async fn show() -> anyhow::Result<Vec<SystemInfo>> {
     let timeout = std::time::Duration::from_secs(10);
 
     let computer_name = run_command_with_timeout("scutil", &["--get", "ComputerName"], timeout)
@@ -96,4 +96,41 @@ pub async fn fetch() -> anyhow::Result<Vec<SystemInfo>> {
         shell,
         display_resolution,
     }])
+}
+
+/// Set the computer name and local hostname.
+pub async fn set_computer_name(name: &str) -> anyhow::Result<ActionResult> {
+    let timeout = std::time::Duration::from_secs(10);
+
+    run_command_with_timeout("scutil", &["--set", "ComputerName", name], timeout).await?;
+    run_command_with_timeout("scutil", &["--set", "LocalHostName", name], timeout).await?;
+
+    Ok(ActionResult::success_with_message(
+        "set_computer_name",
+        &format!("Computer name set to '{name}'"),
+    ))
+}
+
+/// Read a defaults domain (optionally a specific key).
+pub async fn defaults_read(domain: &str, key: Option<&str>) -> anyhow::Result<String> {
+    let timeout = std::time::Duration::from_secs(10);
+
+    let mut args = vec!["read", domain];
+    if let Some(k) = key {
+        args.push(k);
+    }
+
+    run_command_with_timeout("defaults", &args, timeout).await
+}
+
+/// Write a defaults value.
+pub async fn defaults_write(domain: &str, key: &str, value: &str) -> anyhow::Result<ActionResult> {
+    let timeout = std::time::Duration::from_secs(10);
+
+    run_command_with_timeout("defaults", &["write", domain, key, value], timeout).await?;
+
+    Ok(ActionResult::success_with_message(
+        "defaults_write",
+        &format!("Set {domain} {key}"),
+    ))
 }

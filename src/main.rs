@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use clap::{Parser, Subcommand};
 
 mod sources;
@@ -31,8 +33,11 @@ enum Commands {
     Automator,
     /// Fetch books from Apple Books
     Books,
-    /// Fetch calendar events (past 7 days + next 30 days)
-    Calendar,
+    /// Interact with Calendar events
+    Calendar {
+        #[command(subcommand)]
+        action: Option<CalendarAction>,
+    },
     /// Show local time, world clocks, and alarms (Clock)
     Clock,
     /// Show recent system log entries (Console)
@@ -41,8 +46,11 @@ enum Commands {
         #[arg(long, default_value = "30")]
         minutes: u32,
     },
-    /// Fetch contacts from Apple Contacts
-    Contacts,
+    /// Interact with Apple Contacts
+    Contacts {
+        #[command(subcommand)]
+        action: Option<ContactsAction>,
+    },
     /// Fetch devices from Find My
     #[command(name = "find-my")]
     FindMy,
@@ -52,22 +60,30 @@ enum Commands {
     Home,
     /// Fetch journal entries
     Journal,
-    /// Fetch recent mail from inbox
-    Mail,
+    /// Interact with Apple Mail
+    Mail {
+        #[command(subcommand)]
+        action: Option<MailAction>,
+    },
     /// Fetch bookmarked places from Maps
     Maps,
-    /// Fetch recent messages from iMessage/SMS
+    /// Interact with Messages (iMessage/SMS)
     Messages {
-        /// Number of days to look back
-        #[arg(long, default_value = "30")]
-        days: u32,
+        #[command(subcommand)]
+        action: Option<MessagesAction>,
     },
-    /// Fetch tracks from Music library
-    Music,
+    /// Interact with Music library
+    Music {
+        #[command(subcommand)]
+        action: Option<MusicAction>,
+    },
     /// Fetch saved articles from Apple News
     News,
-    /// Fetch notes from Apple Notes
-    Notes,
+    /// Interact with Apple Notes
+    Notes {
+        #[command(subcommand)]
+        action: Option<NotesAction>,
+    },
     /// List photos/videos from Photo Booth
     #[command(name = "photo-booth")]
     PhotoBooth,
@@ -76,25 +92,43 @@ enum Commands {
     /// Fetch items from Safari Reading List
     #[command(name = "reading-list")]
     ReadingList,
-    /// Fetch reminders from Apple Reminders
-    Reminders,
-    /// Show screen sharing status
+    /// Interact with Apple Reminders
+    Reminders {
+        #[command(subcommand)]
+        action: Option<RemindersAction>,
+    },
+    /// Manage screen sharing
     #[command(name = "screen-sharing")]
-    ScreenSharing,
-    /// List recent screenshots
-    Screenshots,
-    /// List Siri Shortcuts
-    Shortcuts,
+    ScreenSharing {
+        #[command(subcommand)]
+        action: Option<ScreenSharingAction>,
+    },
+    /// Manage screenshots
+    Screenshots {
+        #[command(subcommand)]
+        action: Option<ScreenshotsAction>,
+    },
+    /// Interact with Siri Shortcuts
+    Shortcuts {
+        #[command(subcommand)]
+        action: Option<ShortcutsAction>,
+    },
     /// Fetch sticky notes from Stickies
     Stickies,
     /// Fetch stock watchlist from Stocks
     Stocks,
-    /// Show system information (System Settings)
+    /// Show and manage system information
     #[command(name = "system-info")]
-    SystemInfo,
-    /// Show Time Machine backup info
+    SystemInfo {
+        #[command(subcommand)]
+        action: Option<SystemInfoAction>,
+    },
+    /// Manage Time Machine backups
     #[command(name = "time-machine")]
-    TimeMachine,
+    TimeMachine {
+        #[command(subcommand)]
+        action: Option<TimeMachineAction>,
+    },
     /// Fetch voice memos
     #[command(name = "voice-memos")]
     VoiceMemos,
@@ -102,23 +136,408 @@ enum Commands {
     Weather,
 }
 
-fn print_json(value: &serde_json::Value, pretty: bool) {
-    if pretty {
-        println!("{}", serde_json::to_string_pretty(value).unwrap());
+#[derive(Subcommand)]
+enum CalendarAction {
+    /// List calendar events (default: past 7 days + next 30 days)
+    List {
+        /// Number of days to look back
+        #[arg(long)]
+        days_back: Option<u32>,
+        /// Number of days to look ahead
+        #[arg(long)]
+        days_ahead: Option<u32>,
+        /// Filter by calendar name
+        #[arg(long)]
+        calendar: Option<String>,
+    },
+    /// Create a new calendar event
+    Create {
+        /// Event title
+        #[arg(long)]
+        title: String,
+        /// Start date/time (ISO 8601)
+        #[arg(long)]
+        start: String,
+        /// End date/time (ISO 8601)
+        #[arg(long)]
+        end: String,
+        /// Calendar name (default: "Calendar")
+        #[arg(long)]
+        calendar: Option<String>,
+        /// Event location
+        #[arg(long)]
+        location: Option<String>,
+        /// Event notes
+        #[arg(long)]
+        notes: Option<String>,
+        /// All-day event
+        #[arg(long)]
+        all_day: bool,
+    },
+    /// Delete a calendar event by title and date
+    Delete {
+        /// Event title to delete
+        #[arg(long)]
+        title: String,
+        /// Date of the event (ISO 8601 date)
+        #[arg(long)]
+        date: String,
+    },
+    /// List all calendar names
+    Calendars,
+}
+
+#[derive(Subcommand)]
+enum ContactsAction {
+    /// List all contacts (default)
+    List {
+        /// Search contacts by name
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// Get a single contact by ID
+    Get {
+        /// Contact ID
+        #[arg(long)]
+        id: String,
+    },
+    /// Create a new contact
+    Create {
+        /// First name
+        #[arg(long)]
+        first: String,
+        /// Last name
+        #[arg(long)]
+        last: String,
+        /// Email address
+        #[arg(long)]
+        email: Option<String>,
+        /// Phone number
+        #[arg(long)]
+        phone: Option<String>,
+        /// Organization
+        #[arg(long)]
+        org: Option<String>,
+    },
+    /// Update an existing contact
+    Update {
+        /// Contact ID
+        #[arg(long)]
+        id: String,
+        /// First name
+        #[arg(long)]
+        first: Option<String>,
+        /// Last name
+        #[arg(long)]
+        last: Option<String>,
+        /// Email address
+        #[arg(long)]
+        email: Option<String>,
+        /// Phone number
+        #[arg(long)]
+        phone: Option<String>,
+    },
+    /// Delete a contact
+    Delete {
+        /// Contact ID
+        #[arg(long)]
+        id: String,
+    },
+    /// List all contact groups
+    Groups,
+}
+
+#[derive(Subcommand)]
+enum NotesAction {
+    /// List notes (default)
+    List {
+        /// Filter by folder name
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Get a single note by ID
+    Get {
+        /// Note ID
+        #[arg(long)]
+        id: String,
+    },
+    /// Create a new note
+    Create {
+        /// Note title
+        #[arg(long)]
+        title: String,
+        /// Note body
+        #[arg(long)]
+        body: Option<String>,
+        /// Folder name (default: "Notes")
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Update a note's body
+    Update {
+        /// Note ID
+        #[arg(long)]
+        id: String,
+        /// New body content
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a note
+    Delete {
+        /// Note ID
+        #[arg(long)]
+        id: String,
+    },
+    /// List all note folders
+    Folders,
+}
+
+#[derive(Subcommand)]
+enum RemindersAction {
+    /// List incomplete reminders
+    List {
+        /// Filter by list name
+        #[arg(long)]
+        list: Option<String>,
+    },
+    /// Create a new reminder
+    Create {
+        /// Reminder title
+        #[arg(long)]
+        title: String,
+        /// List name (default: "Reminders")
+        #[arg(long)]
+        list: Option<String>,
+        /// Due date (ISO 8601)
+        #[arg(long)]
+        due: Option<String>,
+        /// Priority (0=none, 1-9)
+        #[arg(long)]
+        priority: Option<i32>,
+        /// Notes
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Mark a reminder as complete
+    Complete {
+        /// Reminder title to complete
+        #[arg(long)]
+        title: String,
+    },
+    /// Delete a reminder
+    Delete {
+        /// Reminder title to delete
+        #[arg(long)]
+        title: String,
+    },
+    /// List all reminder lists
+    Lists,
+}
+
+#[derive(Subcommand)]
+enum MailAction {
+    /// List recent inbox messages (default)
+    List,
+    /// Get a single message by index (1-based)
+    Get {
+        /// Message index (1-based from list output)
+        #[arg(long)]
+        index: usize,
+    },
+    /// Mark a message as read
+    Read {
+        /// Message index (1-based)
+        #[arg(long)]
+        index: usize,
+    },
+    /// Mark a message as unread
+    Unread {
+        /// Message index (1-based)
+        #[arg(long)]
+        index: usize,
+    },
+    /// Move a message to trash
+    Trash {
+        /// Message index (1-based)
+        #[arg(long)]
+        index: usize,
+    },
+    /// List all mailbox names
+    Mailboxes,
+    /// Send an email
+    Send {
+        /// Recipient email address
+        #[arg(long)]
+        to: String,
+        /// Email subject
+        #[arg(long)]
+        subject: String,
+        /// Email body
+        #[arg(long)]
+        body: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MessagesAction {
+    /// List recent messages (default)
+    List {
+        /// Number of days to look back
+        #[arg(long, default_value = "30")]
+        days: u32,
+    },
+    /// Send an iMessage/SMS
+    Send {
+        /// Recipient phone number or email
+        #[arg(long)]
+        to: String,
+        /// Message text
+        #[arg(long)]
+        text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MusicAction {
+    /// List tracks from library (default)
+    List,
+    /// Play a track, playlist, or resume playback
+    Play {
+        /// Track name to play
+        #[arg(long)]
+        track: Option<String>,
+        /// Playlist name to play from
+        #[arg(long)]
+        playlist: Option<String>,
+    },
+    /// Pause playback
+    Pause,
+    /// Skip to next track
+    Next,
+    /// Go to previous track
+    Previous,
+    /// Show currently playing track info
+    Status,
+    /// List all playlists
+    Playlists,
+}
+
+#[derive(Subcommand)]
+enum ShortcutsAction {
+    /// List all shortcuts (default)
+    List,
+    /// Run a shortcut by name
+    Run {
+        /// Shortcut name
+        #[arg(long)]
+        name: String,
+        /// Input to pass to the shortcut (piped via stdin)
+        #[arg(long)]
+        input: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScreenSharingAction {
+    /// Show screen sharing status (default)
+    Status,
+    /// Enable screen sharing (requires sudo)
+    Enable,
+    /// Disable screen sharing (requires sudo)
+    Disable,
+}
+
+#[derive(Subcommand)]
+enum ScreenshotsAction {
+    /// List recent screenshots (default)
+    List,
+    /// Take a screenshot
+    Capture {
+        /// Interactive selection mode
+        #[arg(long)]
+        selection: bool,
+        /// Capture a specific window
+        #[arg(long)]
+        window: bool,
+        /// Output file path
+        #[arg(long)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SystemInfoAction {
+    /// Show system information (default)
+    Show,
+    /// Set the computer name
+    SetName {
+        /// New computer name
+        #[arg(long)]
+        name: String,
+    },
+    /// Read defaults for a domain
+    DefaultsRead {
+        /// Defaults domain (e.g. com.apple.dock)
+        #[arg(long)]
+        domain: String,
+        /// Specific key to read
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Write a defaults value
+    DefaultsWrite {
+        /// Defaults domain (e.g. com.apple.dock)
+        #[arg(long)]
+        domain: String,
+        /// Key to write
+        #[arg(long)]
+        key: String,
+        /// Value to write
+        #[arg(long)]
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TimeMachineAction {
+    /// Show Time Machine status
+    Status,
+    /// List backup paths (default)
+    List,
+    /// Start a backup
+    Start,
+    /// Stop a running backup
+    Stop,
+}
+
+fn print_json_to_writer<W: Write>(
+    mut writer: W,
+    value: &serde_json::Value,
+    pretty: bool,
+) -> anyhow::Result<()> {
+    let json = if pretty {
+        serde_json::to_string_pretty(value)?
     } else {
-        println!("{}", serde_json::to_string(value).unwrap());
-    }
+        serde_json::to_string(value)?
+    };
+
+    writer.write_all(json.as_bytes())?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn print_json(value: &serde_json::Value, pretty: bool) -> anyhow::Result<()> {
+    print_json_to_writer(io::stdout().lock(), value, pretty)
 }
 
 macro_rules! run_source {
     ($source:expr, $pretty:expr) => {{
         let records = $source.await?;
-        print_json(&serde_json::to_value(&records)?, $pretty);
+        print_json(&serde_json::to_value(&records)?, $pretty)?;
     }};
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -126,36 +545,342 @@ async fn main() -> anyhow::Result<()> {
         Commands::Apps => run_source!(sources::apps::fetch(), cli.pretty),
         Commands::Automator => run_source!(sources::automator::fetch(), cli.pretty),
         Commands::Books => run_source!(sources::books::fetch(), cli.pretty),
-        Commands::Calendar => run_source!(sources::calendar::fetch(), cli.pretty),
+        Commands::Calendar { action } => match action {
+            None => {
+                run_source!(sources::calendar::list(None, None, None), cli.pretty)
+            }
+            Some(CalendarAction::List {
+                days_back,
+                days_ahead,
+                calendar,
+            }) => {
+                run_source!(
+                    sources::calendar::list(days_back, days_ahead, calendar.as_deref()),
+                    cli.pretty
+                )
+            }
+            Some(CalendarAction::Create {
+                title,
+                start,
+                end,
+                calendar,
+                location,
+                notes,
+                all_day,
+            }) => {
+                let result = sources::calendar::create(
+                    &title,
+                    &start,
+                    &end,
+                    calendar.as_deref(),
+                    location.as_deref(),
+                    notes.as_deref(),
+                    all_day,
+                )
+                .await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(CalendarAction::Delete { title, date }) => {
+                let result = sources::calendar::delete(&title, &date).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(CalendarAction::Calendars) => {
+                run_source!(sources::calendar::calendars(), cli.pretty)
+            }
+        },
         Commands::Clock => run_source!(sources::clock::fetch(), cli.pretty),
         Commands::Console { minutes } => {
             run_source!(sources::console_logs::fetch(minutes), cli.pretty)
         }
-        Commands::Contacts => run_source!(sources::contacts::fetch(), cli.pretty),
+        Commands::Contacts { action } => match action {
+            None => {
+                run_source!(sources::contacts::list(None), cli.pretty)
+            }
+            Some(ContactsAction::List { search }) => {
+                run_source!(sources::contacts::list(search.as_deref()), cli.pretty)
+            }
+            Some(ContactsAction::Get { id }) => {
+                let result = sources::contacts::get(&id).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ContactsAction::Create {
+                first,
+                last,
+                email,
+                phone,
+                org,
+            }) => {
+                let result = sources::contacts::create(
+                    &first,
+                    &last,
+                    email.as_deref(),
+                    phone.as_deref(),
+                    org.as_deref(),
+                )
+                .await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ContactsAction::Update {
+                id,
+                first,
+                last,
+                email,
+                phone,
+            }) => {
+                let result = sources::contacts::update(
+                    &id,
+                    first.as_deref(),
+                    last.as_deref(),
+                    email.as_deref(),
+                    phone.as_deref(),
+                )
+                .await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ContactsAction::Delete { id }) => {
+                let result = sources::contacts::delete(&id).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ContactsAction::Groups) => {
+                run_source!(sources::contacts::groups(), cli.pretty)
+            }
+        },
         Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty),
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty),
         Commands::Home => run_source!(sources::home::fetch(), cli.pretty),
         Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty),
-        Commands::Mail => run_source!(sources::mail::fetch(), cli.pretty),
+        Commands::Mail { action } => match action {
+            None | Some(MailAction::List) => {
+                run_source!(sources::mail::list(), cli.pretty)
+            }
+            Some(MailAction::Get { index }) => {
+                let result = sources::mail::get(index).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MailAction::Read { index }) => {
+                let result = sources::mail::read(index).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MailAction::Unread { index }) => {
+                let result = sources::mail::unread(index).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MailAction::Trash { index }) => {
+                let result = sources::mail::trash(index).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MailAction::Mailboxes) => {
+                run_source!(sources::mail::mailboxes(), cli.pretty)
+            }
+            Some(MailAction::Send { to, subject, body }) => {
+                let result = sources::mail::send(&to, &subject, &body).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
         Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty),
-        Commands::Messages { days } => run_source!(sources::messages::fetch(days), cli.pretty),
-        Commands::Music => run_source!(sources::music::fetch(), cli.pretty),
+        Commands::Messages { action } => match action {
+            None => {
+                run_source!(sources::messages::list(30), cli.pretty)
+            }
+            Some(MessagesAction::List { days }) => {
+                run_source!(sources::messages::list(days), cli.pretty)
+            }
+            Some(MessagesAction::Send { to, text }) => {
+                let result = sources::messages::send(&to, &text).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
+        Commands::Music { action } => match action {
+            None | Some(MusicAction::List) => {
+                run_source!(sources::music::list(), cli.pretty)
+            }
+            Some(MusicAction::Play { track, playlist }) => {
+                let result = sources::music::play(track.as_deref(), playlist.as_deref()).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MusicAction::Pause) => {
+                let result = sources::music::pause().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MusicAction::Next) => {
+                let result = sources::music::next().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MusicAction::Previous) => {
+                let result = sources::music::previous().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MusicAction::Status) => {
+                let result = sources::music::status().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(MusicAction::Playlists) => {
+                run_source!(sources::music::playlists(), cli.pretty)
+            }
+        },
         Commands::News => run_source!(sources::news::fetch(), cli.pretty),
-        Commands::Notes => run_source!(sources::notes::fetch(), cli.pretty),
+        Commands::Notes { action } => match action {
+            None => {
+                run_source!(sources::notes::list(None), cli.pretty)
+            }
+            Some(NotesAction::List { folder }) => {
+                run_source!(sources::notes::list(folder.as_deref()), cli.pretty)
+            }
+            Some(NotesAction::Get { id }) => {
+                let result = sources::notes::get(&id).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(NotesAction::Create {
+                title,
+                body,
+                folder,
+            }) => {
+                let result =
+                    sources::notes::create(&title, body.as_deref(), folder.as_deref()).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(NotesAction::Update { id, body }) => {
+                let result = sources::notes::update(&id, &body).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(NotesAction::Delete { id }) => {
+                let result = sources::notes::delete(&id).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(NotesAction::Folders) => {
+                run_source!(sources::notes::folders(), cli.pretty)
+            }
+        },
         Commands::PhotoBooth => run_source!(sources::photo_booth::fetch(), cli.pretty),
         Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty),
         Commands::ReadingList => run_source!(sources::reading_list::fetch(), cli.pretty),
-        Commands::Reminders => run_source!(sources::reminders::fetch(), cli.pretty),
-        Commands::ScreenSharing => run_source!(sources::screen_sharing::fetch(), cli.pretty),
-        Commands::Screenshots => run_source!(sources::screenshots::fetch(), cli.pretty),
-        Commands::Shortcuts => run_source!(sources::shortcuts::fetch(), cli.pretty),
+        Commands::Reminders { action } => match action {
+            None => {
+                run_source!(sources::reminders::list(None), cli.pretty)
+            }
+            Some(RemindersAction::List { list }) => {
+                run_source!(sources::reminders::list(list.as_deref()), cli.pretty)
+            }
+            Some(RemindersAction::Create {
+                title,
+                list,
+                due,
+                priority,
+                notes,
+            }) => {
+                let result = sources::reminders::create(
+                    &title,
+                    list.as_deref(),
+                    due.as_deref(),
+                    priority,
+                    notes.as_deref(),
+                )
+                .await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(RemindersAction::Complete { title }) => {
+                let result = sources::reminders::complete(&title).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(RemindersAction::Delete { title }) => {
+                let result = sources::reminders::delete(&title).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(RemindersAction::Lists) => {
+                run_source!(sources::reminders::lists(), cli.pretty)
+            }
+        },
+        Commands::ScreenSharing { action } => match action {
+            None | Some(ScreenSharingAction::Status) => {
+                run_source!(sources::screen_sharing::status(), cli.pretty)
+            }
+            Some(ScreenSharingAction::Enable) => {
+                let result = sources::screen_sharing::enable().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(ScreenSharingAction::Disable) => {
+                let result = sources::screen_sharing::disable().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
+        Commands::Screenshots { action } => match action {
+            None | Some(ScreenshotsAction::List) => {
+                run_source!(sources::screenshots::list(), cli.pretty)
+            }
+            Some(ScreenshotsAction::Capture {
+                selection,
+                window,
+                path,
+            }) => {
+                let result =
+                    sources::screenshots::capture(selection, window, path.as_deref()).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
+        Commands::Shortcuts { action } => match action {
+            None | Some(ShortcutsAction::List) => {
+                run_source!(sources::shortcuts::list(), cli.pretty)
+            }
+            Some(ShortcutsAction::Run { name, input }) => {
+                let result = sources::shortcuts::run(&name, input.as_deref()).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
         Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty),
         Commands::Stocks => run_source!(sources::stocks::fetch(), cli.pretty),
-        Commands::SystemInfo => run_source!(sources::system_info::fetch(), cli.pretty),
-        Commands::TimeMachine => run_source!(sources::time_machine::fetch(), cli.pretty),
+        Commands::SystemInfo { action } => match action {
+            None | Some(SystemInfoAction::Show) => {
+                run_source!(sources::system_info::show(), cli.pretty)
+            }
+            Some(SystemInfoAction::SetName { name }) => {
+                let result = sources::system_info::set_computer_name(&name).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(SystemInfoAction::DefaultsRead { domain, key }) => {
+                let result = sources::system_info::defaults_read(&domain, key.as_deref()).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(SystemInfoAction::DefaultsWrite { domain, key, value }) => {
+                let result = sources::system_info::defaults_write(&domain, &key, &value).await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
+        Commands::TimeMachine { action } => match action {
+            None | Some(TimeMachineAction::List) => {
+                run_source!(sources::time_machine::list(), cli.pretty)
+            }
+            Some(TimeMachineAction::Status) => {
+                run_source!(sources::time_machine::status(), cli.pretty)
+            }
+            Some(TimeMachineAction::Start) => {
+                let result = sources::time_machine::start().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+            Some(TimeMachineAction::Stop) => {
+                let result = sources::time_machine::stop().await?;
+                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+            }
+        },
         Commands::VoiceMemos => run_source!(sources::voice_memos::fetch(), cli.pretty),
         Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty),
     }
 
     Ok(())
+}
+
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io_err| io_err.kind() == io::ErrorKind::BrokenPipe)
+    })
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    match run().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_broken_pipe(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
 }

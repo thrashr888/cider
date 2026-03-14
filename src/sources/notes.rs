@@ -1,4 +1,7 @@
-use super::util::{parse_applescript_date, run_osascript_with_timeout, slug, truncate_for_title};
+use super::util::{
+    escape_applescript, parse_applescript_date, run_osascript_with_timeout, slug,
+    truncate_for_title, ActionResult,
+};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -12,12 +15,34 @@ pub struct Note {
     pub modified: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-pub async fn fetch() -> anyhow::Result<Vec<Note>> {
-    let script = r#"
+#[derive(Debug, Serialize)]
+pub struct NoteFolder {
+    pub name: String,
+}
+
+/// List notes, optionally filtered by folder name.
+pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
+    let folder_clause = if let Some(folder) = folder_filter {
+        let escaped = escape_applescript(folder);
+        format!(
+            r#"
+                set folderList to {{folder "{escaped}"}}
+"#
+        )
+    } else {
+        r#"
+                set folderList to every folder
+"#
+        .to_string()
+    };
+
+    let script = format!(
+        r#"
         set output to "["
         set noteCount to 0
         tell application "Notes"
-            repeat with f in every folder
+            {folder_clause}
+            repeat with f in folderList
                 set folderName to name of f
                 repeat with n in every note of f
                     set noteCount to noteCount + 1
@@ -40,7 +65,7 @@ pub async fn fetch() -> anyhow::Result<Vec<Note>> {
                     set folderName to my escapeJSON(folderName)
                     set nBody to my escapeJSON(nBody)
 
-                    set noteJSON to "{\"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"" & nBody & "\"}"
+                    set noteJSON to "{{"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"" & nBody & "\"}}"
                     set output to output & noteJSON
                     if noteCount >= 50 then exit repeat
                 end repeat
@@ -67,10 +92,187 @@ pub async fn fetch() -> anyhow::Result<Vec<Note>> {
             set AppleScript's text item delimiters to ""
             return theText
         end replaceText
+    "#
+    );
+
+    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(60)).await?;
+    Ok(parse_json_output(&raw))
+}
+
+/// Get a single note by ID with full body content.
+pub async fn get(id: &str) -> anyhow::Result<Note> {
+    let escaped_id = escape_applescript(id);
+    let script = format!(
+        r#"
+        set output to ""
+        tell application "Notes"
+            set n to note id "{escaped_id}"
+            set nId to id of n
+            set nName to name of n
+            set nMod to modification date of n
+            set nFolder to name of container of n
+            set nBody to ""
+            try
+                set nBody to plaintext of n
+            end try
+
+            set nName to my escapeJSON(nName)
+            set nFolder to my escapeJSON(nFolder)
+            set nBody to my escapeJSON(nBody)
+
+            set output to "{{"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & nFolder & "\", \"body\": \"" & nBody & "\"}}"
+        end tell
+        return output
+
+        on escapeJSON(txt)
+            set txt to my replaceText(txt, "\\", "\\\\")
+            set txt to my replaceText(txt, "\"", "\\\"")
+            set txt to my replaceText(txt, return, "\\n")
+            set txt to my replaceText(txt, linefeed, "\\n")
+            set txt to my replaceText(txt, tab, "\\t")
+            return txt
+        end escapeJSON
+
+        on replaceText(theText, searchString, replacementString)
+            set AppleScript's text item delimiters to searchString
+            set theTextItems to every text item of theText
+            set AppleScript's text item delimiters to replacementString
+            set theText to theTextItems as string
+            set AppleScript's text item delimiters to ""
+            return theText
+        end replaceText
+    "#
+    );
+
+    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let item: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("Failed to parse note: {e}"))?;
+
+    let note_id = item["id"].as_str().unwrap_or("").trim();
+    let name = item["name"].as_str().unwrap_or("").trim();
+    let mod_str = item["modified"].as_str().unwrap_or("").trim();
+    let folder = item["folder"].as_str().unwrap_or("").trim();
+    let body_text = item["body"].as_str().unwrap_or("").trim();
+
+    if name.is_empty() {
+        anyhow::bail!("Note not found: {id}");
+    }
+
+    let modified = if mod_str.is_empty() {
+        None
+    } else {
+        parse_applescript_date(mod_str)
+    };
+
+    let parsed_id = if note_id.is_empty() {
+        slug(name)
+    } else {
+        slug(note_id)
+    };
+
+    Ok(Note {
+        id: parsed_id,
+        title: truncate_for_title(name),
+        folder: folder.to_string(),
+        body: if body_text.is_empty() {
+            None
+        } else {
+            Some(body_text.to_string())
+        },
+        modified,
+    })
+}
+
+/// Create a new note in a specified folder (defaults to "Notes").
+pub async fn create(
+    title: &str,
+    body: Option<&str>,
+    folder: Option<&str>,
+) -> anyhow::Result<ActionResult> {
+    let title_esc = escape_applescript(title);
+    let folder_name = folder.unwrap_or("Notes");
+    let folder_esc = escape_applescript(folder_name);
+
+    let body_clause = if let Some(b) = body {
+        let b_esc = escape_applescript(b);
+        format!(", body:\"<div>{b_esc}</div>\"")
+    } else {
+        String::new()
+    };
+
+    let script = format!(
+        r#"
+        tell application "Notes"
+            set theFolder to folder "{folder_esc}"
+            set newNote to make new note at theFolder with properties {{name:"{title_esc}"{body_clause}}}
+            return id of newNote
+        end tell
+    "#
+    );
+
+    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let new_id = raw.trim().to_string();
+    Ok(ActionResult::success_with_id("create", &new_id))
+}
+
+/// Update the body of an existing note by ID.
+pub async fn update(id: &str, body: &str) -> anyhow::Result<ActionResult> {
+    let escaped_id = escape_applescript(id);
+    let body_esc = escape_applescript(body);
+
+    let script = format!(
+        r#"
+        tell application "Notes"
+            set body of note id "{escaped_id}" to "<div>{body_esc}</div>"
+        end tell
+    "#
+    );
+
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    Ok(ActionResult::success_with_id("update", id))
+}
+
+/// Delete a note by ID.
+pub async fn delete(id: &str) -> anyhow::Result<ActionResult> {
+    let escaped_id = escape_applescript(id);
+
+    let script = format!(
+        r#"
+        tell application "Notes"
+            delete note id "{escaped_id}"
+        end tell
+    "#
+    );
+
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    Ok(ActionResult::success_with_id("delete", id))
+}
+
+/// List all note folders.
+pub async fn folders() -> anyhow::Result<Vec<NoteFolder>> {
+    let script = r#"
+        tell application "Notes"
+            set folderNames to name of every folder
+            set output to ""
+            repeat with f in folderNames
+                if output is not "" then
+                    set output to output & linefeed
+                end if
+                set output to output & f
+            end repeat
+            return output
+        end tell
     "#;
 
-    let raw = run_osascript_with_timeout(script, std::time::Duration::from_secs(60)).await?;
-    Ok(parse_json_output(&raw))
+    let raw = run_osascript_with_timeout(script, std::time::Duration::from_secs(15)).await?;
+    let folders = raw
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|name| NoteFolder {
+            name: name.trim().to_string(),
+        })
+        .collect();
+    Ok(folders)
 }
 
 fn parse_json_output(output: &str) -> Vec<Note> {

@@ -1,4 +1,7 @@
-use super::util::{run_command_with_timeout, truncate_for_title};
+use super::util::{
+    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, truncate_for_title,
+    ActionResult,
+};
 use chrono::DateTime;
 use serde::Serialize;
 
@@ -14,7 +17,7 @@ pub struct Message {
     pub timestamp: Option<DateTime<chrono::Utc>>,
 }
 
-pub async fn fetch(days: u32) -> anyhow::Result<Vec<Message>> {
+pub async fn list(days: u32) -> anyhow::Result<Vec<Message>> {
     let home = std::env::var("HOME").unwrap_or_default();
     let db_path = format!("{home}/Library/Messages/chat.db");
 
@@ -55,6 +58,25 @@ LIMIT 200;
     .await?;
 
     Ok(parse_output(&stdout))
+}
+
+pub async fn send(to: &str, text: &str) -> anyhow::Result<ActionResult> {
+    let script = format!(
+        r#"tell application "Messages"
+    set targetBuddy to "{}"
+    set targetService to 1st account whose service type = iMessage
+    set theBuddy to buddy targetBuddy of targetService
+    send "{}" to theBuddy
+end tell"#,
+        escape_applescript(to),
+        escape_applescript(text)
+    );
+
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    Ok(ActionResult::success_with_message(
+        "send",
+        &format!("Sent to {to}"),
+    ))
 }
 
 fn parse_output(output: &str) -> Vec<Message> {

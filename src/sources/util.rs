@@ -220,6 +220,60 @@ pub fn truncate_for_title(text: &str) -> String {
 /// Apple epoch offset: seconds between Unix epoch and 2001-01-01.
 pub const APPLE_EPOCH: i64 = 978_307_200;
 
+/// Result of a write action (create, update, delete, etc.)
+#[derive(Debug, serde::Serialize)]
+pub struct ActionResult {
+    pub ok: bool,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl ActionResult {
+    pub fn success(action: &str) -> Self {
+        Self {
+            ok: true,
+            action: action.to_string(),
+            id: None,
+            message: None,
+        }
+    }
+
+    pub fn success_with_id(action: &str, id: &str) -> Self {
+        Self {
+            ok: true,
+            action: action.to_string(),
+            id: Some(id.to_string()),
+            message: None,
+        }
+    }
+
+    pub fn success_with_message(action: &str, msg: &str) -> Self {
+        Self {
+            ok: true,
+            action: action.to_string(),
+            id: None,
+            message: Some(msg.to_string()),
+        }
+    }
+}
+
+/// Escape a string for safe embedding in JXA/JavaScript code.
+pub fn escape_jxa(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Escape a string for safe embedding in AppleScript.
+pub fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

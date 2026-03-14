@@ -1,4 +1,4 @@
-use super::util::run_command_with_timeout;
+use super::util::{run_command_with_timeout, ActionResult};
 use chrono::DateTime;
 use serde::Serialize;
 
@@ -11,7 +11,7 @@ pub struct Screenshot {
     pub size_bytes: i64,
 }
 
-pub async fn fetch() -> anyhow::Result<Vec<Screenshot>> {
+pub async fn list() -> anyhow::Result<Vec<Screenshot>> {
     let home = std::env::var("HOME").unwrap_or_default();
 
     // Check screenshot location preference
@@ -79,4 +79,50 @@ pub async fn fetch() -> anyhow::Result<Vec<Screenshot>> {
 
     screenshots.sort_by(|a, b| b.date.cmp(&a.date));
     Ok(screenshots)
+}
+
+/// Take a screenshot using macOS `screencapture`.
+///
+/// - `selection`: if true, use `-i` flag for interactive selection
+/// - `window`: if true, use `-w` flag to capture a window
+/// - `path`: optional output file path; if None, uses the default screenshot location
+pub async fn capture(
+    selection: bool,
+    window: bool,
+    path: Option<&str>,
+) -> anyhow::Result<ActionResult> {
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    // Determine output path
+    let output_path = if let Some(p) = path {
+        p.to_string()
+    } else {
+        // Use the configured screenshot location or Desktop
+        let screenshot_dir = run_command_with_timeout(
+            "defaults",
+            &["read", "com.apple.screencapture", "location"],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{home}/Desktop"));
+
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d at %H.%M.%S");
+        format!("{screenshot_dir}/Screenshot {timestamp}.png")
+    };
+
+    let mut args: Vec<&str> = Vec::new();
+    if selection {
+        args.push("-i");
+    }
+    if window {
+        args.push("-w");
+    }
+    args.push(&output_path);
+
+    run_command_with_timeout("screencapture", &args, std::time::Duration::from_secs(30)).await?;
+
+    Ok(ActionResult::success_with_message("captured", &output_path))
 }

@@ -1,4 +1,4 @@
-use super::util::run_jxa_with_timeout;
+use super::util::{escape_jxa, run_jxa, run_jxa_with_timeout, ActionResult};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -18,7 +18,24 @@ pub struct Track {
     pub loved: bool,
 }
 
-pub async fn fetch() -> anyhow::Result<Vec<Track>> {
+#[derive(Debug, Serialize)]
+pub struct NowPlaying {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    pub position: f64,
+    pub duration: f64,
+    pub state: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Playlist {
+    pub name: String,
+}
+
+pub async fn list() -> anyhow::Result<Vec<Track>> {
     // Use JXA with bulk property access for speed.
     // Handle the case where Music.app has no library.
     let script = r#"
@@ -64,6 +81,133 @@ if (!lib) { ""; } else {
         anyhow::bail!("Music library is empty or Music.app is not configured");
     }
     Ok(parse_output(&output))
+}
+
+pub async fn play(track: Option<&str>, playlist: Option<&str>) -> anyhow::Result<ActionResult> {
+    let script = match (track, playlist) {
+        (Some(t), Some(p)) => {
+            format!(
+                r#"const app = Application("Music");
+app.playlists.byName("{}").tracks.byName("{}").play();
+"done";"#,
+                escape_jxa(p),
+                escape_jxa(t)
+            )
+        }
+        (Some(t), None) => {
+            format!(
+                r#"const app = Application("Music");
+app.libraryPlaylists[0].tracks.byName("{}").play();
+"done";"#,
+                escape_jxa(t)
+            )
+        }
+        (None, Some(p)) => {
+            format!(
+                r#"const app = Application("Music");
+app.playlists.byName("{}").play();
+"done";"#,
+                escape_jxa(p)
+            )
+        }
+        (None, None) => r#"const app = Application("Music");
+app.play();
+"done";"#
+            .to_string(),
+    };
+
+    run_jxa(&script).await?;
+    Ok(ActionResult::success("play"))
+}
+
+pub async fn pause() -> anyhow::Result<ActionResult> {
+    let script = r#"const app = Application("Music");
+app.pause();
+"done";"#;
+    run_jxa(script).await?;
+    Ok(ActionResult::success("pause"))
+}
+
+pub async fn next() -> anyhow::Result<ActionResult> {
+    let script = r#"const app = Application("Music");
+app.nextTrack();
+"done";"#;
+    run_jxa(script).await?;
+    Ok(ActionResult::success("next"))
+}
+
+pub async fn previous() -> anyhow::Result<ActionResult> {
+    let script = r#"const app = Application("Music");
+app.previousTrack();
+"done";"#;
+    run_jxa(script).await?;
+    Ok(ActionResult::success("previous"))
+}
+
+pub async fn status() -> anyhow::Result<NowPlaying> {
+    let script = r#"
+const app = Application("Music");
+const state = app.playerState();
+if (state === "stopped") {
+    ["", "", "", "0", "0", state].join("\t");
+} else {
+    const t = app.currentTrack;
+    const name = (t.name() || "").replace(/[\t\n\r]/g, " ");
+    const artist = (t.artist() || "").replace(/[\t\n\r]/g, " ");
+    const album = (t.album() || "").replace(/[\t\n\r]/g, " ");
+    const pos = app.playerPosition();
+    const dur = t.duration() || 0;
+    [name, artist, album, pos, dur, state].join("\t");
+}
+"#;
+
+    let output = run_jxa(script).await?;
+    let parts: Vec<&str> = output.split('\t').collect();
+    if parts.len() < 6 {
+        anyhow::bail!("Unexpected status output from Music.app");
+    }
+
+    let name = parts[0].trim().to_string();
+    let artist = parts[1].trim();
+    let album = parts[2].trim();
+    let position: f64 = parts[3].trim().parse().unwrap_or(0.0);
+    let duration: f64 = parts[4].trim().parse().unwrap_or(0.0);
+    let state = parts[5].trim().to_string();
+
+    Ok(NowPlaying {
+        name,
+        artist: if artist.is_empty() {
+            None
+        } else {
+            Some(artist.to_string())
+        },
+        album: if album.is_empty() {
+            None
+        } else {
+            Some(album.to_string())
+        },
+        position,
+        duration,
+        state,
+    })
+}
+
+pub async fn playlists() -> anyhow::Result<Vec<Playlist>> {
+    let script = r#"
+const app = Application("Music");
+const names = app.playlists.name();
+names.join("\n");
+"#;
+
+    let output = run_jxa(script).await?;
+    Ok(output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| Playlist {
+            name: l.to_string(),
+        })
+        .collect())
 }
 
 fn parse_output(output: &str) -> Vec<Track> {
