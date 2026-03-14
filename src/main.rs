@@ -19,8 +19,12 @@ struct Cli {
     #[arg(long)]
     pretty: bool,
 
+    /// Wrap responses in a stable top-level envelope
+    #[arg(long)]
+    envelope: bool,
+
     /// Show what mutating commands would do without executing them
-    #[arg(skip)]
+    #[arg(long = "dry-run")]
     no_op: bool,
 
     #[command(subcommand)]
@@ -165,6 +169,12 @@ enum Commands {
         #[command(subcommand)]
         action: Option<WifiAction>,
     },
+    /// Show machine-readable command schemas and capabilities
+    Schema {
+        /// Optional source/command name to inspect
+        #[arg(long)]
+        source: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +238,12 @@ enum ContactsAction {
         /// Search contacts by name
         #[arg(long)]
         search: Option<String>,
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Get a single contact by ID
     Get {
@@ -288,6 +304,12 @@ enum NotesAction {
         /// Filter by folder name
         #[arg(long)]
         folder: Option<String>,
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Get a single note by ID
     Get {
@@ -333,6 +355,12 @@ enum RemindersAction {
         /// Filter by list name
         #[arg(long)]
         list: Option<String>,
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Create a new reminder
     Create {
@@ -377,7 +405,14 @@ enum RemindersAction {
 #[derive(Subcommand)]
 enum MailAction {
     /// List recent inbox messages (default)
-    List,
+    List {
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Get a single message by index (1-based)
     Get {
         /// Message index (1-based from list output)
@@ -425,6 +460,12 @@ enum MessagesAction {
         /// Number of days to look back
         #[arg(long, default_value = "30")]
         days: u32,
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Send an iMessage/SMS
     Send {
@@ -465,7 +506,14 @@ enum MusicAction {
 #[derive(Subcommand)]
 enum ShortcutsAction {
     /// List all shortcuts (default)
-    List,
+    List {
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Run a shortcut by name
     Run {
         /// Shortcut name
@@ -508,7 +556,14 @@ enum ScreenSharingAction {
 #[derive(Subcommand)]
 enum ScreenshotsAction {
     /// List recent screenshots (default)
-    List,
+    List {
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Take a screenshot
     Capture {
         /// Interactive selection mode
@@ -696,19 +751,7 @@ macro_rules! run_source {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let raw_args: Vec<String> = std::env::args().collect();
-    let mut filtered_args = Vec::with_capacity(raw_args.len());
-    let mut no_op = false;
-    for arg in raw_args {
-        if arg == "--dry-run" {
-            no_op = true;
-        } else {
-            filtered_args.push(arg);
-        }
-    }
-    println!("DBG_FILTERED={:?}", filtered_args);
-    let mut cli = Cli::parse_from(filtered_args);
-    cli.no_op = no_op;
+    let cli = Cli::parse();
 
     match cli.command {
         Commands::ActivityMonitor => run_source!(sources::activity_monitor::fetch(), cli.pretty),
