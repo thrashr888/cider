@@ -1,0 +1,15 @@
+[package]
+name = "cider"
+version = "0.1.0"
+edition = "2021"
+description = "Read Apple app data from the command line — Reminders, Notes, Contacts, Messages, Books, Safari Reading List"
+license = "MIT"
+repository = "https://github.com/thrashr888/cider"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
