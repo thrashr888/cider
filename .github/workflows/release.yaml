@@ -61,6 +61,7 @@ jobs:
   crates-io:
     needs: build
     runs-on: ubuntu-latest
+    environment: crates-io
     permissions:
       id-token: write
     steps:

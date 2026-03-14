@@ -21,7 +21,7 @@ struct Cli {
 
     /// Show what mutating commands would do without executing them
     #[arg(skip)]
-    dry_run: bool,
+    no_op: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -696,20 +696,19 @@ macro_rules! run_source {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let raw_args: Vec<_> = std::env::args_os().collect();
+    let raw_args: Vec<String> = std::env::args().collect();
     let mut filtered_args = Vec::with_capacity(raw_args.len());
-    let mut dry_run = false;
+    let mut no_op = false;
     for arg in raw_args {
-        if arg.to_string_lossy() == "--dry-run" {
-            dry_run = true;
+        if arg == "--dry-run" {
+            no_op = true;
         } else {
             filtered_args.push(arg);
         }
     }
-
-    eprintln!("ARGS={:?}", filtered_args);
+    println!("DBG_FILTERED={:?}", filtered_args);
     let mut cli = Cli::parse_from(filtered_args);
-    cli.dry_run = dry_run;
+    cli.no_op = no_op;
 
     match cli.command {
         Commands::ActivityMonitor => run_source!(sources::activity_monitor::fetch(), cli.pretty),
@@ -740,7 +739,7 @@ async fn run() -> anyhow::Result<()> {
                 notes,
                 all_day,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "calendar.create",
                         format!("Would create event '{title}' starting {start} ending {end}"),
@@ -765,7 +764,7 @@ async fn run() -> anyhow::Result<()> {
                 date,
                 calendar,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "calendar.delete",
                         format!("Would delete event '{title}' on {date}"),
@@ -803,7 +802,7 @@ async fn run() -> anyhow::Result<()> {
                 phone,
                 org,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "contacts.create",
                         format!("Would create contact '{} {}'", first, last),
@@ -828,7 +827,7 @@ async fn run() -> anyhow::Result<()> {
                 email,
                 phone,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "contacts.update",
                         format!("Would update contact '{id}'"),
@@ -847,7 +846,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(ContactsAction::Delete { id }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "contacts.delete",
                         format!("Would delete contact '{id}'"),
@@ -895,7 +894,7 @@ async fn run() -> anyhow::Result<()> {
                 password,
                 label,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "keychain.add",
                         format!("Would add keychain password for {service}/{account}"),
@@ -909,7 +908,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(KeychainAction::Delete { service, account }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "keychain.delete",
                         format!("Would delete keychain password for {service}"),
@@ -933,7 +932,7 @@ async fn run() -> anyhow::Result<()> {
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MailAction::Read { index }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "mail.read",
                         format!("Would mark inbox message #{index} as read"),
@@ -945,7 +944,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(MailAction::Unread { index }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "mail.unread",
                         format!("Would mark inbox message #{index} as unread"),
@@ -957,7 +956,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(MailAction::Trash { index }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "mail.trash",
                         format!("Would trash inbox message #{index}"),
@@ -972,7 +971,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::mail::mailboxes(), cli.pretty)
             }
             Some(MailAction::Send { to, subject, body }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "mail.send",
                         format!("Would send mail to {to} with subject '{subject}'"),
@@ -993,7 +992,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::messages::list(days), cli.pretty)
             }
             Some(MessagesAction::Send { to, text }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "messages.send",
                         format!("Would send message to {to}"),
@@ -1010,7 +1009,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::music::list(), cli.pretty)
             }
             Some(MusicAction::Play { track, playlist }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run("music.play", "Would start Music playback", cli.pretty)?;
                 } else {
                     let result =
@@ -1019,7 +1018,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(MusicAction::Pause) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run("music.pause", "Would pause Music playback", cli.pretty)?;
                 } else {
                     let result = sources::music::pause().await?;
@@ -1027,7 +1026,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(MusicAction::Next) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run("music.next", "Would skip to next track", cli.pretty)?;
                 } else {
                     let result = sources::music::next().await?;
@@ -1035,7 +1034,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(MusicAction::Previous) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run("music.previous", "Would go to previous track", cli.pretty)?;
                 } else {
                     let result = sources::music::previous().await?;
@@ -1067,7 +1066,7 @@ async fn run() -> anyhow::Result<()> {
                 body,
                 folder,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "notes.create",
                         format!("Would create note '{title}'"),
@@ -1080,7 +1079,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(NotesAction::Update { id, body }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "notes.update",
                         format!("Would update note '{id}'"),
@@ -1092,7 +1091,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(NotesAction::Delete { id }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "notes.delete",
                         format!("Would delete note '{id}'"),
@@ -1137,7 +1136,7 @@ async fn run() -> anyhow::Result<()> {
                 priority,
                 notes,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "reminders.create",
                         format!("Would create reminder '{title}'"),
@@ -1156,7 +1155,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(RemindersAction::Complete { title, list }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "reminders.complete",
                         format!("Would complete reminder '{title}'"),
@@ -1168,7 +1167,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(RemindersAction::Delete { title, list }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "reminders.delete",
                         format!("Would delete reminder '{title}'"),
@@ -1188,7 +1187,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::screen_sharing::status(), cli.pretty)
             }
             Some(ScreenSharingAction::Enable) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "screen-sharing.enable",
                         "Would enable screen sharing",
@@ -1200,7 +1199,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(ScreenSharingAction::Disable) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "screen-sharing.disable",
                         "Would disable screen sharing",
@@ -1221,7 +1220,7 @@ async fn run() -> anyhow::Result<()> {
                 window,
                 path,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "screenshots.capture",
                         "Would capture a screenshot",
@@ -1239,7 +1238,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::shortcuts::list(), cli.pretty)
             }
             Some(ShortcutsAction::Run { name, input }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "shortcuts.run",
                         format!("Would run shortcut '{name}'"),
@@ -1251,7 +1250,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(ShortcutsAction::View { name }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "shortcuts.view",
                         format!("Would open shortcut '{name}' in Shortcuts"),
@@ -1267,7 +1266,7 @@ async fn run() -> anyhow::Result<()> {
                 output,
                 mode,
             }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "shortcuts.sign",
                         format!("Would sign shortcut file '{input}' to '{output}'"),
@@ -1292,7 +1291,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::system_info::show(), cli.pretty)
             }
             Some(SystemInfoAction::SetName { name }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "system-info.set-name",
                         format!("Would set computer name to '{name}'"),
@@ -1308,7 +1307,7 @@ async fn run() -> anyhow::Result<()> {
                 print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(SystemInfoAction::DefaultsWrite { domain, key, value }) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "system-info.defaults-write",
                         format!("Would write default {domain} {key}={value}"),
@@ -1329,7 +1328,7 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::time_machine::list(), cli.pretty)
             }
             Some(TimeMachineAction::Start) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "time-machine.start",
                         "Would start a Time Machine backup",
@@ -1341,7 +1340,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
             Some(TimeMachineAction::Stop) => {
-                if cli.dry_run {
+                if cli.no_op {
                     print_dry_run(
                         "time-machine.stop",
                         "Would stop the current Time Machine backup",
