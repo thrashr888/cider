@@ -39,7 +39,20 @@ pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
     let mut all = Vec::new();
 
     for db_path in &db_files {
-        let query = r#"
+        let has_base_list = run_command_with_timeout(
+            "sqlite3",
+            &[
+                db_path,
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZREMCDBASELIST';",
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false);
+
+        let query = if has_base_list {
+            r#"
 SELECT
     COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT)),
     COALESCE(l.ZNAME, ''),
@@ -53,7 +66,23 @@ LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
 WHERE r.ZCOMPLETED = 0
 ORDER BY r.ZDUEDATE ASC
 LIMIT 500;
-"#;
+"#
+        } else {
+            r#"
+SELECT
+    COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT)),
+    '',
+    COALESCE(r.ZTITLE, ''),
+    COALESCE(r.ZPRIORITY, 0),
+    r.ZDUEDATE,
+    COALESCE(r.ZFLAGGED, 0),
+    COALESCE(SUBSTR(r.ZNOTES, 1, 500), '')
+FROM ZREMCDREMINDER r
+WHERE r.ZCOMPLETED = 0
+ORDER BY r.ZDUEDATE ASC
+LIMIT 500;
+"#
+        };
 
         match run_command_with_timeout(
             "sqlite3",

@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use clap::{Parser, Subcommand};
 
+mod pretty;
 mod sources;
 
 #[derive(Parser)]
@@ -510,30 +511,21 @@ enum TimeMachineAction {
     Stop,
 }
 
-fn print_json_to_writer<W: Write>(
-    mut writer: W,
-    value: &serde_json::Value,
-    pretty: bool,
-) -> anyhow::Result<()> {
-    let json = if pretty {
-        serde_json::to_string_pretty(value)?
+fn print_output(value: &serde_json::Value, human: bool) -> anyhow::Result<()> {
+    let mut out = io::stdout().lock();
+    if human {
+        pretty::render(&mut out, value)
     } else {
-        serde_json::to_string(value)?
-    };
-
-    writer.write_all(json.as_bytes())?;
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-fn print_json(value: &serde_json::Value, pretty: bool) -> anyhow::Result<()> {
-    print_json_to_writer(io::stdout().lock(), value, pretty)
+        serde_json::to_writer(&mut out, value)?;
+        out.write_all(b"\n")?;
+        Ok(())
+    }
 }
 
 macro_rules! run_source {
     ($source:expr, $pretty:expr) => {{
         let records = $source.await?;
-        print_json(&serde_json::to_value(&records)?, $pretty)?;
+        print_output(&serde_json::to_value(&records)?, $pretty)?;
     }};
 }
 
@@ -578,11 +570,11 @@ async fn run() -> anyhow::Result<()> {
                     all_day,
                 )
                 .await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(CalendarAction::Delete { title, date }) => {
                 let result = sources::calendar::delete(&title, &date).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(CalendarAction::Calendars) => {
                 run_source!(sources::calendar::calendars(), cli.pretty)
@@ -601,7 +593,7 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(ContactsAction::Get { id }) => {
                 let result = sources::contacts::get(&id).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(ContactsAction::Create {
                 first,
@@ -618,7 +610,7 @@ async fn run() -> anyhow::Result<()> {
                     org.as_deref(),
                 )
                 .await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(ContactsAction::Update {
                 id,
@@ -635,11 +627,11 @@ async fn run() -> anyhow::Result<()> {
                     phone.as_deref(),
                 )
                 .await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(ContactsAction::Delete { id }) => {
                 let result = sources::contacts::delete(&id).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(ContactsAction::Groups) => {
                 run_source!(sources::contacts::groups(), cli.pretty)
@@ -655,26 +647,26 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(MailAction::Get { index }) => {
                 let result = sources::mail::get(index).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MailAction::Read { index }) => {
                 let result = sources::mail::read(index).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MailAction::Unread { index }) => {
                 let result = sources::mail::unread(index).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MailAction::Trash { index }) => {
                 let result = sources::mail::trash(index).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MailAction::Mailboxes) => {
                 run_source!(sources::mail::mailboxes(), cli.pretty)
             }
             Some(MailAction::Send { to, subject, body }) => {
                 let result = sources::mail::send(&to, &subject, &body).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty),
@@ -687,7 +679,7 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(MessagesAction::Send { to, text }) => {
                 let result = sources::messages::send(&to, &text).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::Music { action } => match action {
@@ -696,23 +688,23 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(MusicAction::Play { track, playlist }) => {
                 let result = sources::music::play(track.as_deref(), playlist.as_deref()).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MusicAction::Pause) => {
                 let result = sources::music::pause().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MusicAction::Next) => {
                 let result = sources::music::next().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MusicAction::Previous) => {
                 let result = sources::music::previous().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MusicAction::Status) => {
                 let result = sources::music::status().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(MusicAction::Playlists) => {
                 run_source!(sources::music::playlists(), cli.pretty)
@@ -728,7 +720,7 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(NotesAction::Get { id }) => {
                 let result = sources::notes::get(&id).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(NotesAction::Create {
                 title,
@@ -737,15 +729,15 @@ async fn run() -> anyhow::Result<()> {
             }) => {
                 let result =
                     sources::notes::create(&title, body.as_deref(), folder.as_deref()).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(NotesAction::Update { id, body }) => {
                 let result = sources::notes::update(&id, &body).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(NotesAction::Delete { id }) => {
                 let result = sources::notes::delete(&id).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(NotesAction::Folders) => {
                 run_source!(sources::notes::folders(), cli.pretty)
@@ -776,15 +768,15 @@ async fn run() -> anyhow::Result<()> {
                     notes.as_deref(),
                 )
                 .await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(RemindersAction::Complete { title }) => {
                 let result = sources::reminders::complete(&title).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(RemindersAction::Delete { title }) => {
                 let result = sources::reminders::delete(&title).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(RemindersAction::Lists) => {
                 run_source!(sources::reminders::lists(), cli.pretty)
@@ -796,11 +788,11 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(ScreenSharingAction::Enable) => {
                 let result = sources::screen_sharing::enable().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(ScreenSharingAction::Disable) => {
                 let result = sources::screen_sharing::disable().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::Screenshots { action } => match action {
@@ -814,7 +806,7 @@ async fn run() -> anyhow::Result<()> {
             }) => {
                 let result =
                     sources::screenshots::capture(selection, window, path.as_deref()).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::Shortcuts { action } => match action {
@@ -823,7 +815,7 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(ShortcutsAction::Run { name, input }) => {
                 let result = sources::shortcuts::run(&name, input.as_deref()).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty),
@@ -834,31 +826,31 @@ async fn run() -> anyhow::Result<()> {
             }
             Some(SystemInfoAction::SetName { name }) => {
                 let result = sources::system_info::set_computer_name(&name).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(SystemInfoAction::DefaultsRead { domain, key }) => {
                 let result = sources::system_info::defaults_read(&domain, key.as_deref()).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(SystemInfoAction::DefaultsWrite { domain, key, value }) => {
                 let result = sources::system_info::defaults_write(&domain, &key, &value).await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::TimeMachine { action } => match action {
-            None | Some(TimeMachineAction::List) => {
-                run_source!(sources::time_machine::list(), cli.pretty)
-            }
-            Some(TimeMachineAction::Status) => {
+            None | Some(TimeMachineAction::Status) => {
                 run_source!(sources::time_machine::status(), cli.pretty)
+            }
+            Some(TimeMachineAction::List) => {
+                run_source!(sources::time_machine::list(), cli.pretty)
             }
             Some(TimeMachineAction::Start) => {
                 let result = sources::time_machine::start().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
             Some(TimeMachineAction::Stop) => {
                 let result = sources::time_machine::stop().await?;
-                print_json(&serde_json::to_value(&result)?, cli.pretty)?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty)?;
             }
         },
         Commands::VoiceMemos => run_source!(sources::voice_memos::fetch(), cli.pretty),

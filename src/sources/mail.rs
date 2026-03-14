@@ -84,11 +84,30 @@ const i = {} - 1;
 if (i < 0 || i >= total) {{
     "ERROR: Message index out of range";
 }} else {{
-    const m = msgs[i];
-    const subj = (m.subject() || "").replace(/[\t\n\r]/g, " ");
-    const sndr = (m.sender() || "").replace(/[\t\n\r]/g, " ");
-    const dt = m.dateReceived() ? m.dateReceived().toISOString() : "";
-    const rd = m.readStatus() ? "1" : "0";
+    const subjects = msgs.subject();
+    const senders = msgs.sender();
+    const dates = msgs.dateReceived();
+    const readStatuses = msgs.readStatus();
+    const rows = [];
+    for (let j = 0; j < total; j++) {{
+        rows.push({{
+            msg: msgs[j],
+            subject: subjects[j] || "",
+            sender: senders[j] || "",
+            date: dates[j] || null,
+            isRead: !!readStatuses[j],
+        }});
+    }}
+    rows.sort((a, b) => {{
+        const aTime = a.date ? a.date.getTime() : 0;
+        const bTime = b.date ? b.date.getTime() : 0;
+        return bTime - aTime;
+    }});
+    const m = rows[i].msg;
+    const subj = (rows[i].subject || "").replace(/[\t\n\r]/g, " ");
+    const sndr = (rows[i].sender || "").replace(/[\t\n\r]/g, " ");
+    const dt = rows[i].date ? rows[i].date.toISOString() : "";
+    const rd = rows[i].isRead ? "1" : "0";
     let body = "";
     try {{ body = (m.content() || "").substring(0, 500).replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
     [subj, sndr, dt, rd, body].join("\t");
@@ -125,11 +144,22 @@ pub async fn read(idx: usize) -> anyhow::Result<ActionResult> {
 const app = Application("Mail");
 const inbox = app.inbox();
 const msgs = inbox.messages;
+const total = msgs.length;
 const i = {} - 1;
-if (i < 0 || i >= msgs.length) {{
+if (i < 0 || i >= total) {{
     "ERROR: Message index out of range";
 }} else {{
-    msgs[i].readStatus = true;
+    const dates = msgs.dateReceived();
+    const rows = [];
+    for (let j = 0; j < total; j++) {{
+        rows.push({{ msg: msgs[j], date: dates[j] || null }});
+    }}
+    rows.sort((a, b) => {{
+        const aTime = a.date ? a.date.getTime() : 0;
+        const bTime = b.date ? b.date.getTime() : 0;
+        return bTime - aTime;
+    }});
+    rows[i].msg.readStatus = true;
     "done";
 }}
 "#,
@@ -149,11 +179,22 @@ pub async fn unread(idx: usize) -> anyhow::Result<ActionResult> {
 const app = Application("Mail");
 const inbox = app.inbox();
 const msgs = inbox.messages;
+const total = msgs.length;
 const i = {} - 1;
-if (i < 0 || i >= msgs.length) {{
+if (i < 0 || i >= total) {{
     "ERROR: Message index out of range";
 }} else {{
-    msgs[i].readStatus = false;
+    const dates = msgs.dateReceived();
+    const rows = [];
+    for (let j = 0; j < total; j++) {{
+        rows.push({{ msg: msgs[j], date: dates[j] || null }});
+    }}
+    rows.sort((a, b) => {{
+        const aTime = a.date ? a.date.getTime() : 0;
+        const bTime = b.date ? b.date.getTime() : 0;
+        return bTime - aTime;
+    }});
+    rows[i].msg.readStatus = false;
     "done";
 }}
 "#,
@@ -173,11 +214,22 @@ pub async fn trash(idx: usize) -> anyhow::Result<ActionResult> {
 const app = Application("Mail");
 const inbox = app.inbox();
 const msgs = inbox.messages;
+const total = msgs.length;
 const i = {} - 1;
-if (i < 0 || i >= msgs.length) {{
+if (i < 0 || i >= total) {{
     "ERROR: Message index out of range";
 }} else {{
-    app.delete(msgs[i]);
+    const dates = msgs.dateReceived();
+    const rows = [];
+    for (let j = 0; j < total; j++) {{
+        rows.push({{ msg: msgs[j], date: dates[j] || null }});
+    }}
+    rows.sort((a, b) => {{
+        const aTime = a.date ? a.date.getTime() : 0;
+        const bTime = b.date ? b.date.getTime() : 0;
+        return bTime - aTime;
+    }});
+    app.delete(rows[i].msg);
     "done";
 }}
 "#,

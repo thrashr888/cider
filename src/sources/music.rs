@@ -163,16 +163,26 @@ if (state === "stopped") {
 
     let output = run_jxa(script).await?;
     let parts: Vec<&str> = output.split('\t').collect();
-    if parts.len() < 6 {
-        anyhow::bail!("Unexpected status output from Music.app");
-    }
 
-    let name = parts[0].trim().to_string();
-    let artist = parts[1].trim();
-    let album = parts[2].trim();
-    let position: f64 = parts[3].trim().parse().unwrap_or(0.0);
-    let duration: f64 = parts[4].trim().parse().unwrap_or(0.0);
-    let state = parts[5].trim().to_string();
+    let (name, artist, album, position, duration, state) = match parts.as_slice() {
+        [position, duration, state] => (
+            String::new(),
+            "",
+            "",
+            position.trim().parse().unwrap_or(0.0),
+            duration.trim().parse().unwrap_or(0.0),
+            state.trim().to_string(),
+        ),
+        [name, artist, album, position, duration, state, ..] => (
+            name.trim().to_string(),
+            artist.trim(),
+            album.trim(),
+            position.trim().parse().unwrap_or(0.0),
+            duration.trim().parse().unwrap_or(0.0),
+            state.trim().to_string(),
+        ),
+        _ => anyhow::bail!("Unexpected status output from Music.app"),
+    };
 
     Ok(NowPlaying {
         name,
