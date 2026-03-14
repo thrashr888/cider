@@ -61,11 +61,16 @@ jobs:
   crates-io:
     needs: build
     runs-on: ubuntu-latest
-    environment: crates-io
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish to crates.io via OIDC
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish
 
   homebrew:
@@ -83,14 +88,14 @@ jobs:
           echo "x86_64=$(sha256sum cider-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Generate and push Homebrew formula
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
           SHA_ARM64: ${{ steps.sha.outputs.aarch64 }}
           SHA_X86: ${{ steps.sha.outputs.x86_64 }}
         run: |
           VERSION="${TAG_NAME#v}"
-          mkdir -p /tmp/formula
-          cat > /tmp/formula/cider.rb << FORMULA
+
+          cat > cider.rb << FORMULA
           class Cider < Formula
             desc "Manage macOS Apple apps from the command line"
             homepage "https://github.com/thrashr888/cider"
@@ -117,24 +122,11 @@ jobs:
           end
           FORMULA
 
-          echo "Generated formula:"
-          cat /tmp/formula/cider.rb
-
-          # Push to homebrew tap using GitHub API (no PAT needed, uses GITHUB_TOKEN)
-          FORMULA_CONTENT=$(base64 -w0 /tmp/formula/cider.rb)
-
-          # Get current file SHA if it exists
-          EXISTING_SHA=$(gh api "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" --jq '.sha' 2>/dev/null || echo "")
-
-          if [ -n "$EXISTING_SHA" ]; then
-            gh api --method PUT "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" \
-              -f message="Update cider to ${TAG_NAME}" \
-              -f content="$FORMULA_CONTENT" \
-              -f sha="$EXISTING_SHA" \
-              -f branch="main" || echo "Homebrew tap update failed"
-          else
-            gh api --method PUT "repos/thrashr888/homebrew-cider/contents/Formula/cider.rb" \
-              -f message="Update cider to ${TAG_NAME}" \
-              -f content="$FORMULA_CONTENT" \
-              -f branch="main" || echo "Homebrew tap update failed"
-          fi
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/thrashr888/homebrew-cider.git" /tmp/homebrew-cider
+          cp cider.rb /tmp/homebrew-cider/Formula/cider.rb
+          cd /tmp/homebrew-cider
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cider.rb
+          git commit -m "Update cider to ${TAG_NAME}"
+          git push

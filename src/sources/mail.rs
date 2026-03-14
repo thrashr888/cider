@@ -1,4 +1,6 @@
-use super::util::{escape_jxa, run_command_with_timeout, run_jxa, ActionResult};
+use super::util::{
+    escape_jxa, run_command_with_timeout, run_jxa, run_osascript_with_timeout, ActionResult,
+};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -21,6 +23,12 @@ pub struct MailMessageDetail {
     pub body_preview: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct MailMessageRecord {
+    pub apple_mail_id: i64,
+    pub detail: MailMessageDetail,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Mailbox {
     pub name: String,
@@ -34,125 +42,40 @@ pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
     Ok(records
         .into_iter()
         .map(|m| MailMessage {
-            subject: m.subject,
-            sender: m.sender,
-            date_received: m.date_received,
-            is_read: m.is_read,
-            mailbox: m.mailbox,
+            subject: m.detail.subject,
+            sender: m.detail.sender,
+            date_received: m.detail.date_received,
+            is_read: m.detail.is_read,
+            mailbox: m.detail.mailbox,
         })
         .collect())
 }
 
 pub async fn get(idx: usize) -> anyhow::Result<MailMessageDetail> {
-    let records = query_inbox_messages(50).await?;
-    if idx == 0 || idx > records.len() {
-        anyhow::bail!("Message index out of range");
-    }
-    Ok(records[idx - 1].clone())
+    Ok(inbox_message_for_index(idx, 50).await?.detail)
 }
 
 pub async fn read(idx: usize) -> anyhow::Result<ActionResult> {
-    let script = format!(
-        r#"
-const app = Application("Mail");
-const inbox = app.inbox();
-const msgs = inbox.messages;
-const total = msgs.length;
-const i = {} - 1;
-if (i < 0 || i >= total) {{
-    "ERROR: Message index out of range";
-}} else {{
-    const dates = msgs.dateReceived();
-    const rows = [];
-    for (let j = 0; j < total; j++) {{
-        rows.push({{ msg: msgs[j], date: dates[j] || null }});
-    }}
-    rows.sort((a, b) => {{
-        const aTime = a.date ? a.date.getTime() : 0;
-        const bTime = b.date ? b.date.getTime() : 0;
-        return bTime - aTime;
-    }});
-    rows[i].msg.readStatus = true;
-    "done";
-}}
-"#,
-        idx
-    );
-
-    let output = run_jxa(&script).await?;
-    if output.starts_with("ERROR:") {
-        anyhow::bail!("{}", output);
-    }
+    let record = inbox_message_for_index(idx, 50).await?;
+    mutate_inbox_message_by_id(record.apple_mail_id, |target| {
+        format!("set read status of ({target}) to true")
+    })
+    .await?;
     Ok(ActionResult::success("read"))
 }
 
 pub async fn unread(idx: usize) -> anyhow::Result<ActionResult> {
-    let script = format!(
-        r#"
-const app = Application("Mail");
-const inbox = app.inbox();
-const msgs = inbox.messages;
-const total = msgs.length;
-const i = {} - 1;
-if (i < 0 || i >= total) {{
-    "ERROR: Message index out of range";
-}} else {{
-    const dates = msgs.dateReceived();
-    const rows = [];
-    for (let j = 0; j < total; j++) {{
-        rows.push({{ msg: msgs[j], date: dates[j] || null }});
-    }}
-    rows.sort((a, b) => {{
-        const aTime = a.date ? a.date.getTime() : 0;
-        const bTime = b.date ? b.date.getTime() : 0;
-        return bTime - aTime;
-    }});
-    rows[i].msg.readStatus = false;
-    "done";
-}}
-"#,
-        idx
-    );
-
-    let output = run_jxa(&script).await?;
-    if output.starts_with("ERROR:") {
-        anyhow::bail!("{}", output);
-    }
+    let record = inbox_message_for_index(idx, 50).await?;
+    mutate_inbox_message_by_id(record.apple_mail_id, |target| {
+        format!("set read status of ({target}) to false")
+    })
+    .await?;
     Ok(ActionResult::success("unread"))
 }
 
 pub async fn trash(idx: usize) -> anyhow::Result<ActionResult> {
-    let script = format!(
-        r#"
-const app = Application("Mail");
-const inbox = app.inbox();
-const msgs = inbox.messages;
-const total = msgs.length;
-const i = {} - 1;
-if (i < 0 || i >= total) {{
-    "ERROR: Message index out of range";
-}} else {{
-    const dates = msgs.dateReceived();
-    const rows = [];
-    for (let j = 0; j < total; j++) {{
-        rows.push({{ msg: msgs[j], date: dates[j] || null }});
-    }}
-    rows.sort((a, b) => {{
-        const aTime = a.date ? a.date.getTime() : 0;
-        const bTime = b.date ? b.date.getTime() : 0;
-        return bTime - aTime;
-    }});
-    app.delete(rows[i].msg);
-    "done";
-}}
-"#,
-        idx
-    );
-
-    let output = run_jxa(&script).await?;
-    if output.starts_with("ERROR:") {
-        anyhow::bail!("{}", output);
-    }
+    let record = inbox_message_for_index(idx, 50).await?;
+    mutate_inbox_message_by_id(record.apple_mail_id, |target| format!("delete ({target})")).await?;
     Ok(ActionResult::success("trash"))
 }
 
@@ -213,11 +136,50 @@ fn mail_db_path() -> anyhow::Result<String> {
     }
 }
 
-async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageDetail>> {
+async fn inbox_message_for_index(idx: usize, limit: usize) -> anyhow::Result<MailMessageRecord> {
+    if idx == 0 {
+        anyhow::bail!("Message index out of range");
+    }
+
+    let records = query_inbox_messages(limit).await?;
+    records
+        .into_iter()
+        .nth(idx - 1)
+        .ok_or_else(|| anyhow::anyhow!("Message index out of range"))
+}
+
+async fn mutate_inbox_message_by_id<F>(apple_mail_id: i64, build_action: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&str) -> String,
+{
+    let target = format!("first message of inbox whose id is {apple_mail_id}");
+    let action = build_action(&target);
+    let script = format!(
+        r#"
+tell application "Mail"
+    try
+        {action}
+        return "done"
+    on error errMsg
+        return "ERROR: " & errMsg
+    end try
+end tell
+"#
+    );
+
+    let output = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    if output.starts_with("ERROR:") {
+        anyhow::bail!("{}", output);
+    }
+    Ok(())
+}
+
+async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageRecord>> {
     let db_path = mail_db_path()?;
     let query = format!(
         r#"
 SELECT
+    m.ROWID,
     COALESCE(s.subject, ''),
     COALESCE(a.address, ''),
     datetime(m.date_received, 'unixepoch'),
@@ -245,25 +207,32 @@ LIMIT {limit};
     let mut records = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 5 {
+        if parts.len() < 6 {
             continue;
         }
-        let subject = parts[0].trim().to_string();
-        let sender = parts[1].trim().to_string();
-        let date_received = parts[2].trim().to_string();
-        let is_read = parts[3].trim() == "1";
-        let mailbox = parts[4].trim().to_string();
+        let apple_mail_id: i64 = match parts[0].trim().parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let subject = parts[1].trim().to_string();
+        let sender = parts[2].trim().to_string();
+        let date_received = parts[3].trim().to_string();
+        let is_read = parts[4].trim() == "1";
+        let mailbox = parts[5].trim().to_string();
         let body_preview = parts
-            .get(5)
+            .get(6)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        records.push(MailMessageDetail {
-            subject,
-            sender,
-            date_received,
-            is_read,
-            mailbox,
-            body_preview,
+        records.push(MailMessageRecord {
+            apple_mail_id,
+            detail: MailMessageDetail {
+                subject,
+                sender,
+                date_received,
+                is_read,
+                mailbox,
+                body_preview,
+            },
         });
     }
     Ok(records)
