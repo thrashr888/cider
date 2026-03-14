@@ -36,43 +36,36 @@ pub struct Playlist {
 }
 
 pub async fn list() -> anyhow::Result<Vec<Track>> {
-    // Use JXA with bulk property access for speed.
-    // Handle the case where Music.app has no library.
+    // Use JXA to read the first available playlist/library and iterate tracks.
     let script = r#"
 const app = Application("Music");
-let lib;
-try { lib = app.libraryPlaylists[0]; } catch(e) { ""; }
-if (!lib) { ""; } else {
-    const tracks = lib.tracks;
-    let count;
-    try { count = tracks.length; } catch(e) { count = 0; }
-    if (count === 0) { ""; } else {
-        const limit = Math.min(count, 500);
-        const names = tracks.name().slice(0, limit);
-        const artists = tracks.artist().slice(0, limit);
-        const albums = tracks.album().slice(0, limit);
-        const genres = tracks.genre().slice(0, limit);
-        const durations = tracks.duration().slice(0, limit);
-        const playCounts = tracks.playedCount().slice(0, limit);
-        const years = tracks.year().slice(0, limit);
-        const ratings = tracks.rating().slice(0, limit);
-        const loveds = tracks.loved().slice(0, limit);
-        const results = [];
-        for (let i = 0; i < limit; i++) {
-            results.push([
-                (names[i] || "").replace(/[\t\n\r]/g, " "),
-                (artists[i] || "").replace(/[\t\n\r]/g, " "),
-                (albums[i] || "").replace(/[\t\n\r]/g, " "),
-                (genres[i] || "").replace(/[\t\n\r]/g, " "),
-                durations[i] || 0,
-                playCounts[i] || 0,
-                years[i] || 0,
-                ratings[i] || 0,
-                loveds[i] ? "1" : "0"
-            ].join("\t"));
-        }
-        results.join("\n");
+let tracks = [];
+try {
+    const playlists = app.playlists();
+    if (playlists && playlists.length > 0) {
+        tracks = playlists[0].tracks();
     }
+} catch(e) {}
+const count = tracks ? tracks.length : 0;
+if (count === 0) { ""; } else {
+    const limit = Math.min(count, 500);
+    const results = [];
+    for (let i = 0; i < limit; i++) {
+        const t = tracks[i];
+        let name = "", artist = "", album = "", genre = "";
+        let duration = 0, playCount = 0, year = 0, rating = 0, loved = false;
+        try { name = (t.name() || "").replace(/[\t\n\r]/g, " "); } catch(e) {}
+        try { artist = (t.artist() || "").replace(/[\t\n\r]/g, " "); } catch(e) {}
+        try { album = (t.album() || "").replace(/[\t\n\r]/g, " "); } catch(e) {}
+        try { genre = (t.genre() || "").replace(/[\t\n\r]/g, " "); } catch(e) {}
+        try { duration = t.duration() || 0; } catch(e) {}
+        try { playCount = t.playedCount() || 0; } catch(e) {}
+        try { year = t.year() || 0; } catch(e) {}
+        try { rating = t.rating() || 0; } catch(e) {}
+        try { loved = !!t.loved(); } catch(e) {}
+        results.push([name, artist, album, genre, duration, playCount, year, rating, loved ? "1" : "0"].join("\t"));
+    }
+    results.join("\n");
 }
 "#;
 

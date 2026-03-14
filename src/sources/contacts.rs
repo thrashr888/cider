@@ -34,8 +34,6 @@ pub async fn list(search: Option<&str>) -> anyhow::Result<Vec<Contact>> {
         return Ok(vec![]);
     }
 
-    eprintln!("Contacts: found {total}, fetching in chunks...");
-
     let chunk_size = 200usize;
     let mut all_lines = Vec::new();
 
@@ -77,7 +75,7 @@ results.join("\n")
                     all_lines.extend(chunk.lines().map(String::from));
                 }
             }
-            Err(e) => eprintln!("Contacts: error fetching chunk {start}..{end}: {e}"),
+            Err(e) => return Err(e),
         }
     }
 

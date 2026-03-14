@@ -21,18 +21,19 @@ pub struct NoteFolder {
 }
 
 /// List notes, optionally filtered by folder name.
+/// Includes body text (truncated to 2000 chars) for each note.
 pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
     let folder_clause = if let Some(folder) = folder_filter {
         let escaped = escape_applescript(folder);
         format!(
             r#"
-                set folderList to {{folder "{escaped}"}}
-"#
+                set targetFolders to {{folder "{escaped}"}}
+            "#
         )
     } else {
         r#"
-                set folderList to every folder
-"#
+                set targetFolders to every folder
+            "#
         .to_string()
     };
 
@@ -42,7 +43,7 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
         set noteCount to 0
         tell application "Notes"
             {folder_clause}
-            repeat with f in folderList
+            repeat with f in targetFolders
                 set folderName to name of f
                 repeat with n in every note of f
                     set noteCount to noteCount + 1
@@ -306,7 +307,7 @@ fn parse_json_output(output: &str) -> Vec<Note> {
         let id = if note_id.is_empty() {
             slug(name)
         } else {
-            slug(note_id)
+            note_id.to_string()
         };
 
         records.push(Note {
@@ -352,7 +353,7 @@ fn parse_tab_output(output: &str) -> Vec<Note> {
         let id = if note_id.is_empty() {
             slug(name)
         } else {
-            slug(note_id)
+            note_id.to_string()
         };
 
         records.push(Note {

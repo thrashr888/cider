@@ -35,8 +35,6 @@ pub async fn fetch() -> anyhow::Result<Vec<ReadingListItem>> {
         }
     }
 
-    eprintln!("plutil JSON conversion failed, trying Python plistlib fallback");
-
     let python_script = format!(
         r#"
 import plistlib, json, sys
