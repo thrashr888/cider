@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cider Output Contract"
+  short_description: "Preserve cider JSON and pretty output rules"
+  default_prompt: "Change this cider CLI behavior without breaking its JSON, pretty, schema, envelope, or dry-run contract."

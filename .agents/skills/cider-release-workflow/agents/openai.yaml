@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cider Release Workflow"
+  short_description: "Handle version bumps and release automation"
+  default_prompt: "Prepare or update cider release changes, including versioning, CI, GitHub release, crates.io, and Homebrew flow."

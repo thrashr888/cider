@@ -120,6 +120,46 @@ cider follows [agent-friendly CLI principles](https://justin.poehnelt.com/posts/
 - Each command is stateless and independent
 - Broken pipe safe (`cider contacts | head` won't error)
 
+## Agent Skills
+
+This repo includes [Agent Skills](https://agentskills.io/) so compatible agents can learn how to use `cider` effectively.
+
+### Installing Skills
+
+```sh
+# Install the repo's skills
+npx skills add thrashr888/cider
+
+# Install just the cider CLI usage skill
+npx skills add thrashr888/cider@cider-cli
+
+# Install to a specific agent
+npx skills add thrashr888/cider -a claude-code
+npx skills add thrashr888/cider -a cursor
+```
+
+Or copy the skills into another project manually:
+
+```sh
+git clone https://github.com/thrashr888/cider.git
+cp -r cider/.skills /path/to/your/project/.skills
+```
+
+Compatible agents automatically discover skills in the `.skills/` directory.
+
+### Available Skills
+
+- `cider-cli` — guide for using `cider` to read and change Apple app data from the terminal
+
+The `cider-cli` skill helps agents:
+
+- discover commands with `cider --help` and `cider schema --source <name>`
+- prefer compact JSON for automation and `--pretty` only for human review
+- use `--dry-run` before supported mutations
+- account for macOS permissions, dialogs, and real side effects like `mail send` and `messages send`
+
+This repo also contains repo-maintenance skills in `.agents/skills/` for agents working on `cider` itself.
+
 ## Build from Source
 
 ```sh

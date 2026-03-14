@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cider Add Source"
+  short_description: "Add or extend a cider source module"
+  default_prompt: "Add or update a cider source command and wire its code, tests, schema, and docs correctly."
