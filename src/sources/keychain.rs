@@ -60,7 +60,7 @@ pub async fn search(query: &str, kind: Option<&str>) -> anyhow::Result<Vec<Keych
 }
 
 /// Get the password for a generic (app) password by service and account.
-/// Returns the password as a string. Requires user approval via macOS security dialog.
+/// Requires user approval via macOS security dialog.
 pub async fn get_password(service: &str, account: Option<&str>) -> anyhow::Result<String> {
     let mut args = vec!["find-generic-password", "-s", service, "-w"];
     if let Some(acct) = account {
@@ -103,7 +103,7 @@ pub async fn add(
         account,
         "-w",
         password,
-        "-U", // update if exists
+        "-U",
     ];
     if let Some(l) = label {
         args.push("-l");

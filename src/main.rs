@@ -64,6 +64,12 @@ enum Commands {
     },
     /// List mounted disks and volumes (Disk Utility)
     Disks,
+    /// Recent call history (FaceTime + Phone)
+    #[command(name = "facetime")]
+    FaceTime {
+        #[command(subcommand)]
+        action: Option<FaceTimeAction>,
+    },
     /// Fetch devices from Find My
     #[command(name = "find-my")]
     FindMy,
@@ -97,6 +103,11 @@ enum Commands {
     },
     /// Fetch saved articles from Apple News
     News,
+    /// List saved passwords (metadata only, no secrets)
+    Passwords {
+        #[command(subcommand)]
+        action: Option<PasswordsAction>,
+    },
     /// Interact with Apple Notes
     Notes {
         #[command(subcommand)]
@@ -625,7 +636,7 @@ enum TimeMachineAction {
 
 #[derive(Subcommand)]
 enum KeychainAction {
-    /// List keychain items (metadata only, no passwords)
+    /// List all keychain items including certs and keys (metadata only)
     List {
         /// Filter by kind: generic-password, internet-password, certificate, key
         #[arg(long)]
@@ -686,6 +697,80 @@ enum KeychainAction {
     },
     /// List all keychains
     Keychains,
+}
+
+#[derive(Subcommand)]
+enum FaceTimeAction {
+    /// List recent calls (default)
+    List {
+        /// Maximum number of calls to show
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum PasswordsAction {
+    /// List saved passwords (default, metadata only)
+    List {
+        /// Search by name, service, or account
+        #[arg(long)]
+        search: Option<String>,
+        /// Skip the first N results
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Limit the number of results returned
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Get a password entry by service name
+    Get {
+        /// Service or server name
+        #[arg(long)]
+        service: String,
+        /// Account name (narrows the match)
+        #[arg(long)]
+        account: Option<String>,
+        /// Show the actual password value (triggers macOS auth)
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// Create a new password
+    Create {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name (username/email)
+        #[arg(long)]
+        account: String,
+        /// Password value
+        #[arg(long)]
+        password: String,
+        /// Display label
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Update an existing password
+    Update {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name
+        #[arg(long)]
+        account: String,
+        /// New password value
+        #[arg(long)]
+        password: String,
+    },
+    /// Delete a password
+    Delete {
+        /// Service name
+        #[arg(long)]
+        service: String,
+        /// Account name (narrows the match)
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -973,6 +1058,14 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Disks => run_source!(sources::disks::list(), cli.pretty, cli.envelope),
+        Commands::FaceTime { action } => match action {
+            None => {
+                run_source!(sources::facetime::list(50), cli.pretty, cli.envelope)
+            }
+            Some(FaceTimeAction::List { limit }) => {
+                run_source!(sources::facetime::list(limit), cli.pretty, cli.envelope)
+            }
+        },
         Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty, cli.envelope),
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty, cli.envelope),
         Commands::Home => run_source!(sources::home::fetch(), cli.pretty, cli.envelope),
@@ -1203,6 +1296,86 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::News => run_source!(sources::news::fetch(), cli.pretty, cli.envelope),
+        Commands::Passwords { action } => match action {
+            None => {
+                run_source!(sources::passwords::list(None), cli.pretty, cli.envelope)
+            }
+            Some(PasswordsAction::List {
+                search,
+                offset,
+                limit,
+            }) => {
+                let records = paginate_vec(
+                    sources::passwords::list(search.as_deref()).await?,
+                    offset,
+                    limit,
+                );
+                print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
+            }
+            Some(PasswordsAction::Get {
+                service,
+                account,
+                reveal,
+            }) => {
+                if reveal {
+                    let pw = sources::passwords::get_password(&service, account.as_deref()).await?;
+                    print_output(&serde_json::to_value(&pw)?, cli.pretty, cli.envelope)?;
+                } else {
+                    let entry = sources::passwords::get(&service, account.as_deref()).await?;
+                    print_output(&serde_json::to_value(&entry)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(PasswordsAction::Create {
+                service,
+                account,
+                password,
+                label,
+            }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "passwords.create",
+                        format!("Would create password for {service}/{account}"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result =
+                        sources::passwords::create(&service, &account, &password, label.as_deref())
+                            .await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(PasswordsAction::Update {
+                service,
+                account,
+                password,
+            }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "passwords.update",
+                        format!("Would update password for {service}/{account}"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::passwords::update(&service, &account, &password).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(PasswordsAction::Delete { service, account }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "passwords.delete",
+                        format!("Would delete password for {service}"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::passwords::delete(&service, account.as_deref()).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+        },
         Commands::Notes { action } => match action {
             None => {
                 run_source!(sources::notes::list(None), cli.pretty, cli.envelope)

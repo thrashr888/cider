@@ -71,6 +71,13 @@ cider spotlight --query "quarterly report"
 | Safari | `bookmarks`, `history`, `tabs`, `reading-list` |
 | Wi-Fi | `status`, `networks` |
 
+### Read + CRUD
+
+| App | Actions |
+|-----|---------|
+| FaceTime | `list` |
+| Passwords | `list`, `get`, `create`, `update`, `delete` |
+
 ### Read-Only
 
 Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Find My, Fonts, Home, Maps, News, Photo Booth, Photos, Spotlight, Stickies, Stocks, Voice Memos, Weather
