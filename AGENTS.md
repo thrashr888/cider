@@ -21,5 +21,7 @@ Releases are automated via `.github/workflows/release.yaml`, triggered by pushin
 To cut a release:
 1. Bump `version` in `Cargo.toml` and commit: `Bump to vX.Y.Z`
 2. Push the commit to `main`
-3. Create the release from the **GitHub UI** at https://github.com/thrashr888/cider/releases/new — create tag `vX.Y.Z` targeting `main` and publish (repository rulesets block tag pushes via CLI)
+3. Run `gh release create vX.Y.Z --target main --generate-notes`
 4. The workflow builds binaries, uploads them to the release, publishes to crates.io, and updates the Homebrew tap automatically
+
+Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create` which creates the tag through the Releases API.
