@@ -1,6 +1,6 @@
 [package]
 name = "cider-cli"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Manage macOS Apple apps from the command line — Reminders, Calendar, Contacts, Notes, Mail, Music, Keychain, Safari, and 30+ more"
 license = "MIT"
