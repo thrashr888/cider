@@ -21,7 +21,7 @@ Releases are automated via `.github/workflows/release.yaml`, triggered by pushin
 To cut a release:
 1. Bump `version` in `Cargo.toml` and commit: `Bump to vX.Y.Z`
 2. Push the commit to `main`
-3. Run `gh release create vX.Y.Z --target main --generate-notes`
-4. The workflow builds binaries, uploads them to the release, publishes to crates.io, and updates the Homebrew tap automatically
+3. Run `gh release create vX.Y.Z --target main --draft --generate-notes`
+4. The workflow triggers on the tag push, builds macOS binaries, uploads them to the draft release, publishes it, pushes to crates.io, and updates the Homebrew tap
 
-Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create` which creates the tag through the Releases API.
+Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create --draft` which creates the tag through the Releases API and leaves the release as a draft for the workflow to finalize.
