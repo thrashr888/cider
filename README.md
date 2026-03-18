@@ -85,10 +85,10 @@ cider calendar | jq '[.[] | select(.is_all_day == false)]'
 cider activity-monitor | jq '.[0].top_processes[:5]'
 ```
 
-Add `--pretty` for human-readable tables:
+Add `--pretty` anywhere for human-readable tables:
 
 ```
-$ cider reminders --pretty
+$ cider --pretty reminders
 ID                                    LIST       PRIORITY  TITLE
 ──────────────────────────────────────────────────────────────────
 4b7c5902-46a7-4f7a-a385-91b562ca8eb6  Shopping   1         Buy milk
@@ -99,7 +99,7 @@ f4c021a1-2ed3-4f14-ab65-b8ce3b315a27  Work       0         Review PR
 Write operations return a status object:
 
 ```
-$ cider reminders create --title "Buy milk" --list Shopping --pretty
+$ cider --pretty reminders create --title "Buy milk" --list Shopping
 ✓ created (buy_milk) — Reminder added
 ```
 

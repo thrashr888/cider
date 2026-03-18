@@ -16,15 +16,15 @@ mod sources;
 )]
 struct Cli {
     /// Pretty-print JSON output
-    #[arg(long)]
+    #[arg(long, global = true)]
     pretty: bool,
 
     /// Wrap responses in a stable top-level envelope
-    #[arg(long)]
+    #[arg(long, global = true)]
     envelope: bool,
 
     /// Show what mutating commands would do without executing them
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", global = true)]
     no_op: bool,
 
     #[command(subcommand)]
