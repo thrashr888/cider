@@ -14,3 +14,12 @@ This repo keeps tests inline with implementation under `#[cfg(test)] mod tests` 
 
 ## Commit & Pull Request Guidelines
 Recent history uses short, imperative commit subjects, often with Conventional Commit prefixes like `feat:` and `fix:`; release commits use `Bump to vX.Y.Z`. Keep commits focused and easy to scan. PRs should explain which commands or source modules changed, list validation performed (`cargo test`, `cargo clippy`, manual command runs), and include sample command/output snippets for user-facing CLI changes. Call out any macOS permission or side-effect implications for mutating commands.
+
+## Release Process
+Releases are automated via `.github/workflows/release.yaml`, triggered by pushing a `v*` tag. The workflow builds macOS binaries (aarch64 + x86_64), creates a GitHub release with tarballs, publishes to crates.io, and updates the Homebrew tap.
+
+To cut a release:
+1. Bump `version` in `Cargo.toml` and commit: `Bump to vX.Y.Z`
+2. Push the commit to `main`
+3. Create the tag and release from the **GitHub UI** (repository rulesets block tag pushes via CLI): go to https://github.com/thrashr888/cider/releases/new, create tag `vX.Y.Z` targeting `main`, and publish
+4. The workflow handles the rest — do **not** create releases manually with `gh release create` or push tags via `git push`
