@@ -5,7 +5,7 @@ Manage your Mac from the command line. Reminders, Calendar, Contacts, Notes, Mai
 ## Install
 
 ```sh
-brew tap thrashr888/cider && brew install cider
+brew tap thrashr888/tap && brew install cider
 ```
 
 Or via Cargo:

@@ -77,56 +77,44 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
       - name: Compute SHA256 sums
         id: sha
         run: |
-          echo "aarch64=$(sha256sum cider-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "x86_64=$(sha256sum cider-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - name: Generate and push Homebrew formula
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-          SHA_ARM64: ${{ steps.sha.outputs.aarch64 }}
-          SHA_X86: ${{ steps.sha.outputs.x86_64 }}
-        run: |
-          VERSION="${TAG_NAME#v}"
+          echo "darwin_arm64=$(sha256sum cider-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "darwin_amd64=$(sha256sum cider-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Update Homebrew formula
+        uses: thrashr888/homebrew-tap@main
+        with:
+          formula: cider
+          tag: ${{ github.ref_name }}
+          tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          darwin-arm64-sha256: ${{ steps.sha.outputs.darwin_arm64 }}
+          darwin-amd64-sha256: ${{ steps.sha.outputs.darwin_amd64 }}
+          template: |
+            class Cider < Formula
+              desc "Manage macOS Apple apps from the command line"
+              homepage "https://github.com/thrashr888/cider"
+              version "${VERSION}"
+              license "MIT"
 
-          cat > cider.rb << FORMULA
-          class Cider < Formula
-            desc "Manage macOS Apple apps from the command line"
-            homepage "https://github.com/thrashr888/cider"
-            version "${VERSION}"
-            license "MIT"
+              on_macos do
+                if Hardware::CPU.arm?
+                  url "https://github.com/thrashr888/cider/releases/download/${TAG}/cider-aarch64-apple-darwin.tar.gz"
+                  sha256 "${SHA_DARWIN_ARM64}"
+                else
+                  url "https://github.com/thrashr888/cider/releases/download/${TAG}/cider-x86_64-apple-darwin.tar.gz"
+                  sha256 "${SHA_DARWIN_AMD64}"
+                end
+              end
 
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/thrashr888/cider/releases/download/${TAG_NAME}/cider-aarch64-apple-darwin.tar.gz"
-                sha256 "${SHA_ARM64}"
-              else
-                url "https://github.com/thrashr888/cider/releases/download/${TAG_NAME}/cider-x86_64-apple-darwin.tar.gz"
-                sha256 "${SHA_X86}"
+              def install
+                bin.install "cider"
+              end
+
+              test do
+                assert_match "cider", shell_output("#{bin}/cider --help")
               end
             end
-
-            def install
-              bin.install "cider"
-            end
-
-            test do
-              assert_match "cider", shell_output("#{bin}/cider --help")
-            end
-          end
-          FORMULA
-
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/thrashr888/homebrew-cider.git" /tmp/homebrew-cider
-          cp cider.rb /tmp/homebrew-cider/Formula/cider.rb
-          cd /tmp/homebrew-cider
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/cider.rb
-          git commit -m "Update cider to ${TAG_NAME}"
-          git push
