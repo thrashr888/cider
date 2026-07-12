@@ -6,12 +6,14 @@ use tokio::process::Command;
 pub const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub async fn run_osascript_with_timeout(script: &str, timeout: Duration) -> anyhow::Result<String> {
-    let child = Command::new("/usr/bin/osascript")
+    let mut command = Command::new("/usr/bin/osascript");
+    command
         .arg("-e")
         .arg(script)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .kill_on_drop(true);
+    let child = command.spawn()?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -30,14 +32,16 @@ pub async fn run_jxa(script: &str) -> anyhow::Result<String> {
 }
 
 pub async fn run_jxa_with_timeout(script: &str, timeout: Duration) -> anyhow::Result<String> {
-    let child = Command::new("/usr/bin/osascript")
+    let mut command = Command::new("/usr/bin/osascript");
+    command
         .arg("-l")
         .arg("JavaScript")
         .arg("-e")
         .arg(script)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .kill_on_drop(true);
+    let child = command.spawn()?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -56,11 +60,13 @@ pub async fn run_command_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> anyhow::Result<String> {
-    let child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .kill_on_drop(true);
+    let child = command.spawn()?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -354,5 +360,15 @@ mod tests {
         assert!(parse_plist_date("2024-06-15T10:30:00+00:00").is_some());
         assert!(parse_plist_date("garbage").is_none());
         assert!(parse_plist_date("").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_times_out() {
+        let error =
+            run_command_with_timeout("/bin/sh", &["-c", "sleep 10"], Duration::from_millis(10))
+                .await
+                .expect_err("sleep should exceed the timeout");
+
+        assert!(error.to_string().contains("timed out"));
     }
 }

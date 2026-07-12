@@ -77,7 +77,7 @@ pub async fn list() -> anyhow::Result<Vec<Screenshot>> {
         });
     }
 
-    screenshots.sort_by(|a, b| b.date.cmp(&a.date));
+    screenshots.sort_by_key(|screenshot| std::cmp::Reverse(screenshot.date));
     Ok(screenshots)
 }
 

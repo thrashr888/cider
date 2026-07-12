@@ -287,7 +287,7 @@ ORDER BY r.ZLASTNAME, r.ZFIRSTNAME, r.ZORGANIZATION;
         all.extend(parse_output(&lines));
     }
 
-    all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    all.sort_by_key(|contact| contact.name.to_lowercase());
     all.dedup_by(|a, b| a.id == b.id);
     Ok(all)
 }

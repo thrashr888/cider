@@ -21,12 +21,14 @@ pub async fn run(name: &str, input: Option<&str>) -> anyhow::Result<ActionResult
 
     let output = if let Some(input_text) = input {
         // Pipe input via stdin
-        let mut child = Command::new("shortcuts")
+        let mut command = Command::new("shortcuts");
+        command
             .args(["run", name])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
@@ -38,11 +40,13 @@ pub async fn run(name: &str, input: Option<&str>) -> anyhow::Result<ActionResult
             .await
             .map_err(|_| anyhow::anyhow!("shortcuts timed out after {timeout:?}"))??
     } else {
-        let child = Command::new("shortcuts")
+        let mut command = Command::new("shortcuts");
+        command
             .args(["run", name])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .kill_on_drop(true);
+        let child = command.spawn()?;
 
         tokio::time::timeout(timeout, child.wait_with_output())
             .await
