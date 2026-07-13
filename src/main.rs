@@ -155,8 +155,11 @@ enum Commands {
         #[arg(long)]
         directory: Option<String>,
     },
-    /// Fetch stock watchlist from Stocks
-    Stocks,
+    /// Fetch watchlists and cached quotes from Stocks
+    Stocks {
+        #[command(subcommand)]
+        action: Option<StocksAction>,
+    },
     /// Show and manage system information
     #[command(name = "system-info")]
     SystemInfo {
@@ -306,6 +309,20 @@ enum ContactsAction {
     },
     /// List all contact groups
     Groups,
+}
+
+#[derive(Subcommand)]
+enum StocksAction {
+    /// List watchlist symbols with cached quotes (default)
+    List,
+    /// List watchlists and their symbols
+    Watchlists,
+    /// Get the cached quote for one symbol
+    Quote {
+        /// Ticker symbol, e.g. AAPL
+        #[arg(long)]
+        symbol: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1671,7 +1688,22 @@ async fn run() -> anyhow::Result<()> {
             )
         }
         Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty, cli.envelope),
-        Commands::Stocks => run_source!(sources::stocks::fetch(), cli.pretty, cli.envelope),
+        Commands::Stocks { action } => match action {
+            None | Some(StocksAction::List) => {
+                run_source!(sources::stocks::fetch(), cli.pretty, cli.envelope)
+            }
+            Some(StocksAction::Watchlists) => {
+                run_source!(sources::stocks::watchlists(), cli.pretty, cli.envelope)
+            }
+            Some(StocksAction::Quote { symbol }) => {
+                let quotes = sources::stocks::quotes(std::slice::from_ref(&symbol)).await?;
+                let quote = quotes
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("No cached quote for {symbol}"))?;
+                print_output(&serde_json::to_value(&quote)?, cli.pretty, cli.envelope)?;
+            }
+        },
         Commands::SystemInfo { action } => match action {
             None | Some(SystemInfoAction::Show) => {
                 run_source!(sources::system_info::show(), cli.pretty, cli.envelope)

@@ -224,6 +224,25 @@ pub async fn get(id: &str) -> anyhow::Result<Note> {
     })
 }
 
+/// Notes bodies are HTML — bare newlines collapse when rendered. Escape
+/// entities and give every line its own <div> (blank lines become
+/// <div><br></div>), which is the Notes app's own line format.
+fn body_to_html(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let esc = line
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            if esc.trim().is_empty() {
+                "<div><br></div>".to_string()
+            } else {
+                format!("<div>{esc}</div>")
+            }
+        })
+        .collect()
+}
+
 /// Create a new note in a specified folder (defaults to "Notes").
 pub async fn create(
     title: &str,
@@ -235,8 +254,8 @@ pub async fn create(
     let folder_esc = escape_applescript(folder_name);
 
     let body_clause = if let Some(b) = body {
-        let b_esc = escape_applescript(b);
-        format!(", body:\"<div>{b_esc}</div>\"")
+        let b_esc = escape_applescript(&body_to_html(b));
+        format!(", body:\"{b_esc}\"")
     } else {
         String::new()
     };
@@ -256,15 +275,16 @@ pub async fn create(
     Ok(ActionResult::success_with_id("create", &new_id))
 }
 
-/// Update the body of an existing note by ID.
+/// Update the body of an existing note by ID. The note's visible title is
+/// derived from the body's first line, so callers should keep it as line one.
 pub async fn update(id: &str, body: &str) -> anyhow::Result<ActionResult> {
     let escaped_id = escape_applescript(id);
-    let body_esc = escape_applescript(body);
+    let body_esc = escape_applescript(&body_to_html(body));
 
     let script = format!(
         r#"
         tell application "Notes"
-            set body of note id "{escaped_id}" to "<div>{body_esc}</div>"
+            set body of note id "{escaped_id}" to "{body_esc}"
         end tell
     "#
     );
@@ -442,5 +462,14 @@ mod tests {
     #[test]
     fn test_parse_tab_output_empty() {
         assert!(parse_tab_output("").is_empty());
+    }
+
+    #[test]
+    fn test_body_to_html_lines_and_escapes() {
+        assert_eq!(
+            body_to_html("Title\n\na < b & c"),
+            "<div>Title</div><div><br></div><div>a &lt; b &amp; c</div>"
+        );
+        assert_eq!(body_to_html("one"), "<div>one</div>");
     }
 }
