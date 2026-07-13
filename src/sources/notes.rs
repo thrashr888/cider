@@ -66,7 +66,7 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
                     set folderName to my escapeJSON(folderName)
                     set nBody to my escapeJSON(nBody)
 
-                    set noteJSON to "{{"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"" & nBody & "\"}}"
+                    set noteJSON to "{{\"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"" & nBody & "\"}}"
                     set output to output & noteJSON
                     if noteCount >= 50 then exit repeat
                 end repeat
