@@ -20,10 +20,8 @@ pub struct NoteFolder {
     pub name: String,
 }
 
-/// List notes, optionally filtered by folder name.
-/// Includes body text (truncated to 2000 chars) for each note.
-pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
-    let folder_clause = if let Some(folder) = folder_filter {
+fn folder_clause(folder_filter: Option<&str>) -> String {
+    if let Some(folder) = folder_filter {
         let escaped = escape_applescript(folder);
         format!(
             r#"
@@ -35,7 +33,18 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
                 set targetFolders to every folder
             "#
         .to_string()
-    };
+    }
+}
+
+/// List notes, optionally filtered by folder name.
+/// Includes body text (truncated to 2000 chars) for each note. Reading each
+/// body is one Apple event per note (~35ms), so `cap` bounds the walk; pass
+/// `None` to walk everything.
+pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Result<Vec<Note>> {
+    let folder_clause = folder_clause(folder_filter);
+    let cap_clause = cap
+        .map(|c| format!("if noteCount >= {c} then exit repeat"))
+        .unwrap_or_default();
 
     let script = format!(
         r#"
@@ -44,7 +53,7 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
         tell application "Notes"
             {folder_clause}
             repeat with f in targetFolders
-                set folderName to name of f
+                set folderName to my escapeJSON(name of f)
                 repeat with n in every note of f
                     set noteCount to noteCount + 1
                     if noteCount > 1 then
@@ -52,7 +61,7 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
                     end if
 
                     set nId to id of n
-                    set nName to name of n
+                    set nName to my escapeJSON(name of n)
                     set nMod to modification date of n
                     set nBody to ""
                     try
@@ -61,16 +70,69 @@ pub async fn list(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
                             set nBody to text 1 thru 2000 of nBody
                         end if
                     end try
-
-                    set nName to my escapeJSON(nName)
-                    set folderName to my escapeJSON(folderName)
                     set nBody to my escapeJSON(nBody)
 
                     set noteJSON to "{{\"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & (nMod as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"" & nBody & "\"}}"
                     set output to output & noteJSON
-                    if noteCount >= 50 then exit repeat
+                    {cap_clause}
                 end repeat
-                if noteCount >= 50 then exit repeat
+                {cap_clause}
+            end repeat
+        end tell
+        set output to output & "]"
+        return output
+
+        on escapeJSON(txt)
+            set txt to my replaceText(txt, "\\", "\\\\")
+            set txt to my replaceText(txt, "\"", "\\\"")
+            set txt to my replaceText(txt, return, "\\n")
+            set txt to my replaceText(txt, linefeed, "\\n")
+            set txt to my replaceText(txt, tab, "\\t")
+            return txt
+        end escapeJSON
+
+        on replaceText(theText, searchString, replacementString)
+            set AppleScript's text item delimiters to searchString
+            set theTextItems to every text item of theText
+            set AppleScript's text item delimiters to replacementString
+            set theText to theTextItems as string
+            set AppleScript's text item delimiters to ""
+            return theText
+        end replaceText
+    "#
+    );
+
+    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(60)).await?;
+    Ok(parse_json_output(&raw))
+}
+
+/// List every note's id/title/folder/modified without bodies. Properties are
+/// fetched in bulk (one Apple event per property per folder instead of one
+/// per note), so this stays fast across a whole library — it's the catalog
+/// call for pickers and sync sweeps.
+pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
+    let folder_clause = folder_clause(folder_filter);
+
+    let script = format!(
+        r#"
+        set output to "["
+        set noteCount to 0
+        tell application "Notes"
+            {folder_clause}
+            repeat with f in targetFolders
+                set folderName to my escapeJSON(name of f)
+                set nIds to id of every note of f
+                set nNames to name of every note of f
+                set nMods to modification date of every note of f
+                repeat with i from 1 to count of nIds
+                    set noteCount to noteCount + 1
+                    if noteCount > 1 then
+                        set output to output & ","
+                    end if
+                    set nName to my escapeJSON(item i of nNames)
+                    set noteJSON to "{{\"id\": \"" & (item i of nIds) & "\", \"name\": \"" & nName & "\", \"modified\": \"" & ((item i of nMods) as string) & "\", \"folder\": \"" & folderName & "\", \"body\": \"\"}}"
+                    set output to output & noteJSON
+                end repeat
             end repeat
         end tell
         set output to output & "]"

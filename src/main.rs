@@ -318,9 +318,12 @@ enum NotesAction {
         /// Skip the first N results
         #[arg(long)]
         offset: Option<usize>,
-        /// Limit the number of results returned
+        /// Limit the number of results returned (default 50 unless --brief)
         #[arg(long)]
         limit: Option<usize>,
+        /// Skip note bodies — fast bulk listing of the whole library
+        #[arg(long)]
+        brief: bool,
     },
     /// Get a single note by ID
     Get {
@@ -863,7 +866,7 @@ fn build_schema(source: Option<&str>) -> serde_json::Value {
         serde_json::json!({"source":"contacts","supports_dry_run":true,"list_args":["search","offset","limit"],"stable_ids":true}),
         serde_json::json!({"source":"mail","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":true,"friendly_mailboxes":true}),
         serde_json::json!({"source":"messages","supports_dry_run":true,"list_args":["days","offset","limit"],"stable_ids":true}),
-        serde_json::json!({"source":"notes","supports_dry_run":true,"list_args":["folder","offset","limit"],"stable_ids":true}),
+        serde_json::json!({"source":"notes","supports_dry_run":true,"list_args":["folder","offset","limit","brief"],"stable_ids":true}),
         serde_json::json!({"source":"reminders","supports_dry_run":true,"list_args":["list","offset","limit"],"stable_ids":false}),
         serde_json::json!({"source":"shortcuts","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
         serde_json::json!({"source":"screenshots","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
@@ -1378,18 +1381,28 @@ async fn run() -> anyhow::Result<()> {
         },
         Commands::Notes { action } => match action {
             None => {
-                run_source!(sources::notes::list(None), cli.pretty, cli.envelope)
+                run_source!(
+                    sources::notes::list(None, Some(50)),
+                    cli.pretty,
+                    cli.envelope
+                )
             }
             Some(NotesAction::List {
                 folder,
                 offset,
                 limit,
+                brief,
             }) => {
-                let records = paginate_vec(
-                    sources::notes::list(folder.as_deref()).await?,
-                    offset,
-                    limit,
-                );
+                // Bodies cost one Apple event per note, so the walk stops at
+                // offset+limit (default 50); --brief skips bodies and lists
+                // the whole library in bulk.
+                let records = if brief {
+                    sources::notes::list_brief(folder.as_deref()).await?
+                } else {
+                    let cap = limit.map(|l| l + offset.unwrap_or(0)).or(Some(50));
+                    sources::notes::list(folder.as_deref(), cap).await?
+                };
+                let records = paginate_vec(records, offset, limit);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(NotesAction::Get { id }) => {
