@@ -416,7 +416,7 @@ enum RemindersAction {
         /// Reminder title to complete
         #[arg(long)]
         title: String,
-        /// List to search in
+        /// List to search in (default: all lists)
         #[arg(long)]
         list: Option<String>,
     },
@@ -425,7 +425,7 @@ enum RemindersAction {
         /// Reminder title to delete
         #[arg(long)]
         title: String,
-        /// List to search in
+        /// List to search in (default: all lists)
         #[arg(long)]
         list: Option<String>,
     },

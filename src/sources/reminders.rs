@@ -149,27 +149,49 @@ pub async fn create(
     Ok(ActionResult::success_with_id("created", &id))
 }
 
-/// Mark a reminder as complete by title via AppleScript.
-pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
+/// Build an AppleScript that finds a reminder by title and applies `action` to
+/// the first match. Searches the named list if given, otherwise every list.
+fn build_find_and_act_script(title: &str, list: Option<&str>, action: &str, verb: &str) -> String {
     let escaped_title = escape_applescript(title);
-    let list_clause = if let Some(list_name) = list {
+    if let Some(list_name) = list {
         let escaped_list = escape_applescript(list_name);
-        format!("set theList to list \"{}\"", escaped_list)
-    } else {
-        "set theList to first list".to_string()
-    };
-
-    let script = format!(
-        r#"
+        format!(
+            r#"
         tell application "Reminders"
-            {}
-            set matches to (every reminder of theList whose name is "{}")
-            if (count of matches) is 0 then error "Reminder not found: {}"
-            set completed of item 1 of matches to true
-            return "completed"
+            set theList to list "{escaped_list}"
+            set matches to (every reminder of theList whose name is "{escaped_title}")
+            if (count of matches) is 0 then error "Reminder not found: {escaped_title}"
+            {action}
+            return "{verb}"
         end tell
-    "#,
-        list_clause, escaped_title, escaped_title
+    "#
+        )
+    } else {
+        format!(
+            r#"
+        tell application "Reminders"
+            repeat with theList in every list
+                set matches to (every reminder of theList whose name is "{escaped_title}")
+                if (count of matches) > 0 then
+                    {action}
+                    return "{verb}"
+                end if
+            end repeat
+            error "Reminder not found: {escaped_title}"
+        end tell
+    "#
+        )
+    }
+}
+
+/// Mark a reminder as complete by title via AppleScript.
+/// Searches all lists unless a list name is given.
+pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
+    let script = build_find_and_act_script(
+        title,
+        list,
+        "set completed of item 1 of matches to true",
+        "completed",
     );
 
     run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
@@ -181,27 +203,9 @@ pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionR
 }
 
 /// Delete a reminder by title via AppleScript.
+/// Searches all lists unless a list name is given.
 pub async fn delete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
-    let escaped_title = escape_applescript(title);
-    let list_clause = if let Some(list_name) = list {
-        let escaped_list = escape_applescript(list_name);
-        format!("set theList to list \"{}\"", escaped_list)
-    } else {
-        "set theList to first list".to_string()
-    };
-
-    let script = format!(
-        r#"
-        tell application "Reminders"
-            {}
-            set matches to (every reminder of theList whose name is "{}")
-            if (count of matches) is 0 then error "Reminder not found: {}"
-            delete item 1 of matches
-            return "deleted"
-        end tell
-    "#,
-        list_clause, escaped_title, escaped_title
-    );
+    let script = build_find_and_act_script(title, list, "delete item 1 of matches", "deleted");
 
     run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
@@ -322,6 +326,40 @@ mod tests {
         let records = parse_output(output);
         assert_eq!(records.len(), 1);
         assert!(records[0].notes.is_none());
+    }
+
+    #[test]
+    fn test_find_script_with_list_targets_that_list() {
+        let script = build_find_and_act_script(
+            "Buy milk",
+            Some("Scrapr"),
+            "delete item 1 of matches",
+            "deleted",
+        );
+        assert!(script.contains("set theList to list \"Scrapr\""));
+        assert!(script.contains("every reminder of theList whose name is \"Buy milk\""));
+        assert!(!script.contains("repeat"));
+    }
+
+    #[test]
+    fn test_find_script_without_list_searches_all_lists() {
+        let script =
+            build_find_and_act_script("Buy milk", None, "delete item 1 of matches", "deleted");
+        assert!(script.contains("repeat with theList in every list"));
+        assert!(script.contains("every reminder of theList whose name is \"Buy milk\""));
+        assert!(script.contains("error \"Reminder not found: Buy milk\""));
+        assert!(!script.contains("first list"));
+    }
+
+    #[test]
+    fn test_find_script_escapes_title() {
+        let script = build_find_and_act_script(
+            "Say \"hi\"",
+            None,
+            "set completed of item 1 of matches to true",
+            "completed",
+        );
+        assert!(script.contains("whose name is \"Say \\\"hi\\\"\""));
     }
 
     #[test]
