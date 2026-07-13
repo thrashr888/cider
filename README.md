@@ -40,6 +40,13 @@ cider music pause
 # Send a message
 cider messages send --to "+15551234567" --text "On my way"
 
+# Watchlist prices from Apple Stocks
+cider stocks
+cider stocks quote --symbol AAPL
+
+# Fast bulk listing of every Apple Note (no bodies)
+cider notes list --brief
+
 # Search your Mac
 cider spotlight --query "quarterly report"
 ```
@@ -80,7 +87,7 @@ cider spotlight --query "quarterly report"
 
 ### Read-Only
 
-Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Find My, Fonts, Home, Maps, News, Photo Booth, Photos, Spotlight, Stickies, Stocks, Voice Memos, Weather
+Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Find My, Fonts, Home, Maps, News, Photo Booth, Photos, Spotlight, Stickies, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather
 
 ## Output
 
