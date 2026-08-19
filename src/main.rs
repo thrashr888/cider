@@ -406,9 +406,51 @@ enum RemindersAction {
         /// Priority (0=none, 1-9)
         #[arg(long)]
         priority: Option<i32>,
-        /// Notes
+        /// Notes ("-" reads them from stdin, for long or multiline content)
         #[arg(long)]
         notes: Option<String>,
+    },
+    /// Get one reminder in full — complete title and notes, no truncation
+    Get {
+        /// Reminder id, from `reminders list` (unambiguous when several
+        /// reminders share a title)
+        #[arg(long, conflicts_with = "title", required_unless_present = "title")]
+        id: Option<String>,
+        /// Reminder title to fetch
+        #[arg(long)]
+        title: Option<String>,
+        /// List to search in (default: all lists)
+        #[arg(long)]
+        list: Option<String>,
+    },
+    /// Update a reminder in place (preserves its id and creation date)
+    Update {
+        /// Reminder id to update, from `reminders list` (unambiguous when
+        /// several reminders share a title)
+        #[arg(long, conflicts_with = "title", required_unless_present = "title")]
+        id: Option<String>,
+        /// Reminder title to update
+        #[arg(long)]
+        title: Option<String>,
+        /// List to search in (default: all lists)
+        #[arg(long)]
+        list: Option<String>,
+        /// New title
+        #[arg(long)]
+        new_title: Option<String>,
+        /// Replace the notes ("-" reads them from stdin, for long or
+        /// multiline content)
+        #[arg(long)]
+        notes: Option<String>,
+        /// Append to the notes after a newline ("-" reads from stdin)
+        #[arg(long, conflicts_with = "notes")]
+        append_notes: Option<String>,
+        /// New priority (0=none, 1=high, 5=medium, 9=low)
+        #[arg(long)]
+        priority: Option<i32>,
+        /// New due date
+        #[arg(long)]
+        due: Option<String>,
     },
     /// Mark a reminder as complete
     Complete {
@@ -891,7 +933,7 @@ fn build_schema(source: Option<&str>) -> serde_json::Value {
         serde_json::json!({"source":"mail","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":true,"friendly_mailboxes":true}),
         serde_json::json!({"source":"messages","supports_dry_run":true,"list_args":["days","offset","limit"],"stable_ids":true}),
         serde_json::json!({"source":"notes","supports_dry_run":true,"list_args":["folder","offset","limit","brief"],"stable_ids":true}),
-        serde_json::json!({"source":"reminders","supports_dry_run":true,"list_args":["list","offset","limit"],"stable_ids":false}),
+        serde_json::json!({"source":"reminders","supports_dry_run":true,"list_args":["list","offset","limit"],"stable_ids":false,"verbs":["list","get","create","update","complete","delete","lists"]}),
         serde_json::json!({"source":"shortcuts","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
         serde_json::json!({"source":"screenshots","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
     ];
@@ -1534,6 +1576,7 @@ async fn run() -> anyhow::Result<()> {
                         cli.envelope,
                     )?;
                 } else {
+                    let notes = stdin_if_dash(notes)?;
                     let result = sources::reminders::create(
                         &title,
                         list.as_deref(),
@@ -1542,6 +1585,44 @@ async fn run() -> anyhow::Result<()> {
                         notes.as_deref(),
                     )
                     .await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(RemindersAction::Get { id, title, list }) => {
+                let target = reminder_target(id.as_deref(), title.as_deref());
+                let result = sources::reminders::get(target, list.as_deref()).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+            }
+            Some(RemindersAction::Update {
+                id,
+                title,
+                list,
+                new_title,
+                notes,
+                append_notes,
+                priority,
+                due,
+            }) => {
+                let target = reminder_target(id.as_deref(), title.as_deref());
+                if cli.no_op {
+                    print_dry_run(
+                        "reminders.update",
+                        format!("Would update reminder {}", target.describe()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let notes = stdin_if_dash(notes)?;
+                    let append_notes = stdin_if_dash(append_notes)?;
+                    let fields = sources::reminders::UpdateFields {
+                        title: new_title.as_deref(),
+                        notes: notes.as_deref(),
+                        append_notes: append_notes.as_deref(),
+                        priority,
+                        due: due.as_deref(),
+                    };
+                    let result =
+                        sources::reminders::update(target, list.as_deref(), &fields).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -1816,6 +1897,19 @@ fn reminder_target<'a>(
         (Some(id), _) => sources::reminders::Target::Id(id),
         (None, Some(title)) => sources::reminders::Target::Title(title),
         (None, None) => sources::reminders::Target::Title(""),
+    }
+}
+
+/// Shell arguments are awkward carriers for long or multiline text, so a
+/// literal "-" means "read the value from stdin" — the Unix convention.
+fn stdin_if_dash(value: Option<String>) -> anyhow::Result<Option<String>> {
+    match value {
+        Some(v) if v == "-" => {
+            let mut buf = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut buf)?;
+            Ok(Some(buf.trim_end_matches('\n').to_string()))
+        }
+        other => Ok(other),
     }
 }
 

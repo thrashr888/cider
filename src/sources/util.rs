@@ -276,8 +276,18 @@ pub fn escape_jxa(s: &str) -> String {
 }
 
 /// Escape a string for safe embedding in AppleScript.
+///
+/// Control characters matter as much as quotes: a raw newline inside a
+/// double-quoted AppleScript literal is a syntax error, so before these
+/// escapes any multiline value (reminder notes, note bodies) silently broke
+/// the whole script. AppleScript 2.0 string literals understand `\n`, `\r`,
+/// and `\t`.
 pub fn escape_applescript(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[cfg(test)]
@@ -338,6 +348,18 @@ mod tests {
         let title = truncate_for_title(&exact);
         assert_eq!(title.len(), 120);
         assert!(!title.ends_with("..."));
+    }
+
+    #[test]
+    fn test_escape_applescript_control_chars() {
+        assert_eq!(
+            escape_applescript("line one\nline two\ttabbed\r"),
+            "line one\\nline two\\ttabbed\\r"
+        );
+        assert_eq!(
+            escape_applescript("say \"hi\" \\ bye"),
+            "say \\\"hi\\\" \\\\ bye"
+        );
     }
 
     #[test]

@@ -60,7 +60,7 @@ cider spotlight --query "quarterly report"
 
 | App | Actions |
 |-----|---------|
-| Reminders | `list`, `create`, `complete`, `delete`, `lists` |
+| Reminders | `list`, `get`, `create`, `update`, `complete`, `delete`, `lists` |
 | Calendar | `list`, `create`, `delete`, `calendars` |
 | Contacts | `list`, `get`, `create`, `update`, `delete`, `groups` |
 | Notes | `list`, `get`, `create`, `update`, `delete`, `folders` |
@@ -132,6 +132,20 @@ $ cider reminders complete --title "Review PR"
 Pass the `id` from `reminders list` to name one exactly. A `--title` match only
 ever considers reminders that are still open — the same set `reminders list`
 shows — so a finished reminder of the same name can never absorb the action.
+
+Reminder content round-trips in full: `list` and `get` return complete titles
+and notes (newlines intact, no length cap), and `update` edits a reminder in
+place — preserving its id and creation date:
+
+```
+$ cider reminders get --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
+$ cider reminders update --id 4b7c5902-... --priority 1 --new-title "Buy oat milk"
+$ cider reminders update --id 4b7c5902-... --append-notes "also: check the sale"
+$ long-notes-command | cider reminders update --id 4b7c5902-... --notes -
+```
+
+`--notes -` (and `--append-notes -`) read from stdin, for long or multiline
+content that shell arguments handle badly.
 
 ## Use as a Library
 

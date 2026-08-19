@@ -1,9 +1,11 @@
 use super::util::{
-    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, slug,
-    truncate_for_title, ActionResult, APPLE_EPOCH,
+    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, slug, ActionResult,
+    APPLE_EPOCH,
 };
 use chrono::DateTime;
 use serde::Serialize;
+
+const ID_SCHEME: &str = "x-apple-reminder://";
 
 #[derive(Debug, Serialize)]
 pub struct Reminder {
@@ -11,14 +13,33 @@ pub struct Reminder {
     pub title: String,
     pub list: String,
     pub priority: i32,
+    pub completed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
 
-/// List incomplete reminders, optionally filtered by list name.
-pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
+/// Escape a value for embedding in a single-quoted SQLite string literal.
+fn escape_sql(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Read reminders straight from the Reminders SQLite stores.
+///
+/// Rows come back as `sqlite3 -json` so titles and notes survive intact —
+/// the old tab-separated read had to flatten newlines to " | " and cap notes
+/// to keep its line-per-record format parseable, which silently mangled any
+/// reminder whose content was the point.
+///
+/// `extra_where` narrows the scan in SQL, which matters more than it looks:
+/// the query is capped at 500 rows per store, and with completed reminders
+/// included the years of finished items can crowd a specific target out of
+/// that window — so a lookup must filter in the query, not on the result.
+async fn fetch(
+    include_completed: bool,
+    extra_where: Option<&str>,
+) -> anyhow::Result<Vec<Reminder>> {
     let home = std::env::var("HOME").unwrap_or_default();
     let stores_dir =
         format!("{home}/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores");
@@ -36,6 +57,19 @@ pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
         anyhow::bail!("No Reminders database found");
     }
 
+    let mut where_clauses = Vec::new();
+    if !include_completed {
+        where_clauses.push("r.ZCOMPLETED = 0");
+    }
+    if let Some(extra) = extra_where {
+        where_clauses.push(extra);
+    }
+    let where_clause = if where_clauses.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+
     let mut all = Vec::new();
 
     for db_path in &db_files {
@@ -51,58 +85,93 @@ pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
         .map(|s| s.trim() == "1")
         .unwrap_or(false);
 
-        let query = if has_base_list {
-            r#"
-SELECT
-    COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT)),
-    COALESCE(l.ZNAME, ''),
-    COALESCE(r.ZTITLE, ''),
-    COALESCE(r.ZPRIORITY, 0),
-    r.ZDUEDATE,
-    COALESCE(r.ZFLAGGED, 0),
-    COALESCE(SUBSTR(REPLACE(REPLACE(REPLACE(r.ZNOTES, CHAR(9), ' '), CHAR(13), ' '), CHAR(10), ' | '), 1, 4000), '')
-FROM ZREMCDREMINDER r
-LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
-WHERE r.ZCOMPLETED = 0
-ORDER BY r.ZDUEDATE ASC
-LIMIT 500;
-"#
+        let list_select = if has_base_list {
+            "COALESCE(l.ZNAME, '')"
         } else {
+            "''"
+        };
+        let list_join = if has_base_list {
+            "LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK"
+        } else {
+            ""
+        };
+
+        let query = format!(
             r#"
 SELECT
-    COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT)),
-    '',
-    COALESCE(r.ZTITLE, ''),
-    COALESCE(r.ZPRIORITY, 0),
-    r.ZDUEDATE,
-    COALESCE(r.ZFLAGGED, 0),
-    COALESCE(SUBSTR(REPLACE(REPLACE(REPLACE(r.ZNOTES, CHAR(9), ' '), CHAR(13), ' '), CHAR(10), ' | '), 1, 4000), '')
+    COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT)) AS id,
+    {list_select} AS list,
+    COALESCE(r.ZTITLE, '') AS title,
+    COALESCE(r.ZPRIORITY, 0) AS priority,
+    COALESCE(r.ZCOMPLETED, 0) AS completed,
+    r.ZDUEDATE AS due,
+    r.ZNOTES AS notes
 FROM ZREMCDREMINDER r
-WHERE r.ZCOMPLETED = 0
+{list_join}
+WHERE {where_clause}
 ORDER BY r.ZDUEDATE ASC
 LIMIT 500;
 "#
-        };
+        );
 
         match run_command_with_timeout(
             "sqlite3",
-            &["-separator", "\t", db_path, query.trim()],
+            &["-json", db_path, query.trim()],
             std::time::Duration::from_secs(10),
         )
         .await
         {
-            Ok(stdout) => all.extend(parse_output(&stdout)),
+            Ok(stdout) => all.extend(parse_json_rows(&stdout)),
             Err(e) => eprintln!("Skipping reminders DB {db_path}: {e}"),
         }
     }
 
-    // Apply list filter if provided
+    Ok(all)
+}
+
+/// List incomplete reminders, optionally filtered by list name.
+pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
+    let mut all = fetch(false, None).await?;
+
     if let Some(filter) = list_filter {
         let filter_lower = filter.to_lowercase();
         all.retain(|r| r.list.to_lowercase() == filter_lower);
     }
 
     Ok(all)
+}
+
+/// Fetch a single reminder in full — complete title and notes, nothing
+/// flattened or truncated — by id or title. Searches completed reminders
+/// too, since an id is explicit about which item it means; a title match
+/// prefers the incomplete one (the only one `reminders list` shows).
+pub async fn get(target: Target<'_>, list_filter: Option<&str>) -> anyhow::Result<Reminder> {
+    let where_sql = match target {
+        Target::Id(id) => {
+            let bare = id.trim().trim_start_matches(ID_SCHEME).to_lowercase();
+            format!(
+                "LOWER(COALESCE(r.ZEXTERNALIDENTIFIER, r.ZCKIDENTIFIER, CAST(r.Z_PK AS TEXT))) = '{}'",
+                escape_sql(&bare)
+            )
+        }
+        Target::Title(title) => format!("LOWER(r.ZTITLE) = LOWER('{}')", escape_sql(title)),
+    };
+
+    let mut all = fetch(true, Some(&where_sql)).await?;
+
+    if let Some(filter) = list_filter {
+        let filter_lower = filter.to_lowercase();
+        all.retain(|r| r.list.to_lowercase() == filter_lower);
+    }
+
+    // A title can name several reminders; prefer the open one, since that is
+    // the only one `reminders list` shows and therefore the one being named.
+    let open = all.iter().position(|r| !r.completed);
+    let found = open
+        .or(if all.is_empty() { None } else { Some(0) })
+        .map(|i| all.swap_remove(i));
+
+    found.ok_or_else(|| anyhow::anyhow!("Reminder not found: {}", target.describe()))
 }
 
 /// Create a new reminder via AppleScript.
@@ -144,9 +213,83 @@ pub async fn create(
         list_clause, properties
     );
 
-    let output = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let output = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
     let id = slug(output.trim());
     Ok(ActionResult::success_with_id("created", &id))
+}
+
+/// Which fields `update` should change; `None` leaves the field alone.
+#[derive(Debug, Default)]
+pub struct UpdateFields<'a> {
+    /// Rename the reminder.
+    pub title: Option<&'a str>,
+    /// Replace the notes wholesale.
+    pub notes: Option<&'a str>,
+    /// Append to the existing notes (after a newline); starts the notes if
+    /// there are none yet.
+    pub append_notes: Option<&'a str>,
+    /// 0=none, 1=high, 5=medium, 9=low.
+    pub priority: Option<i32>,
+    /// Due date, in any format AppleScript's `date` accepts.
+    pub due: Option<&'a str>,
+}
+
+/// The AppleScript statements that apply `fields` to `item 1 of matches`.
+fn build_update_action(fields: &UpdateFields<'_>) -> anyhow::Result<String> {
+    let mut sets = Vec::new();
+    if let Some(t) = fields.title {
+        sets.push(format!(
+            "set name of item 1 of matches to \"{}\"",
+            escape_applescript(t)
+        ));
+    }
+    if let Some(n) = fields.notes {
+        sets.push(format!(
+            "set body of item 1 of matches to \"{}\"",
+            escape_applescript(n)
+        ));
+    }
+    if let Some(n) = fields.append_notes {
+        let esc = escape_applescript(n);
+        // `missing value & "\n"` errors, so an empty body starts fresh.
+        sets.push(format!(
+            "if body of item 1 of matches is missing value then\n                set body of item 1 of matches to \"{esc}\"\n            else\n                set body of item 1 of matches to (body of item 1 of matches) & \"\\n\" & \"{esc}\"\n            end if"
+        ));
+    }
+    if let Some(p) = fields.priority {
+        sets.push(format!("set priority of item 1 of matches to {p}"));
+    }
+    if let Some(d) = fields.due {
+        sets.push(format!(
+            "set due date of item 1 of matches to date \"{}\"",
+            escape_applescript(d)
+        ));
+    }
+    if sets.is_empty() {
+        anyhow::bail!(
+            "Nothing to update — pass at least one of title, notes, append_notes, priority, due"
+        );
+    }
+    Ok(sets.join("\n            "))
+}
+
+/// Update a reminder in place via AppleScript, by id or title. Editing in
+/// place (rather than delete + recreate) preserves the creation date and id.
+/// Searches all lists unless a list name is given.
+pub async fn update(
+    target: Target<'_>,
+    list: Option<&str>,
+    fields: &UpdateFields<'_>,
+) -> anyhow::Result<ActionResult> {
+    let action = build_update_action(fields)?;
+    let script = build_find_and_act_script(target, list, &action);
+
+    let matched = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
+
+    Ok(ActionResult::success_with_message(
+        "updated",
+        &acted_on(target, &matched, "Updated"),
+    ))
 }
 
 /// Which reminder a mutating command means.
@@ -185,7 +328,6 @@ impl Target<'_> {
 /// `complete --title` silently re-completes something already done and leaves
 /// the open one untouched. An `--id` is explicit and matches either way.
 fn match_clause(target: Target<'_>) -> String {
-    const ID_SCHEME: &str = "x-apple-reminder://";
     match target {
         Target::Id(id) => {
             let bare = id.trim().trim_start_matches(ID_SCHEME);
@@ -203,6 +345,9 @@ fn match_clause(target: Target<'_>) -> String {
 ///
 /// Returns the number of reminders that matched, so a by-title call can tell
 /// the caller it acted on one of several rather than leaving them to guess.
+/// The `with timeout` wrapper matters: a `whose` filter over a list with a
+/// deep completed history takes several seconds per list, and the default
+/// AppleEvent timeout gives up with -1712 partway through an all-lists scan.
 fn build_find_and_act_script(target: Target<'_>, list: Option<&str>, action: &str) -> String {
     let clause = match_clause(target);
     let not_found = escape_applescript(&target.describe());
@@ -210,6 +355,7 @@ fn build_find_and_act_script(target: Target<'_>, list: Option<&str>, action: &st
         let escaped_list = escape_applescript(list_name);
         format!(
             r#"
+        with timeout of 600 seconds
         tell application "Reminders"
             set theList to list "{escaped_list}"
             set matches to (every reminder of theList whose {clause})
@@ -217,11 +363,13 @@ fn build_find_and_act_script(target: Target<'_>, list: Option<&str>, action: &st
             {action}
             return (count of matches) as string
         end tell
+        end timeout
     "#
         )
     } else {
         format!(
             r#"
+        with timeout of 600 seconds
         tell application "Reminders"
             repeat with theList in every list
                 set matches to (every reminder of theList whose {clause})
@@ -232,6 +380,7 @@ fn build_find_and_act_script(target: Target<'_>, list: Option<&str>, action: &st
             end repeat
             error "Reminder not found: {not_found}"
         end tell
+        end timeout
     "#
         )
     }
@@ -256,7 +405,7 @@ pub async fn complete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<
     let script =
         build_find_and_act_script(target, list, "set completed of item 1 of matches to true");
 
-    let matched = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let matched = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
 
     Ok(ActionResult::success_with_message(
         "completed",
@@ -269,7 +418,7 @@ pub async fn complete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<
 pub async fn delete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<ActionResult> {
     let script = build_find_and_act_script(target, list, "delete item 1 of matches");
 
-    let matched = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let matched = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
 
     Ok(ActionResult::success_with_message(
         "deleted",
@@ -296,36 +445,53 @@ pub async fn lists() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-fn parse_output(output: &str) -> Vec<Reminder> {
+fn parse_json_rows(output: &str) -> Vec<Reminder> {
+    let output = output.trim();
+    if output.is_empty() {
+        return Vec::new();
+    }
+
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Skipping unparseable reminders output: {e}");
+            return Vec::new();
+        }
+    };
+
     let mut records = Vec::new();
 
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-
-        let reminder_id = parts[0].trim();
-        let list_name = parts.get(1).copied().unwrap_or("").trim();
-        let name = parts.get(2).copied().unwrap_or("").trim();
-        let priority_str = parts.get(3).copied().unwrap_or("0").trim();
-        let due_str = parts.get(4).copied().unwrap_or("").trim();
-        // parts[5] is flagged — skipped
-        let notes_str = parts.get(6).copied().unwrap_or("").trim();
+    for row in &rows {
+        let reminder_id = row["id"].as_str().unwrap_or("").trim();
+        let list_name = row["list"].as_str().unwrap_or("").trim();
+        let name = row["title"].as_str().unwrap_or("").trim();
 
         if name.is_empty() {
             continue;
         }
 
-        let priority: i32 = priority_str.parse().unwrap_or(0);
+        let priority = row["priority"].as_i64().unwrap_or(0) as i32;
+        let completed = row["completed"].as_i64().unwrap_or(0) != 0;
 
-        let due_date = if due_str.is_empty() {
-            None
-        } else if let Ok(core_data_ts) = due_str.parse::<f64>() {
-            DateTime::from_timestamp(core_data_ts as i64 + APPLE_EPOCH, 0)
-        } else {
-            super::util::parse_plist_date(due_str)
+        let due_date = match &row["due"] {
+            serde_json::Value::Number(n) => n
+                .as_f64()
+                .and_then(|ts| DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)),
+            serde_json::Value::String(s) => {
+                if let Ok(ts) = s.parse::<f64>() {
+                    DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)
+                } else {
+                    super::util::parse_plist_date(s)
+                }
+            }
+            _ => None,
         };
+
+        let notes = row["notes"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
         let id = if reminder_id.is_empty() {
             slug(name)
@@ -335,15 +501,12 @@ fn parse_output(output: &str) -> Vec<Reminder> {
 
         records.push(Reminder {
             id,
-            title: truncate_for_title(name),
+            title: name.to_string(),
             list: list_name.to_string(),
             priority,
+            completed,
             due_date,
-            notes: if notes_str.is_empty() {
-                None
-            } else {
-                Some(notes_str.to_string())
-            },
+            notes,
         });
     }
 
@@ -355,38 +518,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_output() {
-        let output = "ABC-123-DEF\tShopping\tBuy groceries\t5\t793900800.0\t0\n\
-             GHI-456-JKL\tHealth\tCall dentist\t0\t\t0\n";
-        let records = parse_output(output);
+    fn test_parse_json_rows() {
+        let output = r#"[
+            {"id":"ABC-123-DEF","list":"Shopping","title":"Buy groceries","priority":5,"completed":0,"due":793900800.0,"notes":null},
+            {"id":"GHI-456-JKL","list":"Health","title":"Call dentist","priority":0,"completed":0,"due":null,"notes":null}
+        ]"#;
+        let records = parse_json_rows(output);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].title, "Buy groceries");
         assert_eq!(records[0].list, "Shopping");
         assert_eq!(records[0].priority, 5);
         assert!(records[0].due_date.is_some());
+        assert!(!records[0].completed);
         assert_eq!(records[1].title, "Call dentist");
         assert!(records[1].due_date.is_none());
     }
 
     #[test]
-    fn test_parse_output_empty() {
-        assert!(parse_output("").is_empty());
+    fn test_parse_json_rows_empty() {
+        assert!(parse_json_rows("").is_empty());
+        assert!(parse_json_rows("[]").is_empty());
+    }
+
+    /// The reason for `-json`: notes keep their newlines and full length,
+    /// and titles are never truncated — this is the data layer, display
+    /// truncation belongs to `--pretty`.
+    #[test]
+    fn test_parse_json_rows_full_fidelity() {
+        let long_title = "t".repeat(300);
+        let long_notes = format!(
+            "P1/7 — rationale\n\nline two\twith tab\n{}",
+            "n".repeat(3000)
+        );
+        let output = serde_json::json!([{
+            "id": "ABC-123",
+            "list": "Alchemy",
+            "title": long_title,
+            "priority": 1,
+            "completed": 0,
+            "due": null,
+            "notes": long_notes,
+        }])
+        .to_string();
+
+        let records = parse_json_rows(&output);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title.len(), 300, "title must not be truncated");
+        let notes = records[0].notes.as_deref().unwrap();
+        assert_eq!(notes, long_notes.trim());
+        assert!(notes.contains('\n'), "newlines must survive the read");
+        assert!(notes.contains('\t'), "tabs must survive the read");
     }
 
     #[test]
-    fn test_parse_output_with_notes() {
-        let output = "ABC-123\tWork\tFinish report\t1\t793900800.0\t0\tDue by end of week\n";
-        let records = parse_output(output);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].title, "Finish report");
-        assert_eq!(records[0].notes.as_deref(), Some("Due by end of week"));
+    fn test_parse_json_rows_completed_flag() {
+        let output = r#"[{"id":"A","list":"L","title":"Done thing","priority":0,"completed":1,"due":null,"notes":null}]"#;
+        let records = parse_json_rows(output);
+        assert!(records[0].completed);
     }
 
     #[test]
-    fn test_parse_output_no_notes_column() {
-        let output = "ABC-123\tWork\tFinish report\t1\t793900800.0\t0\n";
-        let records = parse_output(output);
-        assert_eq!(records.len(), 1);
+    fn test_parse_json_rows_empty_notes_is_none() {
+        let output = r#"[{"id":"A","list":"L","title":"T","priority":0,"completed":0,"due":null,"notes":"  "}]"#;
+        let records = parse_json_rows(output);
         assert!(records[0].notes.is_none());
     }
 
@@ -481,10 +675,50 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_output_empty_notes() {
-        let output = "ABC-123\tWork\tFinish report\t1\t793900800.0\t0\t\n";
-        let records = parse_output(output);
-        assert_eq!(records.len(), 1);
-        assert!(records[0].notes.is_none());
+    fn test_update_action_sets_each_field() {
+        let action = build_update_action(&UpdateFields {
+            title: Some("New name"),
+            notes: Some("P1/7 — top of the list\n\ndetails"),
+            priority: Some(1),
+            due: Some("February 8, 2026 2:30:00 PM"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(action.contains("set name of item 1 of matches to \"New name\""));
+        // Multiline notes must arrive as AppleScript \n escapes, never raw
+        // newlines inside the literal (a syntax error that reads as a cap).
+        assert!(action
+            .contains("set body of item 1 of matches to \"P1/7 — top of the list\\n\\ndetails\""));
+        assert!(action.contains("set priority of item 1 of matches to 1"));
+        assert!(action
+            .contains("set due date of item 1 of matches to date \"February 8, 2026 2:30:00 PM\""));
+    }
+
+    #[test]
+    fn test_update_action_append_handles_missing_body() {
+        let action = build_update_action(&UpdateFields {
+            append_notes: Some("addendum"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(action.contains("if body of item 1 of matches is missing value"));
+        assert!(action.contains("(body of item 1 of matches) & \"\\n\" & \"addendum\""));
+    }
+
+    #[test]
+    fn test_update_action_requires_a_field() {
+        assert!(build_update_action(&UpdateFields::default()).is_err());
+    }
+
+    #[test]
+    fn test_update_script_composes_with_target() {
+        let action = build_update_action(&UpdateFields {
+            notes: Some("full replacement"),
+            ..Default::default()
+        })
+        .unwrap();
+        let script = build_find_and_act_script(Target::Id("abc-123"), Some("Alchemy"), &action);
+        assert!(script.contains("set theList to list \"Alchemy\""));
+        assert!(script.contains("set body of item 1 of matches to \"full replacement\""));
     }
 }
