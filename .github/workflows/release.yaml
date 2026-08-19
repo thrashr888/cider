@@ -52,10 +52,25 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      # This repo has GitHub's immutable releases enabled, so a release is
+      # frozen the moment it is published — assets can only be attached while
+      # it is still a draft, and a published one can't even be reverted to
+      # draft to fix it. v0.2.0 shipped binary-less that way. The release must
+      # therefore be created as a draft (see AGENTS.md), stay one while the
+      # tarballs upload, and be published here as the last step.
+      #
+      # No generate_release_notes: the draft is created with its notes already
+      # written, and regenerating would overwrite them.
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           files: cider-*.tar.gz
+          draft: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" --draft=false
 
   crates-io:
     needs: build

@@ -21,7 +21,9 @@ Releases are automated via `.github/workflows/release.yaml`, triggered by pushin
 To cut a release:
 1. Bump `version` in `Cargo.toml` and commit: `Bump to vX.Y.Z`
 2. Push the commit to `main`
-3. Run `gh release create vX.Y.Z --target main --generate-notes`
-4. The workflow triggers on the tag push, builds macOS binaries, uploads them to the release, pushes to crates.io, and updates the Homebrew tap
+3. Run `gh release create vX.Y.Z --target main --draft --notes "..."` (or `--generate-notes`)
+4. The workflow triggers on the tag push, builds macOS binaries, uploads them to the still-draft release, publishes it, pushes to crates.io, and updates the Homebrew tap
 
-Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create` which creates the tag through the Releases API. The workflow uses `softprops/action-gh-release` which handles uploading to existing releases.
+Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create` which creates the tag through the Releases API.
+
+**The release must be created as a draft.** This repo has GitHub's immutable releases enabled: publishing freezes the release, and assets can no longer be uploaded — nor can it be reverted to a draft to fix. Creating it published is how v0.2.0 shipped with no binaries. The workflow keeps it a draft while the tarballs upload and publishes it as its final step, so the notes you write in step 3 are what ships.
