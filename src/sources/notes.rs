@@ -1,6 +1,6 @@
 use super::util::{
-    escape_applescript, parse_applescript_date, run_osascript_with_timeout, slug,
-    truncate_for_title, ActionResult,
+    escape_applescript, parse_applescript_date, run_osascript_with_timeout, slug, ActionResult,
+    SUBPROCESS_TIMEOUT,
 };
 use serde::Serialize;
 
@@ -37,9 +37,9 @@ fn folder_clause(folder_filter: Option<&str>) -> String {
 }
 
 /// List notes, optionally filtered by folder name.
-/// Includes body text (truncated to 2000 chars) for each note. Reading each
-/// body is one Apple event per note (~35ms), so `cap` bounds the walk; pass
-/// `None` to walk everything.
+/// Includes the full body text for each note. Reading each body is one Apple
+/// event per note (~35ms), so `cap` bounds the walk; pass `None` to walk
+/// everything.
 pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Result<Vec<Note>> {
     let folder_clause = folder_clause(folder_filter);
     let cap_clause = cap
@@ -50,6 +50,7 @@ pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Re
         r#"
         set output to "["
         set noteCount to 0
+        with timeout of 600 seconds
         tell application "Notes"
             {folder_clause}
             repeat with f in targetFolders
@@ -66,9 +67,6 @@ pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Re
                     set nBody to ""
                     try
                         set nBody to plaintext of n
-                        if length of nBody > 2000 then
-                            set nBody to text 1 thru 2000 of nBody
-                        end if
                     end try
                     set nBody to my escapeJSON(nBody)
 
@@ -79,6 +77,7 @@ pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Re
                 {cap_clause}
             end repeat
         end tell
+        end timeout
         set output to output & "]"
         return output
 
@@ -102,7 +101,7 @@ pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Re
     "#
     );
 
-    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(60)).await?;
+    let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
     Ok(parse_json_output(&raw))
 }
 
@@ -117,6 +116,7 @@ pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>
         r#"
         set output to "["
         set noteCount to 0
+        with timeout of 600 seconds
         tell application "Notes"
             {folder_clause}
             repeat with f in targetFolders
@@ -135,6 +135,7 @@ pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>
                 end repeat
             end repeat
         end tell
+        end timeout
         set output to output & "]"
         return output
 
@@ -158,70 +159,63 @@ pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>
     "#
     );
 
-    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(60)).await?;
+    let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
     Ok(parse_json_output(&raw))
 }
 
 /// Get a single note by ID with full body content.
+///
+/// The result comes back as JSON, not tab-separated text — a body containing
+/// a tab used to be silently cut at that tab, which then round-tripped
+/// truncated content through any read-before-write caller. The id is returned
+/// raw (matching `list`), so it can be passed back to `get` again.
 pub async fn get(id: &str) -> anyhow::Result<Note> {
     let escaped_id = escape_applescript(id);
     let script = format!(
         r#"
+        with timeout of 600 seconds
         tell application "Notes"
-            set nId to id of note id "{escaped_id}"
-            set nName to name of note id "{escaped_id}"
-            set nMod to modification date of note id "{escaped_id}"
+            set n to note id "{escaped_id}"
+            set nId to id of n
+            set nName to my escapeJSON(name of n)
+            set nMod to (modification date of n) as string
             set nFolder to ""
             try
-                set nFolder to name of container of note id "{escaped_id}"
+                set nFolder to my escapeJSON(name of container of n)
             end try
             set nBody to ""
             try
-                set nBody to plaintext of note id "{escaped_id}"
+                set nBody to my escapeJSON(plaintext of n)
             end try
-            return nName & tab & (nMod as string) & tab & nId & tab & nFolder & tab & nBody
+            return "[{{\"id\": \"" & nId & "\", \"name\": \"" & nName & "\", \"modified\": \"" & nMod & "\", \"folder\": \"" & nFolder & "\", \"body\": \"" & nBody & "\"}}]"
         end tell
+        end timeout
+
+        on escapeJSON(txt)
+            set txt to my replaceText(txt, "\\", "\\\\")
+            set txt to my replaceText(txt, "\"", "\\\"")
+            set txt to my replaceText(txt, return, "\\n")
+            set txt to my replaceText(txt, linefeed, "\\n")
+            set txt to my replaceText(txt, tab, "\\t")
+            return txt
+        end escapeJSON
+
+        on replaceText(theText, searchString, replacementString)
+            set AppleScript's text item delimiters to searchString
+            set theTextItems to every text item of theText
+            set AppleScript's text item delimiters to replacementString
+            set theText to theTextItems as string
+            set AppleScript's text item delimiters to ""
+            return theText
+        end replaceText
     "#
     );
 
-    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
-    let parts: Vec<&str> = raw.split('\t').collect();
-    if parts.is_empty() {
-        anyhow::bail!("Note not found: {id}");
-    }
-
-    let name = parts.first().copied().unwrap_or("").trim();
-    if name.is_empty() {
-        anyhow::bail!("Note not found: {id}");
-    }
-    let mod_str = parts.get(1).copied().unwrap_or("").trim();
-    let note_id = parts.get(2).copied().unwrap_or("").trim();
-    let folder = parts.get(3).copied().unwrap_or("").trim();
-    let body_text = parts.get(4).copied().unwrap_or("").trim();
-
-    let modified = if mod_str.is_empty() {
-        None
-    } else {
-        parse_applescript_date(mod_str)
-    };
-
-    let parsed_id = if note_id.is_empty() {
-        slug(name)
-    } else {
-        slug(note_id)
-    };
-
-    Ok(Note {
-        id: parsed_id,
-        title: truncate_for_title(name),
-        folder: folder.to_string(),
-        body: if body_text.is_empty() {
-            None
-        } else {
-            Some(body_text.to_string())
-        },
-        modified,
-    })
+    let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
+    parse_json_output(&raw)
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Note not found: {id}"))
 }
 
 /// Notes bodies are HTML — bare newlines collapse when rendered. Escape
@@ -270,7 +264,7 @@ pub async fn create(
     "#
     );
 
-    let raw = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
     let new_id = raw.trim().to_string();
     Ok(ActionResult::success_with_id("create", &new_id))
 }
@@ -289,7 +283,7 @@ pub async fn update(id: &str, body: &str) -> anyhow::Result<ActionResult> {
     "#
     );
 
-    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
     Ok(ActionResult::success_with_id("update", id))
 }
 
@@ -305,7 +299,7 @@ pub async fn delete(id: &str) -> anyhow::Result<ActionResult> {
     "#
     );
 
-    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
     Ok(ActionResult::success_with_id("delete", id))
 }
 
@@ -372,7 +366,7 @@ fn parse_json_output(output: &str) -> Vec<Note> {
 
         records.push(Note {
             id,
-            title: truncate_for_title(name),
+            title: name.to_string(),
             folder: folder.to_string(),
             body: if body_text.is_empty() {
                 None
@@ -418,7 +412,7 @@ fn parse_tab_output(output: &str) -> Vec<Note> {
 
         records.push(Note {
             id,
-            title: truncate_for_title(name),
+            title: name.to_string(),
             folder: folder.to_string(),
             body: None,
             modified,
@@ -446,6 +440,33 @@ mod tests {
     #[test]
     fn test_parse_json_output_empty() {
         assert!(parse_json_output("[]").is_empty());
+    }
+
+    /// Bodies with tabs/newlines and long titles must come through intact —
+    /// the data layer never truncates; only `--pretty` display may.
+    #[test]
+    fn test_parse_json_output_full_fidelity() {
+        let long_title = "t".repeat(300);
+        let body = format!("col1\tcol2\nline two\n{}", "b".repeat(5000));
+        let json = serde_json::json!([{
+            "id": "x-coredata://ABC-123/ICNote/p1",
+            "name": long_title,
+            "modified": "",
+            "folder": "Work",
+            "body": body,
+        }])
+        .to_string();
+        let records = parse_json_output(&json);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title.len(), 300, "title must not be truncated");
+        // The raw id round-trips to get() — no slug mangling.
+        assert_eq!(records[0].id, "x-coredata://ABC-123/ICNote/p1");
+        let b = records[0].body.as_deref().unwrap();
+        assert!(
+            b.contains('\t') && b.contains('\n'),
+            "tabs/newlines survive"
+        );
+        assert!(b.len() > 5000, "no length cap");
     }
 
     #[test]

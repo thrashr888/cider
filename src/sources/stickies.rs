@@ -42,18 +42,18 @@ try:
             if isinstance(value, (str, bytes)):
                 text = value if isinstance(value, str) else value.decode('utf-8', errors='replace')
                 if text.strip():
-                    notes.append({{"text": text.strip()[:500]}})
+                    notes.append({{"text": text.strip()}})
             elif isinstance(value, list):
                 for item in value:
                     if isinstance(item, dict):
                         for k, v in item.items():
                             if isinstance(v, str) and v.strip():
-                                notes.append({{"text": v.strip()[:500]}})
+                                notes.append({{"text": v.strip()}})
                                 break
     elif isinstance(data, list):
         for item in data:
             if isinstance(item, str) and item.strip():
-                notes.append({{"text": item.strip()[:500]}})
+                notes.append({{"text": item.strip()}})
     print(json.dumps(notes))
 except Exception as e:
     # Fallback: try to extract text strings from binary data
@@ -66,7 +66,7 @@ except Exception as e:
     for t in texts:
         decoded = t.decode('utf-8', errors='replace').strip()
         if len(decoded) > 10:
-            notes.append({{"text": decoded[:500]}})
+            notes.append({{"text": decoded}})
     print(json.dumps(notes[:50]))
 "#
     );

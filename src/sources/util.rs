@@ -209,20 +209,6 @@ pub fn slug(s: &str) -> String {
         .collect()
 }
 
-/// Truncate text to a reasonable title length.
-pub fn truncate_for_title(text: &str) -> String {
-    let text = text.trim();
-    if text.len() <= 120 {
-        text.to_string()
-    } else {
-        let mut end = 120;
-        while !text.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        format!("{}...", &text[..end])
-    }
-}
-
 /// Apple epoch offset: seconds between Unix epoch and 2001-01-01.
 pub const APPLE_EPOCH: i64 = 978_307_200;
 
@@ -327,27 +313,6 @@ mod tests {
     #[test]
     fn test_parse_applescript_date_invalid() {
         assert!(parse_applescript_date("garbage").is_none());
-    }
-
-    #[test]
-    fn test_truncate_for_title_short() {
-        assert_eq!(truncate_for_title("Hello"), "Hello");
-    }
-
-    #[test]
-    fn test_truncate_for_title_long() {
-        let long = "a".repeat(200);
-        let title = truncate_for_title(&long);
-        assert!(title.len() <= 123);
-        assert!(title.ends_with("..."));
-    }
-
-    #[test]
-    fn test_truncate_for_title_exact() {
-        let exact = "a".repeat(120);
-        let title = truncate_for_title(&exact);
-        assert_eq!(title.len(), 120);
-        assert!(!title.ends_with("..."));
     }
 
     #[test]

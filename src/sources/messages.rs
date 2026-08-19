@@ -1,6 +1,5 @@
 use super::util::{
-    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, truncate_for_title,
-    ActionResult,
+    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, ActionResult,
 };
 use chrono::DateTime;
 use serde::Serialize;
@@ -31,14 +30,14 @@ pub async fn list(days: u32) -> anyhow::Result<Vec<Message>> {
     let query = format!(
         r#"
 SELECT
-    m.ROWID,
-    COALESCE(m.text, '') as msg_text,
-    m.date / 1000000000 + 978307200 as unix_ts,
-    m.is_from_me,
-    COALESCE(h.id, '') as handle_id,
-    COALESCE(c.display_name, '') as chat_name,
-    COALESCE(c.chat_identifier, '') as chat_identifier,
-    CASE WHEN m.text IS NULL AND m.attributedBody IS NOT NULL THEN 1 ELSE 0 END as has_attributed
+    m.ROWID AS rowid,
+    COALESCE(m.text, '') AS msg_text,
+    m.date / 1000000000 + 978307200 AS unix_ts,
+    m.is_from_me AS is_from_me,
+    COALESCE(h.id, '') AS handle_id,
+    COALESCE(c.display_name, '') AS chat_name,
+    COALESCE(c.chat_identifier, '') AS chat_identifier,
+    CASE WHEN m.text IS NULL AND m.attributedBody IS NOT NULL THEN 1 ELSE 0 END AS has_attributed
 FROM message m
 LEFT JOIN handle h ON m.handle_id = h.ROWID
 LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
@@ -52,12 +51,12 @@ LIMIT 200;
 
     let stdout = run_command_with_timeout(
         "sqlite3",
-        &["-separator", "\t", &db_path, query.trim()],
+        &["-json", &db_path, query.trim()],
         std::time::Duration::from_secs(30),
     )
     .await?;
 
-    Ok(parse_output(&stdout))
+    Ok(parse_json_rows(&stdout))
 }
 
 pub async fn send(to: &str, text: &str) -> anyhow::Result<ActionResult> {
@@ -79,18 +78,39 @@ end tell"#,
     ))
 }
 
-fn parse_output(output: &str) -> Vec<Message> {
+/// A JSON field that sqlite3 may emit as a number or a string, read as i64.
+fn json_i64(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+        serde_json::Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Parse `sqlite3 -json` output into messages. JSON is the point: message
+/// text keeps its newlines and full length — the old tab-separated read broke
+/// any multiline message into garbage rows, and the data layer used to cap
+/// text at 120 chars (display truncation belongs to `--pretty`, not here).
+fn parse_json_rows(output: &str) -> Vec<Message> {
+    let output = output.trim();
+    if output.is_empty() {
+        return Vec::new();
+    }
+
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Skipping unparseable messages output: {e}");
+            return Vec::new();
+        }
+    };
+
     let mut records = Vec::new();
 
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-
-        let rowid = parts[0].trim();
-        let text = parts[1].trim();
-        let has_attributed = parts.get(7).map(|s| s.trim() == "1").unwrap_or(false);
+    for row in &rows {
+        let rowid = json_i64(&row["rowid"]);
+        let text = row["msg_text"].as_str().unwrap_or("").trim();
+        let has_attributed = json_i64(&row["has_attributed"]) == 1;
 
         if text.is_empty() && !has_attributed {
             continue;
@@ -102,11 +122,11 @@ fn parse_output(output: &str) -> Vec<Message> {
             text.to_string()
         };
 
-        let unix_ts: i64 = parts[2].trim().parse().unwrap_or(0);
-        let is_from_me: bool = parts[3].trim() == "1";
-        let handle_id = parts.get(4).copied().unwrap_or("").trim();
-        let chat_name = parts.get(5).copied().unwrap_or("").trim();
-        let chat_identifier = parts.get(6).copied().unwrap_or("").trim();
+        let unix_ts = json_i64(&row["unix_ts"]);
+        let is_from_me = json_i64(&row["is_from_me"]) == 1;
+        let handle_id = row["handle_id"].as_str().unwrap_or("").trim();
+        let chat_name = row["chat_name"].as_str().unwrap_or("").trim();
+        let chat_identifier = row["chat_identifier"].as_str().unwrap_or("").trim();
 
         let timestamp = if unix_ts > 0 {
             DateTime::from_timestamp(unix_ts, 0)
@@ -138,7 +158,7 @@ fn parse_output(output: &str) -> Vec<Message> {
 
         records.push(Message {
             id: format!("msg_{rowid}"),
-            text: truncate_for_title(&body_text),
+            text: body_text,
             sender,
             is_from_me,
             service: service.to_string(),
@@ -155,10 +175,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_output() {
-        let output = "42\tHey, how are you?\t1707350400\t0\t+15551234567\tAlice\t+15551234567\t0\n\
-                       43\tI'm good thanks!\t1707350500\t1\t+15551234567\tAlice\t+15551234567\t0\n";
-        let records = parse_output(output);
+    fn test_parse_json_rows() {
+        let output = r#"[
+            {"rowid":42,"msg_text":"Hey, how are you?","unix_ts":1707350400,"is_from_me":0,"handle_id":"+15551234567","chat_name":"Alice","chat_identifier":"+15551234567","has_attributed":0},
+            {"rowid":43,"msg_text":"I'm good thanks!","unix_ts":1707350500,"is_from_me":1,"handle_id":"+15551234567","chat_name":"Alice","chat_identifier":"+15551234567","has_attributed":0}
+        ]"#;
+        let records = parse_json_rows(output);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].id, "msg_42");
         assert_eq!(records[0].text, "Hey, how are you?");
@@ -170,28 +192,55 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_output_empty() {
-        assert!(parse_output("").is_empty());
+    fn test_parse_json_rows_empty() {
+        assert!(parse_json_rows("").is_empty());
+        assert!(parse_json_rows("[]").is_empty());
     }
 
     #[test]
-    fn test_parse_output_skips_empty_text() {
-        let output = "101\t\t1707350400\t0\t+15551234567\tAlice\t+15551234567\t0\n";
-        assert!(parse_output(output).is_empty());
+    fn test_parse_json_rows_skips_empty_text() {
+        let output = r#"[{"rowid":101,"msg_text":"","unix_ts":1707350400,"is_from_me":0,"handle_id":"+15551234567","chat_name":"Alice","chat_identifier":"+15551234567","has_attributed":0}]"#;
+        assert!(parse_json_rows(output).is_empty());
     }
 
     #[test]
-    fn test_parse_output_attributed_body() {
-        let output = "102\t\t1707350400\t0\t+15551234567\tAlice\t+15551234567\t1\n";
-        let records = parse_output(output);
+    fn test_parse_json_rows_attributed_body() {
+        let output = r#"[{"rowid":102,"msg_text":"","unix_ts":1707350400,"is_from_me":0,"handle_id":"+15551234567","chat_name":"Alice","chat_identifier":"+15551234567","has_attributed":1}]"#;
+        let records = parse_json_rows(output);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].text, "[Attachment or rich text]");
     }
 
     #[test]
-    fn test_parse_output_email_service() {
-        let output = "99\tCheck this out\t1707350400\t0\tuser@example.com\t\tuser@example.com\t0\n";
-        let records = parse_output(output);
+    fn test_parse_json_rows_email_service() {
+        let output = r#"[{"rowid":99,"msg_text":"Check this out","unix_ts":1707350400,"is_from_me":0,"handle_id":"user@example.com","chat_name":"","chat_identifier":"user@example.com","has_attributed":0}]"#;
+        let records = parse_json_rows(output);
         assert_eq!(records[0].service, "iMessage");
+    }
+
+    /// The reason for `-json`: a multiline message used to shear into broken
+    /// TSV rows, and long messages were capped at 120 chars in the data layer.
+    #[test]
+    fn test_parse_json_rows_multiline_message_survives() {
+        let long_tail = "x".repeat(2000);
+        let body = format!("line one\nline two\twith tab\n\nline four\n{long_tail}");
+        let output = serde_json::json!([{
+            "rowid": 7,
+            "msg_text": body,
+            "unix_ts": 1707350400,
+            "is_from_me": 0,
+            "handle_id": "+15551234567",
+            "chat_name": "Alice",
+            "chat_identifier": "+15551234567",
+            "has_attributed": 0,
+        }])
+        .to_string();
+
+        let records = parse_json_rows(&output);
+        assert_eq!(records.len(), 1, "one message must parse as one record");
+        assert_eq!(records[0].text, body, "full text must survive untruncated");
+        assert!(records[0].text.contains('\n'), "newlines must survive");
+        assert!(records[0].text.contains('\t'), "tabs must survive");
+        assert!(records[0].text.len() > 2000, "no 120-char cap");
     }
 }

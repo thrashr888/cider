@@ -1,5 +1,6 @@
 use super::util::{
     escape_jxa, run_command_with_timeout, run_jxa, run_osascript_with_timeout, ActionResult,
+    SUBPROCESS_TIMEOUT,
 };
 use serde::Serialize;
 
@@ -162,8 +163,25 @@ where
 {
     let target = format!("first message of inbox whose id is {apple_mail_id}");
     let action = build_action(&target);
-    let script = format!(
+    let script = build_mutation_script(&action);
+
+    let output = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
+    if output.starts_with("ERROR:") {
+        anyhow::bail!("{}", output);
+    }
+    Ok(())
+}
+
+/// Wrap a Mail mutation in error reporting and an AppleEvent timeout.
+///
+/// The `with timeout` wrapper matters: a `whose id is` scan over a large
+/// inbox takes longer than the default AppleEvent timeout, which gives up
+/// with -1712 partway through — so both the AppleScript side and the Rust
+/// side (`SUBPROCESS_TIMEOUT`) need generous limits.
+fn build_mutation_script(action: &str) -> String {
+    format!(
         r#"
+with timeout of 600 seconds
 tell application "Mail"
     try
         {action}
@@ -172,14 +190,9 @@ tell application "Mail"
         return "ERROR: " & errMsg
     end try
 end tell
+end timeout
 "#
-    );
-
-    let output = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
-    if output.starts_with("ERROR:") {
-        anyhow::bail!("{}", output);
-    }
-    Ok(())
+    )
 }
 
 async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageRecord>> {
@@ -187,13 +200,13 @@ async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageRec
     let query = format!(
         r#"
 SELECT
-    m.ROWID,
-    COALESCE(s.subject, ''),
-    COALESCE(a.address, ''),
-    datetime(m.date_received, 'unixepoch'),
-    m.read,
-    COALESCE(mb.url, 'INBOX'),
-    COALESCE(sm.summary, '')
+    m.ROWID AS rowid,
+    COALESCE(s.subject, '') AS subject,
+    COALESCE(a.address, '') AS sender,
+    datetime(m.date_received, 'unixepoch') AS date_received,
+    m.read AS is_read,
+    COALESCE(mb.url, 'INBOX') AS mailbox_url,
+    COALESCE(sm.summary, '') AS summary
 FROM messages m
 LEFT JOIN addresses a ON m.sender = a.ROWID
 LEFT JOIN subjects s ON m.subject = s.ROWID
@@ -207,30 +220,61 @@ LIMIT {limit};
     );
     let output = run_command_with_timeout(
         "sqlite3",
-        &["-separator", "\t", &db_path, query.trim()],
+        &["-json", &db_path, query.trim()],
         std::time::Duration::from_secs(20),
     )
     .await?;
 
+    Ok(parse_json_rows(&output))
+}
+
+/// A JSON field that sqlite3 may emit as a number or a string, read as i64.
+fn json_i64(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+        serde_json::Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Parse `sqlite3 -json` output into inbox records. JSON is the point:
+/// `sm.summary` is prose that routinely contains newlines, and the old
+/// tab-separated line-per-record read sheared any multiline summary into
+/// broken rows that were silently dropped or misattributed.
+fn parse_json_rows(output: &str) -> Vec<MailMessageRecord> {
+    let output = output.trim();
+    if output.is_empty() {
+        return Vec::new();
+    }
+
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Skipping unparseable mail output: {e}");
+            return Vec::new();
+        }
+    };
+
     let mut records = Vec::new();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 6 {
+    for row in &rows {
+        let apple_mail_id = json_i64(&row["rowid"]);
+        if apple_mail_id == 0 {
             continue;
         }
-        let apple_mail_id: i64 = match parts[0].trim().parse() {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let subject = parts[1].trim().to_string();
-        let sender = parts[2].trim().to_string();
-        let date_received = parts[3].trim().to_string();
-        let is_read = parts[4].trim() == "1";
-        let mailbox = parts[5].trim().to_string();
-        let body_preview = parts
-            .get(6)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let subject = row["subject"].as_str().unwrap_or("").trim().to_string();
+        let sender = row["sender"].as_str().unwrap_or("").trim().to_string();
+        let date_received = row["date_received"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let is_read = json_i64(&row["is_read"]) == 1;
+        let mailbox = row["mailbox_url"].as_str().unwrap_or("").trim().to_string();
+        let body_preview = row["summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         let id = apple_mail_id.to_string();
         let mailbox_url = mailbox.clone();
         records.push(MailMessageRecord {
@@ -247,7 +291,7 @@ LIMIT {limit};
             },
         });
     }
-    Ok(records)
+    records
 }
 
 fn mailbox_display_name(url: &str) -> String {
@@ -258,4 +302,74 @@ fn mailbox_display_name(url: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(url)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_json_rows() {
+        let output = r#"[
+            {"rowid":42,"subject":"Meeting tomorrow","sender":"alice@example.com","date_received":"2026-02-07 12:00:00","is_read":0,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":"Can we move it to 3pm?"},
+            {"rowid":43,"subject":"Re: Meeting tomorrow","sender":"bob@example.com","date_received":"2026-02-07 12:05:00","is_read":1,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":""}
+        ]"#;
+        let records = parse_json_rows(output);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].apple_mail_id, 42);
+        assert_eq!(records[0].detail.subject, "Meeting tomorrow");
+        assert_eq!(records[0].detail.sender, "alice@example.com");
+        assert_eq!(records[0].detail.mailbox, "INBOX");
+        assert!(!records[0].detail.is_read);
+        assert_eq!(
+            records[0].detail.body_preview.as_deref(),
+            Some("Can we move it to 3pm?")
+        );
+        assert!(records[1].detail.is_read);
+        assert!(
+            records[1].detail.body_preview.is_none(),
+            "empty summary must be None"
+        );
+    }
+
+    #[test]
+    fn test_parse_json_rows_empty() {
+        assert!(parse_json_rows("").is_empty());
+        assert!(parse_json_rows("[]").is_empty());
+    }
+
+    /// The reason for `-json`: a multiline summary used to shear one message
+    /// into several broken TSV rows. The full summary must come back intact
+    /// on a single record.
+    #[test]
+    fn test_parse_json_rows_multiline_summary_survives() {
+        let summary = "First line of the preview.\nSecond line\twith a tab.\n\nFourth line.";
+        let output = serde_json::json!([{
+            "rowid": 7,
+            "subject": "Newsletter",
+            "sender": "news@example.com",
+            "date_received": "2026-02-07 09:00:00",
+            "is_read": 0,
+            "mailbox_url": "imap://user@mail.example.com/INBOX",
+            "summary": summary,
+        }])
+        .to_string();
+
+        let records = parse_json_rows(&output);
+        assert_eq!(records.len(), 1, "one message must parse as one record");
+        assert_eq!(records[0].detail.body_preview.as_deref(), Some(summary));
+    }
+
+    /// Without the AppleEvent timeout wrapper a `whose id is` scan over a
+    /// big inbox dies with -1712 before it finds the message.
+    #[test]
+    fn test_mutation_script_wraps_applescript_timeout() {
+        let script = build_mutation_script("delete (first message of inbox whose id is 42)");
+        assert!(script
+            .trim_start()
+            .starts_with("with timeout of 600 seconds"));
+        assert!(script.trim_end().ends_with("end timeout"));
+        assert!(script.contains("delete (first message of inbox whose id is 42)"));
+        assert!(script.contains("on error errMsg"));
+    }
 }

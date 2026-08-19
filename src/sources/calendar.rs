@@ -205,13 +205,13 @@ async fn fetch_from_group_db(
     let query = format!(
         r#"
 SELECT
-    COALESCE(ci.summary, ''),
-    COALESCE(c.title, ''),
-    COALESCE(l.title, ''),
-    datetime(ci.start_date + 978307200, 'unixepoch'),
-    datetime(ci.end_date + 978307200, 'unixepoch'),
-    COALESCE(ci.all_day, 0),
-    COALESCE(SUBSTR(ci.description, 1, 500), '')
+    COALESCE(ci.summary, '') AS title,
+    COALESCE(c.title, '') AS calendar,
+    COALESCE(l.title, '') AS location,
+    datetime(ci.start_date + 978307200, 'unixepoch') AS start_date,
+    datetime(ci.end_date + 978307200, 'unixepoch') AS end_date,
+    COALESCE(ci.all_day, 0) AS all_day,
+    COALESCE(ci.description, '') AS notes
 FROM CalendarItem ci
 LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
 LEFT JOIN Location l ON ci.location_id = l.ROWID
@@ -224,12 +224,12 @@ LIMIT 500;
 
     let stdout = run_command_with_timeout(
         "sqlite3",
-        &["-separator", "\t", db_path, query.trim()],
+        &["-json", db_path, query.trim()],
         std::time::Duration::from_secs(10),
     )
     .await?;
 
-    Ok(parse_output(&stdout))
+    Ok(parse_json_rows(&stdout))
 }
 
 /// Legacy macOS: ~/Library/Calendars/Calendar Cache (Core Data format)
@@ -247,13 +247,13 @@ async fn fetch_from_cache_db(
     let query = format!(
         r#"
 SELECT
-    COALESCE(ci.ZSUMMARY, ''),
-    COALESCE(cal.ZTITLE, ''),
-    COALESCE(ci.ZLOCATION, ''),
-    datetime(ci.ZSTARTDATE + 978307200, 'unixepoch'),
-    datetime(ci.ZENDDATE + 978307200, 'unixepoch'),
-    COALESCE(ci.ZISALLDAY, 0),
-    COALESCE(SUBSTR(ci.ZNOTES, 1, 500), '')
+    COALESCE(ci.ZSUMMARY, '') AS title,
+    COALESCE(cal.ZTITLE, '') AS calendar,
+    COALESCE(ci.ZLOCATION, '') AS location,
+    datetime(ci.ZSTARTDATE + 978307200, 'unixepoch') AS start_date,
+    datetime(ci.ZENDDATE + 978307200, 'unixepoch') AS end_date,
+    COALESCE(ci.ZISALLDAY, 0) AS all_day,
+    COALESCE(ci.ZNOTES, '') AS notes
 FROM ZCALENDARITEM ci
 LEFT JOIN ZCALENDAR cal ON ci.ZCALENDAR = cal.Z_PK
 WHERE ci.ZSTARTDATE >= {start_cd}
@@ -265,12 +265,12 @@ LIMIT 500;
 
     let stdout = run_command_with_timeout(
         "sqlite3",
-        &["-separator", "\t", db_path, query.trim()],
+        &["-json", db_path, query.trim()],
         std::time::Duration::from_secs(10),
     )
     .await?;
 
-    Ok(parse_output(&stdout))
+    Ok(parse_json_rows(&stdout))
 }
 
 async fn fetch_from_jxa(days_back: u32, days_ahead: u32) -> anyhow::Result<Vec<CalendarEvent>> {
@@ -296,40 +296,53 @@ for (let ci = 0; ci < cals.length; ci++) {{
         if (!sd || sd < start || sd > end) continue;
         count++;
         let title = "", loc = "", ed = "", allday = false, notes = "";
-        try {{ title = (ev.summary() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-        try {{ loc = (ev.location() || "").replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
+        try {{ title = ev.summary() || ""; }} catch(e) {{}}
+        try {{ loc = ev.location() || ""; }} catch(e) {{}}
         try {{ ed = ev.endDate().toISOString(); }} catch(e) {{}}
         try {{ allday = ev.alldayEvent(); }} catch(e) {{}}
-        try {{ notes = (ev.description() || "").slice(0, 500).replace(/[\t\n\r]/g, " "); }} catch(e) {{}}
-        if (title) results.push([title, calName, loc, sd.toISOString(), ed, allday ? "1" : "0", notes].join("\t"));
+        try {{ notes = ev.description() || ""; }} catch(e) {{}}
+        if (title) results.push({{title: title, calendar: calName, location: loc, start_date: sd.toISOString(), end_date: ed, all_day: allday ? 1 : 0, notes: notes}});
     }}
 }}
-results.join("\n")
+JSON.stringify(results)
 "#,
         days_back, days_ahead
     );
 
     let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
-    Ok(parse_output(&output))
+    Ok(parse_json_rows(&output))
 }
 
-fn parse_output(output: &str) -> Vec<CalendarEvent> {
-    let mut records = Vec::new();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 6 {
-            continue;
+/// Rows arrive as JSON (`sqlite3 -json` or `JSON.stringify` from JXA), so
+/// multiline event notes — the normal case for meeting invites — survive
+/// intact. The old tab-separated read emitted a literal newline into the row,
+/// truncating notes at the first line and silently dropping the rest.
+fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
+    let output = output.trim();
+    if output.is_empty() {
+        return Vec::new();
+    }
+
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Skipping unparseable calendar output: {e}");
+            return Vec::new();
         }
-        let title = parts[0].trim();
+    };
+
+    let mut records = Vec::new();
+    for row in &rows {
+        let title = row["title"].as_str().unwrap_or("").trim();
         if title.is_empty() {
             continue;
         }
-        let calendar = parts[1].trim();
-        let location = parts[2].trim();
-        let start_date = parts[3].trim();
-        let end_date = parts[4].trim();
-        let is_all_day = parts[5].trim() == "1";
-        let notes = parts.get(6).copied().unwrap_or("").trim();
+        let calendar = row["calendar"].as_str().unwrap_or("").trim();
+        let location = row["location"].as_str().unwrap_or("").trim();
+        let start_date = row["start_date"].as_str().unwrap_or("").trim();
+        let end_date = row["end_date"].as_str().unwrap_or("").trim();
+        let is_all_day = row["all_day"].as_i64().unwrap_or(0) != 0;
+        let notes = row["notes"].as_str().map(str::trim).unwrap_or("");
 
         records.push(CalendarEvent {
             title: title.to_string(),
@@ -365,10 +378,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_output() {
-        let output = "Team standup\tWork\tZoom\t2026-03-14 10:00:00\t2026-03-14 10:30:00\t0\t\n\
-                       Birthday\tPersonal\t\t2026-03-15 00:00:00\t2026-03-16 00:00:00\t1\tBring cake\n";
-        let records = parse_output(output);
+    fn test_parse_json_rows() {
+        let output = r#"[
+            {"title":"Team standup","calendar":"Work","location":"Zoom","start_date":"2026-03-14 10:00:00","end_date":"2026-03-14 10:30:00","all_day":0,"notes":""},
+            {"title":"Birthday","calendar":"Personal","location":"","start_date":"2026-03-15 00:00:00","end_date":"2026-03-16 00:00:00","all_day":1,"notes":"Bring cake"}
+        ]"#;
+        let records = parse_json_rows(output);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].title, "Team standup");
         assert_eq!(records[0].calendar, "Work");
@@ -379,8 +394,35 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_output_empty() {
-        assert!(parse_output("").is_empty());
+    fn test_parse_json_rows_empty() {
+        assert!(parse_json_rows("").is_empty());
+        assert!(parse_json_rows("[]").is_empty());
+    }
+
+    /// Meeting-invite notes are multiline by definition (Zoom blocks,
+    /// agendas, dial-ins); they must come through whole, not cut at the
+    /// first newline or capped at 500 chars.
+    #[test]
+    fn test_parse_json_rows_multiline_notes() {
+        let notes = format!(
+            "Agenda:\n- item one\n- item two\n\nJoin: https://zoom.example\n{}",
+            "x".repeat(2000)
+        );
+        let output = serde_json::json!([{
+            "title": "Planning",
+            "calendar": "Work",
+            "location": "",
+            "start_date": "2026-03-14 10:00:00",
+            "end_date": "2026-03-14 11:00:00",
+            "all_day": 0,
+            "notes": notes,
+        }])
+        .to_string();
+        let records = parse_json_rows(&output);
+        assert_eq!(records.len(), 1);
+        let n = records[0].notes.as_deref().unwrap();
+        assert!(n.contains('\n'), "newlines survive");
+        assert!(n.len() > 2000, "no 500-char cap");
     }
 
     #[test]
