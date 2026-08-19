@@ -16,14 +16,25 @@ This repo keeps tests inline with implementation under `#[cfg(test)] mod tests` 
 Recent history uses short, imperative commit subjects, often with Conventional Commit prefixes like `feat:` and `fix:`; release commits use `Bump to vX.Y.Z`. Keep commits focused and easy to scan. PRs should explain which commands or source modules changed, list validation performed (`cargo test`, `cargo clippy`, manual command runs), and include sample command/output snippets for user-facing CLI changes. Call out any macOS permission or side-effect implications for mutating commands.
 
 ## Release Process
-Releases are automated via `.github/workflows/release.yaml`, triggered by pushing a `v*` tag. The workflow builds macOS binaries (aarch64 + x86_64), creates a GitHub release with tarballs, publishes to crates.io, and updates the Homebrew tap.
+Releases are automated via `.github/workflows/release.yaml`, triggered when a `v*` tag appears. The workflow builds macOS binaries (aarch64 + x86_64), creates a GitHub release with tarballs, publishes to crates.io, and updates the Homebrew tap.
 
 To cut a release:
 1. Bump `version` in `Cargo.toml` and commit: `Bump to vX.Y.Z`
 2. Push the commit to `main`
-3. Run `gh release create vX.Y.Z --target main --draft --notes "..."` (or `--generate-notes`)
-4. The workflow triggers on the tag push, builds macOS binaries, uploads them to the still-draft release, publishes it, pushes to crates.io, and updates the Homebrew tap
+3. Create the release as a **draft**, with the notes it should ship with:
+   ```sh
+   gh release create vX.Y.Z --target main --draft --notes "..."
+   ```
+4. Create the tag, which is what actually triggers the workflow:
+   ```sh
+   gh api repos/thrashr888/cider/git/refs \
+     -f ref=refs/tags/vX.Y.Z -f sha="$(git rev-parse origin/main)"
+   ```
+5. The workflow builds macOS binaries, uploads them to the still-draft release, publishes it, pushes to crates.io, and updates the Homebrew tap. Watch it with `gh run watch $(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status`.
+6. Verify what shipped: `gh release view vX.Y.Z` should list both tarballs, and the tap formula should name the new version.
 
-Note: Do not push tags directly (`git push origin vX.Y.Z`) — repository rulesets block it. Use `gh release create` which creates the tag through the Releases API.
+Both of the odd steps above are load-bearing, and each has already cost a release:
 
-**The release must be created as a draft.** This repo has GitHub's immutable releases enabled: publishing freezes the release, and assets can no longer be uploaded — nor can it be reverted to a draft to fix. Creating it published is how v0.2.0 shipped with no binaries. The workflow keeps it a draft while the tarballs upload and publishes it as its final step, so the notes you write in step 3 are what ships.
+**The release must be created as a draft** (step 3). This repo has GitHub's immutable releases enabled: publishing freezes the release, and assets can no longer be uploaded — nor can it be reverted to a draft to fix. Creating it published is how v0.2.0 shipped with no binaries and never reached Homebrew. The workflow keeps it a draft while the tarballs upload and publishes it as its final step, so the notes written in step 3 are what ships.
+
+**A draft does not create its tag** (step 4). GitHub holds the tag *name* on a draft but creates the ref only on publish — so a draft alone leaves the workflow waiting for a tag push that never comes. Do not reach for `git push origin vX.Y.Z` to solve it: repository rulesets block pushing tags. The git refs API is permitted and is what step 4 uses.
