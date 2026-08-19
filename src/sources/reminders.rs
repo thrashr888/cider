@@ -149,20 +149,73 @@ pub async fn create(
     Ok(ActionResult::success_with_id("created", &id))
 }
 
-/// Build an AppleScript that finds a reminder by title and applies `action` to
-/// the first match. Searches the named list if given, otherwise every list.
-fn build_find_and_act_script(title: &str, list: Option<&str>, action: &str, verb: &str) -> String {
-    let escaped_title = escape_applescript(title);
+/// Which reminder a mutating command means.
+///
+/// Titles are not unique — Reminders is happy to hold two items called
+/// "[BUG] bob produced an error" — and by-title matching silently acts on the
+/// first, so the caller has no way to say which. [`Target::Id`] takes the `id`
+/// that `reminders list` already prints, which is unique.
+#[derive(Debug, Clone, Copy)]
+pub enum Target<'a> {
+    Id(&'a str),
+    Title(&'a str),
+}
+
+impl Target<'_> {
+    /// How the target reads back in messages and errors.
+    pub fn describe(&self) -> String {
+        match self {
+            Target::Id(id) => format!("id {id}"),
+            Target::Title(t) => format!("'{t}'"),
+        }
+    }
+}
+
+/// The AppleScript `whose` clause that selects the target, already escaped.
+///
+/// Reminders' AppleScript `id` is a URL (`x-apple-reminder://<UUID>`) while
+/// `reminders list` prints the bare UUID, so accept either and normalize.
+/// AppleScript's `is` compares strings case-insensitively, which is what
+/// bridges the DB's lowercase form to AppleScript's uppercase one.
+///
+/// A title match is restricted to INCOMPLETE reminders, because that is the
+/// only set `reminders list` shows and therefore the only set a caller can be
+/// naming. Without the restriction a finished reminder of the same name joins
+/// `matches`, can sort ahead of the live one, and absorbs the action — so
+/// `complete --title` silently re-completes something already done and leaves
+/// the open one untouched. An `--id` is explicit and matches either way.
+fn match_clause(target: Target<'_>) -> String {
+    const ID_SCHEME: &str = "x-apple-reminder://";
+    match target {
+        Target::Id(id) => {
+            let bare = id.trim().trim_start_matches(ID_SCHEME);
+            format!("id is \"{}{}\"", ID_SCHEME, escape_applescript(bare))
+        }
+        Target::Title(title) => format!(
+            "name is \"{}\" and completed is false",
+            escape_applescript(title)
+        ),
+    }
+}
+
+/// Build an AppleScript that finds a reminder and applies `action` to the
+/// first match. Searches the named list if given, otherwise every list.
+///
+/// Returns the number of reminders that matched, so a by-title call can tell
+/// the caller it acted on one of several rather than leaving them to guess.
+fn build_find_and_act_script(target: Target<'_>, list: Option<&str>, action: &str) -> String {
+    let clause = match_clause(target);
+    let not_found = escape_applescript(&target.describe());
     if let Some(list_name) = list {
         let escaped_list = escape_applescript(list_name);
         format!(
             r#"
         tell application "Reminders"
             set theList to list "{escaped_list}"
-            set matches to (every reminder of theList whose name is "{escaped_title}")
-            if (count of matches) is 0 then error "Reminder not found: {escaped_title}"
+            set matches to (every reminder of theList whose {clause})
+            if (count of matches) is 0 then error "Reminder not found: {not_found}"
             {action}
-            return "{verb}"
+            return (count of matches) as string
         end tell
     "#
         )
@@ -171,47 +224,56 @@ fn build_find_and_act_script(title: &str, list: Option<&str>, action: &str, verb
             r#"
         tell application "Reminders"
             repeat with theList in every list
-                set matches to (every reminder of theList whose name is "{escaped_title}")
+                set matches to (every reminder of theList whose {clause})
                 if (count of matches) > 0 then
                     {action}
-                    return "{verb}"
+                    return (count of matches) as string
                 end if
             end repeat
-            error "Reminder not found: {escaped_title}"
+            error "Reminder not found: {not_found}"
         end tell
     "#
         )
     }
 }
 
-/// Mark a reminder as complete by title via AppleScript.
-/// Searches all lists unless a list name is given.
-pub async fn complete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
-    let script = build_find_and_act_script(
-        title,
-        list,
-        "set completed of item 1 of matches to true",
-        "completed",
-    );
+/// "…as complete" plus, when a title matched more than one reminder, which of
+/// them was acted on — silence there is how a caller ends up thinking a
+/// duplicate title was handled when only one of the pair was.
+fn acted_on(target: Target<'_>, matched: &str, past_tense: &str) -> String {
+    let n: usize = matched.trim().parse().unwrap_or(1);
+    let which = if n > 1 {
+        format!(" (1 of {n} matching — pass --id to choose)")
+    } else {
+        String::new()
+    };
+    format!("{past_tense} {}{which}", target.describe())
+}
 
-    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+/// Mark a reminder as complete via AppleScript, by id or title.
+/// Searches all lists unless a list name is given.
+pub async fn complete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<ActionResult> {
+    let script =
+        build_find_and_act_script(target, list, "set completed of item 1 of matches to true");
+
+    let matched = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
     Ok(ActionResult::success_with_message(
         "completed",
-        &format!("Marked '{}' as complete", title),
+        &acted_on(target, &matched, "Marked"),
     ))
 }
 
-/// Delete a reminder by title via AppleScript.
+/// Delete a reminder via AppleScript, by id or title.
 /// Searches all lists unless a list name is given.
-pub async fn delete(title: &str, list: Option<&str>) -> anyhow::Result<ActionResult> {
-    let script = build_find_and_act_script(title, list, "delete item 1 of matches", "deleted");
+pub async fn delete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<ActionResult> {
+    let script = build_find_and_act_script(target, list, "delete item 1 of matches");
 
-    run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
+    let matched = run_osascript_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
     Ok(ActionResult::success_with_message(
         "deleted",
-        &format!("Deleted reminder '{}'", title),
+        &acted_on(target, &matched, "Deleted"),
     ))
 }
 
@@ -331,35 +393,91 @@ mod tests {
     #[test]
     fn test_find_script_with_list_targets_that_list() {
         let script = build_find_and_act_script(
-            "Buy milk",
+            Target::Title("Buy milk"),
             Some("Scrapr"),
             "delete item 1 of matches",
-            "deleted",
         );
         assert!(script.contains("set theList to list \"Scrapr\""));
-        assert!(script.contains("every reminder of theList whose name is \"Buy milk\""));
+        assert!(script.contains(
+            "every reminder of theList whose name is \"Buy milk\" and completed is false"
+        ));
         assert!(!script.contains("repeat"));
     }
 
     #[test]
     fn test_find_script_without_list_searches_all_lists() {
         let script =
-            build_find_and_act_script("Buy milk", None, "delete item 1 of matches", "deleted");
+            build_find_and_act_script(Target::Title("Buy milk"), None, "delete item 1 of matches");
         assert!(script.contains("repeat with theList in every list"));
-        assert!(script.contains("every reminder of theList whose name is \"Buy milk\""));
-        assert!(script.contains("error \"Reminder not found: Buy milk\""));
+        assert!(script.contains(
+            "every reminder of theList whose name is \"Buy milk\" and completed is false"
+        ));
+        assert!(script.contains("error \"Reminder not found: 'Buy milk'\""));
         assert!(!script.contains("first list"));
     }
 
     #[test]
     fn test_find_script_escapes_title() {
         let script = build_find_and_act_script(
-            "Say \"hi\"",
+            Target::Title("Say \"hi\""),
             None,
             "set completed of item 1 of matches to true",
-            "completed",
         );
-        assert!(script.contains("whose name is \"Say \\\"hi\\\"\""));
+        assert!(script.contains("whose name is \"Say \\\"hi\\\"\" and completed is false"));
+    }
+
+    /// `reminders list` prints the bare UUID; AppleScript's `id` is a URL.
+    /// Either spelling must select the same reminder.
+    #[test]
+    fn test_id_target_matches_on_the_applescript_url() {
+        let bare = build_find_and_act_script(
+            Target::Id("0e430734-961e-483f-9af7-220efb64b2b3"),
+            None,
+            "delete item 1 of matches",
+        );
+        assert!(bare
+            .contains("whose id is \"x-apple-reminder://0e430734-961e-483f-9af7-220efb64b2b3\""));
+
+        // A pasted full URL must not end up double-prefixed.
+        let full = build_find_and_act_script(
+            Target::Id("x-apple-reminder://0e430734-961e-483f-9af7-220efb64b2b3"),
+            None,
+            "delete item 1 of matches",
+        );
+        assert!(full
+            .contains("whose id is \"x-apple-reminder://0e430734-961e-483f-9af7-220efb64b2b3\""));
+        assert!(!full.contains("x-apple-reminder://x-apple-reminder://"));
+    }
+
+    /// A finished reminder of the same name must not absorb the action: the
+    /// live "1 of 3 matching" that surfaced this counted a completed one.
+    #[test]
+    fn test_title_matching_ignores_completed_reminders() {
+        let by_title =
+            build_find_and_act_script(Target::Title("cider dup test"), None, "delete item 1");
+        assert!(by_title.contains("and completed is false"), "{by_title}");
+
+        // An id is explicit — it may name a finished reminder deliberately.
+        let by_id = build_find_and_act_script(Target::Id("abc-123"), None, "delete item 1");
+        assert!(!by_id.contains("completed is false"), "{by_id}");
+    }
+
+    /// The bug that started this: two reminders share a title, by-title acts
+    /// on the first, and the caller is told it handled "the" reminder.
+    #[test]
+    fn test_duplicate_titles_are_reported_not_hidden() {
+        let one = acted_on(Target::Title("[BUG] bob produced an error"), "1", "Marked");
+        assert_eq!(one, "Marked '[BUG] bob produced an error'");
+
+        let many = acted_on(Target::Title("[BUG] bob produced an error"), "2", "Marked");
+        assert!(many.contains("1 of 2 matching"), "{many}");
+        assert!(many.contains("--id"), "{many}");
+
+        // An id matches at most one, so it never carries the caveat.
+        assert_eq!(
+            acted_on(Target::Id("abc-123"), "1", "Deleted"),
+            "Deleted id abc-123"
+        );
     }
 
     #[test]

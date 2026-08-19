@@ -26,6 +26,9 @@ cider reminders --pretty
 # Create a reminder
 cider reminders create --title "Buy milk" --list Shopping
 
+# Complete one by id — titles repeat, ids don't
+cider reminders complete --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
+
 # Check your calendar
 cider calendar
 
@@ -116,6 +119,19 @@ Write operations return a status object:
 $ cider --pretty reminders create --title "Buy milk" --list Shopping
 ✓ created (buy_milk) — Reminder added
 ```
+
+`reminders complete` and `reminders delete` take either `--title` or `--id`.
+Titles are not unique, so a `--title` call acts on the first open match and
+says so when there were others:
+
+```
+$ cider reminders complete --title "Review PR"
+{"action":"completed","message":"Marked 'Review PR' (1 of 2 matching — pass --id to choose)","ok":true}
+```
+
+Pass the `id` from `reminders list` to name one exactly. A `--title` match only
+ever considers reminders that are still open — the same set `reminders list`
+shows — so a finished reminder of the same name can never absorb the action.
 
 ## Requirements
 

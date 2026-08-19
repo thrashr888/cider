@@ -413,18 +413,26 @@ enum RemindersAction {
     },
     /// Mark a reminder as complete
     Complete {
+        /// Reminder id to complete, from `reminders list` (unambiguous when
+        /// several reminders share a title)
+        #[arg(long, conflicts_with = "title", required_unless_present = "title")]
+        id: Option<String>,
         /// Reminder title to complete
         #[arg(long)]
-        title: String,
+        title: Option<String>,
         /// List to search in (default: all lists)
         #[arg(long)]
         list: Option<String>,
     },
     /// Delete a reminder
     Delete {
+        /// Reminder id to delete, from `reminders list` (unambiguous when
+        /// several reminders share a title)
+        #[arg(long, conflicts_with = "title", required_unless_present = "title")]
+        id: Option<String>,
         /// Reminder title to delete
         #[arg(long)]
-        title: String,
+        title: Option<String>,
         /// List to search in (default: all lists)
         #[arg(long)]
         list: Option<String>,
@@ -1538,29 +1546,32 @@ async fn run() -> anyhow::Result<()> {
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
-            Some(RemindersAction::Complete { title, list }) => {
+            Some(RemindersAction::Complete { id, title, list }) => {
+                // clap guarantees exactly one of the two is present.
+                let target = reminder_target(id.as_deref(), title.as_deref());
                 if cli.no_op {
                     print_dry_run(
                         "reminders.complete",
-                        format!("Would complete reminder '{title}'"),
+                        format!("Would complete reminder {}", target.describe()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::complete(&title, list.as_deref()).await?;
+                    let result = sources::reminders::complete(target, list.as_deref()).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
-            Some(RemindersAction::Delete { title, list }) => {
+            Some(RemindersAction::Delete { id, title, list }) => {
+                let target = reminder_target(id.as_deref(), title.as_deref());
                 if cli.no_op {
                     print_dry_run(
                         "reminders.delete",
-                        format!("Would delete reminder '{title}'"),
+                        format!("Would delete reminder {}", target.describe()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::delete(&title, list.as_deref()).await?;
+                    let result = sources::reminders::delete(target, list.as_deref()).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -1793,6 +1804,20 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the `--id` / `--title` pair into a target. clap enforces exactly
+/// one of them (`conflicts_with` + `required_unless_present`), so the fallback
+/// is unreachable in practice.
+fn reminder_target<'a>(
+    id: Option<&'a str>,
+    title: Option<&'a str>,
+) -> sources::reminders::Target<'a> {
+    match (id, title) {
+        (Some(id), _) => sources::reminders::Target::Id(id),
+        (None, Some(title)) => sources::reminders::Target::Title(title),
+        (None, None) => sources::reminders::Target::Title(""),
+    }
 }
 
 fn is_broken_pipe(err: &anyhow::Error) -> bool {

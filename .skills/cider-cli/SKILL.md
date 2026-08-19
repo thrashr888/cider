@@ -112,6 +112,9 @@ cider reminders create --title "Buy milk" --list Shopping
 ```bash
 cider reminders list --list Shopping --limit 20
 cider reminders create --title "Buy milk" --list Shopping --due "2026-03-14T18:00:00Z"
+# Complete/delete by --id from `list` — titles repeat, ids don't. A --title
+# call acts on the first open match and reports when there were others.
+cider reminders complete --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
 cider calendar list --days-ahead 14
 cider calendar create --title "1:1" --start "2026-03-15T17:00:00Z" --end "2026-03-15T17:30:00Z"
 ```
