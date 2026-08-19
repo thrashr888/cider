@@ -133,6 +133,37 @@ Pass the `id` from `reminders list` to name one exactly. A `--title` match only
 ever considers reminders that are still open — the same set `reminders list`
 shows — so a finished reminder of the same name can never absorb the action.
 
+## Use as a Library
+
+cider is also a Rust crate, so another Rust program can skip the subprocess,
+the JSON round-trip, and the question of whether the binary is installed and
+new enough:
+
+```toml
+[dependencies]
+cider-cli = { version = "0.3", default-features = false }
+```
+
+```rust
+for r in cider::sources::reminders::list(Some("Shopping")).await? {
+    println!("{} {}", r.id, r.title);
+}
+
+cider::sources::reminders::complete(
+    cider::sources::reminders::Target::Id(&id),
+    Some("Shopping"),
+).await?;
+```
+
+Every `sources::*` module returns plain serde types — the CLI is a thin Clap
+front-end over exactly these functions. `default-features = false` drops the
+Clap front-end and the `--pretty` table renderer, which a library caller never
+uses.
+
+The library shells out to macOS's own tools (`osascript`, `sqlite3`), so it
+needs nothing on PATH — but it inherits your process's TCC permissions, and
+sees the same Full Disk Access denials the CLI reports.
+
 ## Requirements
 
 - macOS

@@ -2,8 +2,7 @@ use std::io::{self, Write};
 
 use clap::{Parser, Subcommand};
 
-mod pretty;
-mod sources;
+use cider::{pretty, sources};
 
 #[derive(Parser)]
 #[command(

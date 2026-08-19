@@ -1,6 +1,6 @@
 [package]
 name = "cider-cli"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Manage macOS Apple apps from the command line — Reminders, Calendar, Contacts, Notes, Mail, Music, Keychain, Safari, and 30+ more"
 license = "MIT"
@@ -11,14 +11,27 @@ keywords = ["macos", "apple", "cli", "automation", "keychain"]
 categories = ["command-line-utilities", "os::macos-apis"]
 rust-version = "1.70"
 
+[lib]
+name = "cider"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cider"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+# The Clap front-end and its `--pretty` tables. On by default so `cargo
+# install cider-cli` and `cargo build` still produce the binary; a library
+# consumer turns it off (`default-features = false`) and compiles neither an
+# argument parser nor a table renderer it will never call.
+default = ["cli"]
+cli = ["dep:clap"]
 
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

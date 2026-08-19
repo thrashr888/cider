@@ -22,6 +22,11 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy -- -D warnings
+      # Build the way a library consumer does. Alchemy links this crate with
+      # default-features off, so a Clap import creeping into src/sources/ would
+      # break it — and would pass every check above, which all build the binary.
+      - name: Clippy (library only, no Clap)
+        run: cargo clippy --lib --no-default-features -- -D warnings
       - name: Test
         run: cargo test
       - name: Build

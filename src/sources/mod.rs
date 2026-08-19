@@ -35,6 +35,11 @@ pub mod stocks;
 pub mod system_info;
 pub mod time_machine;
 mod util;
+
+/// The result every mutating call returns (`create`, `complete`, `update`, …).
+/// Re-exported because those signatures name it: the rest of `util` is
+/// AppleScript/subprocess plumbing that callers have no business reaching.
+pub use util::ActionResult;
 pub mod voice_memos;
 pub mod weather;
 pub mod wifi;
