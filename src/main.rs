@@ -7,6 +7,7 @@ use cider::{pretty, sources};
 #[derive(Parser)]
 #[command(
     name = "cider",
+    version,
     about = "Read Apple app data from the command line. Outputs JSON to stdout, errors to stderr.",
     long_about = "cider reads data from macOS Apple apps and outputs structured JSON.\n\n\
                   Designed for both human use and AI agent consumption.\n\
@@ -25,6 +26,10 @@ struct Cli {
     /// Show what mutating commands would do without executing them
     #[arg(long = "dry-run", global = true)]
     no_op: bool,
+
+    /// Lowercase alias for --version
+    #[arg(short = 'v', action = clap::ArgAction::Version, hide = true)]
+    version_alias: (),
 
     #[command(subcommand)]
     command: Commands,
