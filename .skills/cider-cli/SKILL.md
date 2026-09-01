@@ -50,7 +50,7 @@ cider schema
 cider schema --source reminders
 ```
 
-Use `cider schema` to learn whether a source supports `--dry-run`, pagination args, and stable IDs. Use `--help` for exact subcommand flags.
+Use `cider schema` to inspect the complete parser-derived command tree: actions, arguments, required/default values, read/write classification, `--dry-run`, and identifier contracts. Use `--help` for concise interactive help.
 
 ## Agent-Friendly Features
 
@@ -111,11 +111,15 @@ cider reminders create --title "Buy milk" --list Shopping
 
 ```bash
 cider reminders list --list Shopping --limit 20
+cider reminders list --search invoice --include-completed
 cider reminders create --title "Buy milk" --list Shopping --due "2026-03-14T18:00:00Z"
 # Complete/delete by --id from `list` — titles repeat, ids don't. A --title
 # call acts on the first open match and reports when there were others.
 cider reminders complete --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
+cider reminders batch-complete --id <id-1> --id <id-2>
 cider calendar list --days-ahead 14
+cider calendar get --id <event-id>
+cider calendar update --id <event-id> --location "Zoom"
 cider calendar create --title "1:1" --start "2026-03-15T17:00:00Z" --end "2026-03-15T17:30:00Z"
 ```
 
@@ -124,6 +128,7 @@ cider calendar create --title "1:1" --start "2026-03-15T17:00:00Z" --end "2026-0
 ```bash
 cider contacts list --search Smith --limit 10
 cider contacts get --id contact-123
+cider contacts create --first Jane --last Doe --email jane@work.example --email jane@home.example --job-title Engineer
 cider notes list --folder Work --limit 20
 cider notes create --title "Meeting Notes" --body "Agenda..."
 ```
@@ -134,6 +139,9 @@ cider notes create --title "Meeting Notes" --body "Agenda..."
 cider messages list --days 7 --limit 20
 cider messages send --to "+15551234567" --text "On my way"
 cider mail list --limit 10
+cider mail list --search invoice --unread --limit 25
+cider mail get --id '<message-id@example.com>'
+cider mail batch-read --id '<message-1@example.com>' --id '<message-2@example.com>'
 cider music status
 cider music play --playlist Favorites
 ```
@@ -146,6 +154,8 @@ cider screenshots capture --path ~/Desktop/capture.png
 cider shortcuts run --name "Daily Briefing"
 cider wifi status
 cider system-info show
+cider doctor
+cider auth-status
 ```
 
 ## Safety And Permissions
@@ -161,7 +171,9 @@ cider system-info show
 
 4. `mail send` and `messages send` are real side effects, not previews.
 
-5. Prefer explicit identifiers where available. If a source does not advertise stable IDs, be careful with title-based deletes and updates.
+5. Prefer `id` values advertised by `cider schema`. Calendar, Contacts, Mail, Messages, Notes, and Reminders expose stable targets. Calendar's legacy title/date delete must be treated as a compatibility fallback; it refuses ambiguous matches.
+
+6. `cider doctor` and `cider auth-status` are prompt-free. An Automation status of `not_probed` is intentional, because probing can itself open a macOS permission dialog.
 
 ## Best Practices
 

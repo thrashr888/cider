@@ -1,6 +1,6 @@
 use super::util::{
     escape_applescript, run_command_with_timeout, run_osascript_with_timeout, slug, ActionResult,
-    APPLE_EPOCH,
+    BatchActionResult, BatchItemResult, APPLE_EPOCH,
 };
 use chrono::DateTime;
 use serde::Serialize;
@@ -14,8 +14,20 @@ pub struct Reminder {
     pub list: String,
     pub priority: i32,
     pub completed: bool,
+    pub flagged: bool,
+    pub is_all_day: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_date: Option<DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -104,7 +116,14 @@ SELECT
     COALESCE(r.ZTITLE, '') AS title,
     COALESCE(r.ZPRIORITY, 0) AS priority,
     COALESCE(r.ZCOMPLETED, 0) AS completed,
+    COALESCE(r.ZFLAGGED, 0) AS flagged,
+    COALESCE(r.ZALLDAY, 0) AS all_day,
     r.ZDUEDATE AS due,
+    r.ZSTARTDATE AS start_date,
+    r.ZCOMPLETIONDATE AS completion_date,
+    r.ZCREATIONDATE AS created_at,
+    r.ZLASTMODIFIEDDATE AS modified_at,
+    r.ZICSURL AS url,
     r.ZNOTES AS notes
 FROM ZREMCDREMINDER r
 {list_join}
@@ -131,7 +150,25 @@ LIMIT 500;
 
 /// List incomplete reminders, optionally filtered by list name.
 pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
-    let mut all = fetch(false, None).await?;
+    query(list_filter, None, false).await
+}
+
+/// Search reminders with optional list and completion filters.
+///
+/// This is separate from [`list`] so existing library callers keep the
+/// incomplete-only behavior while the CLI can expose a richer query.
+pub async fn query(
+    list_filter: Option<&str>,
+    search: Option<&str>,
+    include_completed: bool,
+) -> anyhow::Result<Vec<Reminder>> {
+    let where_sql = search.map(|term| {
+        let term = escape_sql(term);
+        format!(
+            "(LOWER(COALESCE(r.ZTITLE, '')) LIKE LOWER('%{term}%') OR LOWER(COALESCE(r.ZNOTES, '')) LIKE LOWER('%{term}%'))"
+        )
+    });
+    let mut all = fetch(include_completed, where_sql.as_deref()).await?;
 
     if let Some(filter) = list_filter {
         let filter_lower = filter.to_lowercase();
@@ -207,15 +244,19 @@ pub async fn create(
         tell application "Reminders"
             {}
             set newReminder to make new reminder at end of reminders of theList with properties {{{}}}
-            return name of newReminder
+            return id of newReminder
         end tell
     "#,
         list_clause, properties
     );
 
     let output = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
-    let id = slug(output.trim());
+    let id = normalize_id(&output);
     Ok(ActionResult::success_with_id("created", &id))
+}
+
+fn normalize_id(id: &str) -> String {
+    id.trim().trim_start_matches(ID_SCHEME).to_ascii_lowercase()
 }
 
 /// Which fields `update` should change; `None` leaves the field alone.
@@ -413,6 +454,17 @@ pub async fn complete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<
     ))
 }
 
+/// Mark a completed reminder as incomplete again.
+pub async fn reopen(target: Target<'_>, list: Option<&str>) -> anyhow::Result<ActionResult> {
+    let script =
+        build_find_and_act_script(target, list, "set completed of item 1 of matches to false");
+    let matched = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
+    Ok(ActionResult::success_with_message(
+        "reopened",
+        &acted_on(target, &matched, "Reopened"),
+    ))
+}
+
 /// Delete a reminder via AppleScript, by id or title.
 /// Searches all lists unless a list name is given.
 pub async fn delete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<ActionResult> {
@@ -424,6 +476,125 @@ pub async fn delete(target: Target<'_>, list: Option<&str>) -> anyhow::Result<Ac
         "deleted",
         &acted_on(target, &matched, "Deleted"),
     ))
+}
+
+/// Complete several reminders by stable id in one AppleScript process.
+pub async fn batch_complete(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_act(
+        ids,
+        "batch-complete",
+        "set completed of item 1 of matches to true",
+    )
+    .await
+}
+
+/// Reopen several reminders by stable id in one AppleScript process.
+pub async fn batch_reopen(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_act(
+        ids,
+        "batch-reopen",
+        "set completed of item 1 of matches to false",
+    )
+    .await
+}
+
+/// Delete several reminders by stable id in one AppleScript process.
+pub async fn batch_delete(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_act(ids, "batch-delete", "delete item 1 of matches").await
+}
+
+async fn batch_act(
+    ids: &[String],
+    action_name: &str,
+    action: &str,
+) -> anyhow::Result<BatchActionResult> {
+    if ids.is_empty() {
+        anyhow::bail!("At least one reminder id is required");
+    }
+    if ids.len() > 500 {
+        anyhow::bail!("Reminder batches are limited to 500 items");
+    }
+    if ids.iter().any(|id| id.trim().is_empty()) {
+        anyhow::bail!("Reminder ids cannot be empty");
+    }
+    let script = build_batch_script(ids, action);
+    let output = run_osascript_with_timeout(&script, super::util::SUBPROCESS_TIMEOUT).await?;
+    let parsed = parse_batch_output(&output);
+    let results = ids
+        .iter()
+        .map(|id| {
+            let id = normalize_id(id);
+            parsed
+                .iter()
+                .find(|result| result.id == id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    BatchItemResult::failure(id, "Reminders returned no result for this item")
+                })
+        })
+        .collect();
+    Ok(BatchActionResult::new(action_name, results))
+}
+
+fn build_batch_script(ids: &[String], action: &str) -> String {
+    let mut items = String::new();
+    for id in ids {
+        let id = normalize_id(id);
+        let escaped_id = escape_applescript(&id);
+        items.push_str(&format!(
+            r#"
+            set targetId to "{escaped_id}"
+            set targetFound to false
+            try
+                repeat with theList in every list
+                    set matches to (every reminder of theList whose id is "{ID_SCHEME}{escaped_id}")
+                    if (count of matches) > 0 then
+                        {action}
+                        set targetFound to true
+                        exit repeat
+                    end if
+                end repeat
+                if targetFound then
+                    set end of batchResults to targetId & tab & "1" & tab & "0"
+                else
+                    set end of batchResults to targetId & tab & "0" & tab & "-1728"
+                end if
+            on error errMsg number errNum
+                set end of batchResults to targetId & tab & "0" & tab & (errNum as string)
+            end try
+"#
+        ));
+    }
+
+    format!(
+        r#"
+        with timeout of 600 seconds
+        tell application "Reminders"
+            set batchResults to {{}}
+            {items}
+            set AppleScript's text item delimiters to linefeed
+            return batchResults as string
+        end tell
+        end timeout
+"#
+    )
+}
+
+fn parse_batch_output(output: &str) -> Vec<BatchItemResult> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let id = fields.next()?.trim();
+            let ok = fields.next()?.trim() == "1";
+            let error_number = fields.next().unwrap_or("-1").trim();
+            Some(if ok {
+                BatchItemResult::success(id)
+            } else {
+                BatchItemResult::failure(id, format!("AppleScript error {error_number}"))
+            })
+        })
+        .collect()
 }
 
 /// List all reminder list names via AppleScript.
@@ -443,6 +614,22 @@ pub async fn lists() -> anyhow::Result<Vec<String>> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect())
+}
+
+fn apple_date(value: &serde_json::Value) -> Option<DateTime<chrono::Utc>> {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .and_then(|ts| DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)),
+        serde_json::Value::String(s) => {
+            if let Ok(ts) = s.parse::<f64>() {
+                DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)
+            } else {
+                super::util::parse_plist_date(s)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn parse_json_rows(output: &str) -> Vec<Reminder> {
@@ -472,20 +659,10 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
 
         let priority = row["priority"].as_i64().unwrap_or(0) as i32;
         let completed = row["completed"].as_i64().unwrap_or(0) != 0;
+        let flagged = row["flagged"].as_i64().unwrap_or(0) != 0;
+        let is_all_day = row["all_day"].as_i64().unwrap_or(0) != 0;
 
-        let due_date = match &row["due"] {
-            serde_json::Value::Number(n) => n
-                .as_f64()
-                .and_then(|ts| DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)),
-            serde_json::Value::String(s) => {
-                if let Ok(ts) = s.parse::<f64>() {
-                    DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)
-                } else {
-                    super::util::parse_plist_date(s)
-                }
-            }
-            _ => None,
-        };
+        let due_date = apple_date(&row["due"]);
 
         let notes = row["notes"]
             .as_str()
@@ -496,7 +673,7 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
         let id = if reminder_id.is_empty() {
             slug(name)
         } else {
-            slug(reminder_id)
+            normalize_id(reminder_id)
         };
 
         records.push(Reminder {
@@ -505,7 +682,18 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
             list: list_name.to_string(),
             priority,
             completed,
+            flagged,
+            is_all_day,
             due_date,
+            start_date: apple_date(&row["start_date"]),
+            completion_date: apple_date(&row["completion_date"]),
+            created_at: apple_date(&row["created_at"]),
+            modified_at: apple_date(&row["modified_at"]),
+            url: row["url"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
             notes,
         });
     }
@@ -520,7 +708,7 @@ mod tests {
     #[test]
     fn test_parse_json_rows() {
         let output = r#"[
-            {"id":"ABC-123-DEF","list":"Shopping","title":"Buy groceries","priority":5,"completed":0,"due":793900800.0,"notes":null},
+            {"id":"ABC-123-DEF","list":"Shopping","title":"Buy groceries","priority":5,"completed":0,"flagged":1,"all_day":1,"due":793900800.0,"start_date":793814400.0,"url":"https://example.com","notes":null},
             {"id":"GHI-456-JKL","list":"Health","title":"Call dentist","priority":0,"completed":0,"due":null,"notes":null}
         ]"#;
         let records = parse_json_rows(output);
@@ -529,9 +717,41 @@ mod tests {
         assert_eq!(records[0].list, "Shopping");
         assert_eq!(records[0].priority, 5);
         assert!(records[0].due_date.is_some());
+        assert!(records[0].start_date.is_some());
+        assert!(records[0].flagged);
+        assert!(records[0].is_all_day);
+        assert_eq!(records[0].url.as_deref(), Some("https://example.com"));
         assert!(!records[0].completed);
         assert_eq!(records[1].title, "Call dentist");
         assert!(records[1].due_date.is_none());
+    }
+
+    #[test]
+    fn create_ids_are_normalized_not_title_slugs() {
+        assert_eq!(normalize_id("x-apple-reminder://ABC-123\n"), "abc-123");
+        assert_eq!(normalize_id("server@example.com"), "server@example.com");
+    }
+
+    #[test]
+    fn batch_script_uses_one_process_and_stable_ids() {
+        let script = build_batch_script(
+            &[
+                "x-apple-reminder://ABC-123".to_string(),
+                "DEF-456".to_string(),
+            ],
+            "set completed of item 1 of matches to true",
+        );
+        assert_eq!(script.matches("tell application \"Reminders\"").count(), 1);
+        assert!(script.contains("id is \"x-apple-reminder://abc-123\""));
+        assert!(script.contains("id is \"x-apple-reminder://def-456\""));
+    }
+
+    #[test]
+    fn batch_output_preserves_partial_failures() {
+        let result = parse_batch_output("abc\t1\t0\ndef\t0\t-1728");
+        assert_eq!(result.len(), 2);
+        assert!(result[0].ok);
+        assert_eq!(result[1].error.as_deref(), Some("AppleScript error -1728"));
     }
 
     #[test]

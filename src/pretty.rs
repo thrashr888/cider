@@ -169,8 +169,23 @@ fn render_action_result<W: Write>(
         if !msg.is_empty() {
             write!(w, " — {msg}")?;
         }
+    } else if let Some(requested) = obj.get("requested").and_then(|v| v.as_u64()) {
+        let succeeded = obj.get("succeeded").and_then(|v| v.as_u64()).unwrap_or(0);
+        let failed = obj.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+        write!(w, " — {succeeded}/{requested} succeeded")?;
+        if failed > 0 {
+            write!(w, ", {failed} failed")?;
+        }
     }
     writeln!(w)?;
+
+    if let Some(results) = obj.get("results").and_then(|value| value.as_array()) {
+        for result in results.iter().filter(|result| result["ok"] == false) {
+            let id = result["id"].as_str().unwrap_or("unknown");
+            let error = result["error"].as_str().unwrap_or("failed");
+            writeln!(w, "  {YELLOW}✗{RESET} {id} — {error}")?;
+        }
+    }
     Ok(())
 }
 
@@ -290,6 +305,27 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("created"));
         assert!(output.contains("abc"));
+    }
+
+    #[test]
+    fn test_render_batch_result_keeps_failure_details() {
+        let value = serde_json::json!({
+            "ok": false,
+            "action": "batch-delete",
+            "requested": 2,
+            "succeeded": 1,
+            "failed": 1,
+            "results": [
+                {"id": "a", "ok": true},
+                {"id": "b", "ok": false, "error": "not found"}
+            ]
+        });
+        let mut buf = Vec::new();
+        render(&mut buf, &value).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("1/2 succeeded"));
+        assert!(output.contains("b"));
+        assert!(output.contains("not found"));
     }
 
     #[test]

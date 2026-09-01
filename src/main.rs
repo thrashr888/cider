@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use cider::{pretty, sources};
 
@@ -42,6 +42,9 @@ enum Commands {
     ActivityMonitor,
     /// List installed applications (App Store)
     Apps,
+    /// Show prompt-free read and Automation authorization status
+    #[command(name = "auth-status")]
+    AuthStatus,
     /// List Automator workflows
     Automator,
     /// List paired Bluetooth devices
@@ -68,6 +71,8 @@ enum Commands {
     },
     /// List mounted disks and volumes (Disk Utility)
     Disks,
+    /// Check local databases, tools, and permissions without opening prompts
+    Doctor,
     /// Recent call history (FaceTime + Phone)
     #[command(name = "facetime")]
     FaceTime {
@@ -233,14 +238,59 @@ enum CalendarAction {
         #[arg(long)]
         all_day: bool,
     },
-    /// Delete a calendar event by title and date
+    /// Create several events from a JSON array ("-" reads stdin)
+    #[command(name = "batch-create")]
+    BatchCreate {
+        /// JSON array of event objects
+        #[arg(long)]
+        json: String,
+    },
+    /// Get a calendar event by stable ID
+    Get {
+        /// Event ID from `calendar list`
+        #[arg(long)]
+        id: String,
+    },
+    /// Update a calendar event in place by stable ID
+    #[command(group(
+        clap::ArgGroup::new("calendar_changes")
+            .required(true)
+            .args(["title", "start", "end", "location", "notes", "all_day"])
+    ))]
+    Update {
+        /// Event ID from `calendar list`
+        #[arg(long)]
+        id: String,
+        /// New event title
+        #[arg(long)]
+        title: Option<String>,
+        /// New start date/time (ISO 8601)
+        #[arg(long)]
+        start: Option<String>,
+        /// New end date/time (ISO 8601)
+        #[arg(long)]
+        end: Option<String>,
+        /// New event location
+        #[arg(long)]
+        location: Option<String>,
+        /// New event notes
+        #[arg(long)]
+        notes: Option<String>,
+        /// Set all-day state to true or false
+        #[arg(long)]
+        all_day: Option<bool>,
+    },
+    /// Delete a calendar event by stable ID (legacy title/date also accepted)
     Delete {
-        /// Event title to delete
-        #[arg(long)]
-        title: String,
-        /// Date of the event (ISO 8601 date)
-        #[arg(long)]
-        date: String,
+        /// Event ID from `calendar list`
+        #[arg(long, conflicts_with = "title", required_unless_present = "title")]
+        id: Option<String>,
+        /// Legacy event title; requires --date and refuses ambiguous matches
+        #[arg(long, requires = "date")]
+        title: Option<String>,
+        /// Legacy event date (ISO 8601 date); requires --title
+        #[arg(long, requires = "title")]
+        date: Option<String>,
         /// Optional calendar name to narrow the search
         #[arg(long)]
         calendar: Option<String>,
@@ -272,22 +322,48 @@ enum ContactsAction {
     /// Create a new contact
     Create {
         /// First name
-        #[arg(long)]
-        first: String,
+        #[arg(long, required_unless_present_any = ["last", "org"])]
+        first: Option<String>,
         /// Last name
         #[arg(long)]
-        last: String,
+        last: Option<String>,
         /// Email address
         #[arg(long)]
-        email: Option<String>,
+        email: Vec<String>,
         /// Phone number
         #[arg(long)]
-        phone: Option<String>,
+        phone: Vec<String>,
         /// Organization
         #[arg(long)]
         org: Option<String>,
+        /// Middle name
+        #[arg(long)]
+        middle: Option<String>,
+        /// Nickname
+        #[arg(long)]
+        nickname: Option<String>,
+        /// Job title
+        #[arg(long)]
+        job_title: Option<String>,
+        /// Department
+        #[arg(long)]
+        department: Option<String>,
+        /// Birthday (ISO 8601 date)
+        #[arg(long)]
+        birthday: Option<String>,
+        /// Contact note
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Update an existing contact
+    #[command(group(
+        clap::ArgGroup::new("contact_changes")
+            .required(true)
+            .args([
+                "first", "last", "email", "phone", "middle", "nickname", "org",
+                "job_title", "department", "birthday", "note"
+            ])
+    ))]
     Update {
         /// Contact ID
         #[arg(long)]
@@ -304,6 +380,27 @@ enum ContactsAction {
         /// Phone number
         #[arg(long)]
         phone: Option<String>,
+        /// Middle name
+        #[arg(long)]
+        middle: Option<String>,
+        /// Nickname
+        #[arg(long)]
+        nickname: Option<String>,
+        /// Organization
+        #[arg(long)]
+        org: Option<String>,
+        /// Job title
+        #[arg(long)]
+        job_title: Option<String>,
+        /// Department
+        #[arg(long)]
+        department: Option<String>,
+        /// Birthday (ISO 8601 date)
+        #[arg(long)]
+        birthday: Option<String>,
+        /// Contact note
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Delete a contact
     Delete {
@@ -396,6 +493,12 @@ enum RemindersAction {
         /// Limit the number of results returned
         #[arg(long)]
         limit: Option<usize>,
+        /// Search titles and notes
+        #[arg(long)]
+        search: Option<String>,
+        /// Include completed reminders
+        #[arg(long)]
+        include_completed: bool,
     },
     /// Create a new reminder
     Create {
@@ -429,6 +532,11 @@ enum RemindersAction {
         list: Option<String>,
     },
     /// Update a reminder in place (preserves its id and creation date)
+    #[command(group(
+        clap::ArgGroup::new("reminder_changes")
+            .required(true)
+            .args(["new_title", "notes", "append_notes", "priority", "due"])
+    ))]
     Update {
         /// Reminder id to update, from `reminders list` (unambiguous when
         /// several reminders share a title)
@@ -470,6 +578,15 @@ enum RemindersAction {
         #[arg(long)]
         list: Option<String>,
     },
+    /// Mark a completed reminder as incomplete by stable ID
+    Reopen {
+        /// Reminder id from `reminders list --include-completed`
+        #[arg(long)]
+        id: String,
+        /// List to search in (default: all lists)
+        #[arg(long)]
+        list: Option<String>,
+    },
     /// Delete a reminder
     Delete {
         /// Reminder id to delete, from `reminders list` (unambiguous when
@@ -482,6 +599,27 @@ enum RemindersAction {
         /// List to search in (default: all lists)
         #[arg(long)]
         list: Option<String>,
+    },
+    /// Complete several reminders in one operation
+    #[command(name = "batch-complete")]
+    BatchComplete {
+        /// Reminder IDs; repeat --id for each item
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Reopen several reminders in one operation
+    #[command(name = "batch-reopen")]
+    BatchReopen {
+        /// Reminder IDs; repeat --id for each item
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Delete several reminders in one operation
+    #[command(name = "batch-delete")]
+    BatchDelete {
+        /// Reminder IDs; repeat --id for each item
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
     },
     /// List all reminder lists
     Lists,
@@ -497,30 +635,75 @@ enum MailAction {
         /// Limit the number of results returned
         #[arg(long)]
         limit: Option<usize>,
-    },
-    /// Get a single message by index (1-based)
-    Get {
-        /// Message index (1-based from list output)
+        /// Search subject, sender, and body preview
         #[arg(long)]
-        index: usize,
+        search: Option<String>,
+        /// Mailbox name or URL (default: INBOX)
+        #[arg(long)]
+        mailbox: Option<String>,
+        /// Only unread messages
+        #[arg(long)]
+        unread: bool,
+        /// Only flagged messages
+        #[arg(long)]
+        flagged: bool,
+    },
+    /// Get a single message by stable ID (legacy index also accepted)
+    Get {
+        /// Stable RFC Message-ID from list output
+        #[arg(long, conflicts_with = "index", required_unless_present = "index")]
+        id: Option<String>,
+        /// Legacy one-based inbox index
+        #[arg(long)]
+        index: Option<usize>,
     },
     /// Mark a message as read
     Read {
-        /// Message index (1-based)
+        /// Stable RFC Message-ID from list output
+        #[arg(long, conflicts_with = "index", required_unless_present = "index")]
+        id: Option<String>,
+        /// Legacy one-based inbox index
         #[arg(long)]
-        index: usize,
+        index: Option<usize>,
     },
     /// Mark a message as unread
     Unread {
-        /// Message index (1-based)
+        /// Stable RFC Message-ID from list output
+        #[arg(long, conflicts_with = "index", required_unless_present = "index")]
+        id: Option<String>,
+        /// Legacy one-based inbox index
         #[arg(long)]
-        index: usize,
+        index: Option<usize>,
     },
     /// Move a message to trash
     Trash {
-        /// Message index (1-based)
+        /// Stable RFC Message-ID from list output
+        #[arg(long, conflicts_with = "index", required_unless_present = "index")]
+        id: Option<String>,
+        /// Legacy one-based inbox index
         #[arg(long)]
-        index: usize,
+        index: Option<usize>,
+    },
+    /// Mark several messages read in one operation
+    #[command(name = "batch-read")]
+    BatchRead {
+        /// Stable message IDs; repeat --id for each message
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Mark several messages unread in one operation
+    #[command(name = "batch-unread")]
+    BatchUnread {
+        /// Stable message IDs; repeat --id for each message
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Trash several messages in one operation
+    #[command(name = "batch-trash")]
+    BatchTrash {
+        /// Stable message IDs; repeat --id for each message
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
     },
     /// List all mailbox names
     Mailboxes,
@@ -875,7 +1058,7 @@ enum WifiAction {
 fn print_output(value: &serde_json::Value, human: bool, envelope: bool) -> anyhow::Result<()> {
     let wrapped;
     let value = if envelope {
-        wrapped = serde_json::json!({"ok": true, "data": value});
+        wrapped = envelope_value(value);
         &wrapped
     } else {
         value
@@ -889,6 +1072,31 @@ fn print_output(value: &serde_json::Value, human: bool, envelope: bool) -> anyho
         writeln!(out)?;
         Ok(())
     }
+}
+
+fn envelope_value(value: &serde_json::Value) -> serde_json::Value {
+    let ok = value
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    serde_json::json!({"ok": ok, "data": value})
+}
+
+fn print_batch_output(
+    result: &sources::BatchActionResult,
+    human: bool,
+    envelope: bool,
+) -> anyhow::Result<()> {
+    print_output(&serde_json::to_value(result)?, human, envelope)?;
+    if !result.ok {
+        anyhow::bail!(
+            "{} failed for {} of {} items",
+            result.action,
+            result.failed,
+            result.requested
+        );
+    }
+    Ok(())
 }
 
 fn paginate_vec<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
@@ -932,23 +1140,190 @@ macro_rules! run_source {
 }
 
 fn build_schema(source: Option<&str>) -> serde_json::Value {
-    let commands = vec![
-        serde_json::json!({"source":"schema","supports_dry_run":false,"capabilities":["schema"]}),
-        serde_json::json!({"source":"contacts","supports_dry_run":true,"list_args":["search","offset","limit"],"stable_ids":true}),
-        serde_json::json!({"source":"mail","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":true,"friendly_mailboxes":true}),
-        serde_json::json!({"source":"messages","supports_dry_run":true,"list_args":["days","offset","limit"],"stable_ids":true}),
-        serde_json::json!({"source":"notes","supports_dry_run":true,"list_args":["folder","offset","limit","brief"],"stable_ids":true}),
-        serde_json::json!({"source":"reminders","supports_dry_run":true,"list_args":["list","offset","limit"],"stable_ids":false,"verbs":["list","get","create","update","complete","delete","lists"]}),
-        serde_json::json!({"source":"shortcuts","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
-        serde_json::json!({"source":"screenshots","supports_dry_run":true,"list_args":["offset","limit"],"stable_ids":false}),
-    ];
+    let mut root = Cli::command();
+    root.build();
+    let commands = root
+        .get_subcommands()
+        .filter(|command| command.get_name() != "help")
+        .map(|command| command_schema(command, true))
+        .collect::<Vec<_>>();
 
     match source {
         Some(source) => commands
             .into_iter()
-            .find(|item| item.get("source").and_then(|s| s.as_str()) == Some(source))
+            .find(|item| item["name"].as_str() == Some(source))
             .unwrap_or_else(|| serde_json::json!({"source":source,"error":"unknown_source"})),
-        None => serde_json::json!({"commands":commands}),
+        None => {
+            let global_arguments = root
+                .get_arguments()
+                .filter(|argument| argument.is_global_set() && !argument.is_hide_set())
+                .map(|argument| argument_schema(&root, argument))
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "schema_version": 1,
+                "command": "cider",
+                "global_arguments": global_arguments,
+                "commands": commands,
+            })
+        }
+    }
+}
+
+fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value {
+    let name = command.get_name();
+    let actions = command
+        .get_subcommands()
+        .filter(|action| action.get_name() != "help")
+        .map(|action| command_schema(action, false))
+        .collect::<Vec<_>>();
+    let arguments = command
+        .get_arguments()
+        .filter(|argument| !argument.is_hide_set())
+        .map(|argument| argument_schema(command, argument))
+        .collect::<Vec<_>>();
+    let mut usage_command = command.clone();
+    let usage = usage_command.render_usage().to_string();
+    let mut schema = serde_json::json!({
+        "name": name,
+        "description": command.get_about().map(ToString::to_string),
+        "usage": usage,
+        "arguments": arguments,
+        "actions": actions,
+    });
+
+    if !top_level {
+        let mutating = is_mutating_action(name);
+        schema["kind"] = serde_json::json!(if mutating { "write" } else { "read" });
+        schema["supports_dry_run"] = serde_json::json!(mutating);
+    } else {
+        let has_mutations = schema["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action["kind"] == "write"));
+        schema["supports_dry_run"] = serde_json::json!(has_mutations);
+        schema["source"] = serde_json::json!(name);
+        schema["verbs"] = serde_json::json!(schema["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|action| action["name"].as_str())
+            .collect::<Vec<_>>());
+        schema["list_args"] = serde_json::json!(schema["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|action| action["name"] == "list")
+            .and_then(|action| action["arguments"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|argument| argument["name"].as_str())
+            .collect::<Vec<_>>());
+        if let Some(identifier) = identifier_contract(name) {
+            schema["stable_ids"] = serde_json::json!(true);
+            schema["identifiers"] = identifier;
+        } else {
+            schema["stable_ids"] = serde_json::json!(false);
+        }
+        if name == "mail" {
+            schema["friendly_mailboxes"] = serde_json::json!(true);
+        }
+        if name == "schema" {
+            schema["capabilities"] = serde_json::json!(["schema"]);
+        }
+    }
+    schema
+}
+
+fn argument_schema(command: &clap::Command, argument: &clap::Arg) -> serde_json::Value {
+    let defaults = argument
+        .get_default_values()
+        .iter()
+        .map(|value| value.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let value_names = argument
+        .get_value_names()
+        .map(|names| names.iter().map(ToString::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let conflicts_with = command
+        .get_arg_conflicts_with(argument)
+        .into_iter()
+        .filter(|conflict| !conflict.is_hide_set())
+        .map(|conflict| conflict.get_id().as_str().to_string())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "name": argument.get_id().as_str(),
+        "long": argument.get_long().map(|long| format!("--{long}")),
+        "short": argument.get_short().map(|short| format!("-{short}")),
+        "description": argument.get_help().map(ToString::to_string),
+        "required": argument.is_required_set(),
+        "global": argument.is_global_set(),
+        "value_names": value_names,
+        "default_values": defaults,
+        "conflicts_with": conflicts_with,
+        "action": format!("{:?}", argument.get_action()).to_lowercase(),
+    })
+}
+
+fn is_mutating_action(action: &str) -> bool {
+    matches!(
+        action,
+        "create"
+            | "batch-create"
+            | "update"
+            | "delete"
+            | "batch-delete"
+            | "complete"
+            | "batch-complete"
+            | "reopen"
+            | "batch-reopen"
+            | "read"
+            | "batch-read"
+            | "unread"
+            | "batch-unread"
+            | "trash"
+            | "batch-trash"
+            | "send"
+            | "add"
+            | "play"
+            | "pause"
+            | "next"
+            | "previous"
+            | "run"
+            | "view"
+            | "sign"
+            | "capture"
+            | "enable"
+            | "disable"
+            | "set-name"
+            | "defaults-write"
+            | "start"
+            | "stop"
+    )
+}
+
+fn identifier_contract(source: &str) -> Option<serde_json::Value> {
+    match source {
+        "calendar" => Some(serde_json::json!({
+            "stable": true,
+            "field": "id",
+            "format": "calendar_uid",
+        })),
+        "contacts" => Some(serde_json::json!({
+            "stable": true,
+            "field": "id",
+            "format": "contacts_unique_id",
+        })),
+        "mail" => Some(serde_json::json!({
+            "stable": true,
+            "field": "id",
+            "format": "rfc_message_id",
+            "fallback_format": "local:<rowid>",
+            "legacy_target": "index",
+        })),
+        "messages" | "notes" | "reminders" => Some(serde_json::json!({
+            "stable": true,
+            "field": "id",
+        })),
+        _ => None,
     }
 }
 
@@ -960,6 +1335,10 @@ async fn run() -> anyhow::Result<()> {
             run_source!(sources::activity_monitor::fetch(), cli.pretty, cli.envelope)
         }
         Commands::Apps => run_source!(sources::apps::fetch(), cli.pretty, cli.envelope),
+        Commands::AuthStatus => {
+            let report = sources::doctor::auth_status().await;
+            print_output(&serde_json::to_value(&report)?, cli.pretty, cli.envelope)?;
+        }
         Commands::Automator => run_source!(sources::automator::fetch(), cli.pretty, cli.envelope),
         Commands::Bluetooth => run_source!(sources::bluetooth::list(), cli.pretty, cli.envelope),
         Commands::Books => run_source!(sources::books::fetch(), cli.pretty, cli.envelope),
@@ -991,6 +1370,7 @@ async fn run() -> anyhow::Result<()> {
                 notes,
                 all_day,
             }) => {
+                sources::calendar::validate_event_range(&start, &end)?;
                 if cli.no_op {
                     print_dry_run(
                         "calendar.create",
@@ -1012,21 +1392,98 @@ async fn run() -> anyhow::Result<()> {
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
+            Some(CalendarAction::BatchCreate { json }) => {
+                let json = stdin_if_dash(Some(json))?.unwrap_or_default();
+                let events: Vec<sources::calendar::NewCalendarEvent> = serde_json::from_str(&json)
+                    .map_err(|error| anyhow::anyhow!("Invalid calendar batch JSON: {error}"))?;
+                sources::calendar::validate_batch(&events)?;
+                if cli.no_op {
+                    print_dry_run(
+                        "calendar.batch-create",
+                        format!("Would create {} calendar events", events.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::calendar::batch_create(&events).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(CalendarAction::Get { id }) => {
+                let result = sources::calendar::get(&id).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+            }
+            Some(CalendarAction::Update {
+                id,
+                title,
+                start,
+                end,
+                location,
+                notes,
+                all_day,
+            }) => {
+                if let Some(start) = start.as_deref() {
+                    sources::calendar::validate_event_range(
+                        start,
+                        end.as_deref().unwrap_or(start),
+                    )?;
+                } else if let Some(end) = end.as_deref() {
+                    sources::calendar::validate_event_range(end, end)?;
+                }
+                if cli.no_op {
+                    print_dry_run(
+                        "calendar.update",
+                        format!("Would update calendar event '{id}'"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let fields = sources::calendar::UpdateFields {
+                        title: title.as_deref(),
+                        start: start.as_deref(),
+                        end: end.as_deref(),
+                        location: location.as_deref(),
+                        notes: notes.as_deref(),
+                        all_day,
+                    };
+                    let result = sources::calendar::update(&id, &fields).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
             Some(CalendarAction::Delete {
+                id,
                 title,
                 date,
                 calendar,
             }) => {
                 if cli.no_op {
+                    let target =
+                        id.as_deref()
+                            .map(|id| format!("id '{id}'"))
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "'{}' on {}",
+                                    title.as_deref().unwrap_or(""),
+                                    date.as_deref().unwrap_or("")
+                                )
+                            });
                     print_dry_run(
                         "calendar.delete",
-                        format!("Would delete event '{title}' on {date}"),
+                        format!("Would delete event {target}"),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result =
-                        sources::calendar::delete(&title, &date, calendar.as_deref()).await?;
+                    let result = if let Some(id) = id {
+                        sources::calendar::delete_by_id(&id).await?
+                    } else {
+                        sources::calendar::delete(
+                            title.as_deref().unwrap_or(""),
+                            date.as_deref().unwrap_or(""),
+                            calendar.as_deref(),
+                        )
+                        .await?
+                    };
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -1068,7 +1525,15 @@ async fn run() -> anyhow::Result<()> {
                 email,
                 phone,
                 org,
+                middle,
+                nickname,
+                job_title,
+                department,
+                birthday,
+                note,
             }) => {
+                let first = first.as_deref().unwrap_or("");
+                let last = last.as_deref().unwrap_or("");
                 if cli.no_op {
                     print_dry_run(
                         "contacts.create",
@@ -1077,14 +1542,20 @@ async fn run() -> anyhow::Result<()> {
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::contacts::create(
-                        &first,
-                        &last,
-                        email.as_deref(),
-                        phone.as_deref(),
-                        org.as_deref(),
-                    )
-                    .await?;
+                    let contact = sources::contacts::NewContact {
+                        first,
+                        last,
+                        middle: middle.as_deref(),
+                        nickname: nickname.as_deref(),
+                        organization: org.as_deref(),
+                        job_title: job_title.as_deref(),
+                        department: department.as_deref(),
+                        birthday: birthday.as_deref(),
+                        note: note.as_deref(),
+                        emails: &email,
+                        phones: &phone,
+                    };
+                    let result = sources::contacts::create_detailed(&contact).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -1094,6 +1565,13 @@ async fn run() -> anyhow::Result<()> {
                 last,
                 email,
                 phone,
+                middle,
+                nickname,
+                org,
+                job_title,
+                department,
+                birthday,
+                note,
             }) => {
                 if cli.no_op {
                     print_dry_run(
@@ -1103,14 +1581,20 @@ async fn run() -> anyhow::Result<()> {
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::contacts::update(
-                        &id,
-                        first.as_deref(),
-                        last.as_deref(),
-                        email.as_deref(),
-                        phone.as_deref(),
-                    )
-                    .await?;
+                    let fields = sources::contacts::ContactUpdates {
+                        first: first.as_deref(),
+                        last: last.as_deref(),
+                        middle: middle.as_deref(),
+                        nickname: nickname.as_deref(),
+                        organization: org.as_deref(),
+                        job_title: job_title.as_deref(),
+                        department: department.as_deref(),
+                        birthday: birthday.as_deref(),
+                        note: note.as_deref(),
+                        email: email.as_deref(),
+                        phone: phone.as_deref(),
+                    };
+                    let result = sources::contacts::update_detailed(&id, &fields).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -1132,6 +1616,10 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Disks => run_source!(sources::disks::list(), cli.pretty, cli.envelope),
+        Commands::Doctor => {
+            let report = sources::doctor::inspect().await;
+            print_output(&serde_json::to_value(&report)?, cli.pretty, cli.envelope)?;
+        }
         Commands::FaceTime { action } => match action {
             None => {
                 run_source!(sources::facetime::list(50), cli.pretty, cli.envelope)
@@ -1213,51 +1701,124 @@ async fn run() -> anyhow::Result<()> {
                 let records = paginate_vec(sources::mail::list().await?, None, None);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
-            Some(MailAction::List { offset, limit }) => {
-                let records = paginate_vec(sources::mail::list().await?, offset, limit);
+            Some(MailAction::List {
+                offset,
+                limit,
+                search,
+                mailbox,
+                unread,
+                flagged,
+            }) => {
+                let fetch_limit = offset.unwrap_or(0) + limit.unwrap_or(50);
+                let query = sources::mail::MailQuery {
+                    search: search.as_deref(),
+                    mailbox: mailbox.as_deref().or(Some("INBOX")),
+                    unread_only: unread,
+                    flagged_only: flagged,
+                    limit: fetch_limit,
+                };
+                let records = paginate_vec(sources::mail::search(&query).await?, offset, limit);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
-            Some(MailAction::Get { index }) => {
-                let result = sources::mail::get(index).await?;
+            Some(MailAction::Get { id, index }) => {
+                let result = match (id.as_deref(), index) {
+                    (Some(id), _) => sources::mail::get_by_id(id).await?,
+                    (_, Some(index)) => sources::mail::get(index).await?,
+                    _ => unreachable!("clap requires id or index"),
+                };
                 print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
-            Some(MailAction::Read { index }) => {
+            Some(MailAction::Read { id, index }) => {
+                let target = mail_target_description(id.as_deref(), index);
                 if cli.no_op {
                     print_dry_run(
                         "mail.read",
-                        format!("Would mark inbox message #{index} as read"),
+                        format!("Would mark inbox message {target} as read"),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::mail::read(index).await?;
+                    let result = match (id.as_deref(), index) {
+                        (Some(id), _) => sources::mail::read_by_id(id).await?,
+                        (_, Some(index)) => sources::mail::read(index).await?,
+                        _ => unreachable!("clap requires id or index"),
+                    };
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
-            Some(MailAction::Unread { index }) => {
+            Some(MailAction::Unread { id, index }) => {
+                let target = mail_target_description(id.as_deref(), index);
                 if cli.no_op {
                     print_dry_run(
                         "mail.unread",
-                        format!("Would mark inbox message #{index} as unread"),
+                        format!("Would mark inbox message {target} as unread"),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::mail::unread(index).await?;
+                    let result = match (id.as_deref(), index) {
+                        (Some(id), _) => sources::mail::unread_by_id(id).await?,
+                        (_, Some(index)) => sources::mail::unread(index).await?,
+                        _ => unreachable!("clap requires id or index"),
+                    };
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
-            Some(MailAction::Trash { index }) => {
+            Some(MailAction::Trash { id, index }) => {
+                let target = mail_target_description(id.as_deref(), index);
                 if cli.no_op {
                     print_dry_run(
                         "mail.trash",
-                        format!("Would trash inbox message #{index}"),
+                        format!("Would trash inbox message {target}"),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::mail::trash(index).await?;
+                    let result = match (id.as_deref(), index) {
+                        (Some(id), _) => sources::mail::trash_by_id(id).await?,
+                        (_, Some(index)) => sources::mail::trash(index).await?,
+                        _ => unreachable!("clap requires id or index"),
+                    };
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(MailAction::BatchRead { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "mail.batch-read",
+                        format!("Would mark {} messages read", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::mail::batch_read(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(MailAction::BatchUnread { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "mail.batch-unread",
+                        format!("Would mark {} messages unread", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::mail::batch_unread(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(MailAction::BatchTrash { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "mail.batch-trash",
+                        format!("Would trash {} messages", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::mail::batch_trash(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
                 }
             }
             Some(MailAction::Mailboxes) => {
@@ -1558,9 +2119,16 @@ async fn run() -> anyhow::Result<()> {
                 list,
                 offset,
                 limit,
+                search,
+                include_completed,
             }) => {
                 let records = paginate_vec(
-                    sources::reminders::list(list.as_deref()).await?,
+                    sources::reminders::query(
+                        list.as_deref(),
+                        search.as_deref(),
+                        include_completed,
+                    )
+                    .await?,
                     offset,
                     limit,
                 );
@@ -1646,6 +2214,23 @@ async fn run() -> anyhow::Result<()> {
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
+            Some(RemindersAction::Reopen { id, list }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "reminders.reopen",
+                        format!("Would reopen reminder id {id}"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::reminders::reopen(
+                        sources::reminders::Target::Id(&id),
+                        list.as_deref(),
+                    )
+                    .await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
             Some(RemindersAction::Delete { id, title, list }) => {
                 let target = reminder_target(id.as_deref(), title.as_deref());
                 if cli.no_op {
@@ -1658,6 +2243,45 @@ async fn run() -> anyhow::Result<()> {
                 } else {
                     let result = sources::reminders::delete(target, list.as_deref()).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(RemindersAction::BatchComplete { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "reminders.batch-complete",
+                        format!("Would complete {} reminders", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::reminders::batch_complete(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(RemindersAction::BatchReopen { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "reminders.batch-reopen",
+                        format!("Would reopen {} reminders", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::reminders::batch_reopen(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(RemindersAction::BatchDelete { ids }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "reminders.batch-delete",
+                        format!("Would delete {} reminders", ids.len()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::reminders::batch_delete(&ids).await?;
+                    print_batch_output(&result, cli.pretty, cli.envelope)?;
                 }
             }
             Some(RemindersAction::Lists) => {
@@ -1905,6 +2529,14 @@ fn reminder_target<'a>(
     }
 }
 
+fn mail_target_description(id: Option<&str>, index: Option<usize>) -> String {
+    match (id, index) {
+        (Some(id), _) => format!("id '{id}'"),
+        (_, Some(index)) => format!("#{index}"),
+        _ => String::new(),
+    }
+}
+
 /// Shell arguments are awkward carriers for long or multiline text, so a
 /// literal "-" means "read the value from stdin" — the Unix convention.
 fn stdin_if_dash(value: Option<String>) -> anyhow::Result<Option<String>> {
@@ -1932,7 +2564,7 @@ fn classify_error_code(err: &anyhow::Error) -> &'static str {
         "not_found"
     } else if msg.contains("permission") || msg.contains("full disk access") {
         "permission_denied"
-    } else if msg.contains("out of range") || msg.contains("invalid") {
+    } else if msg.contains("out of range") || msg.contains("invalid") || msg.contains("ambiguous") {
         "invalid_input"
     } else if msg.contains("timed out") {
         "timeout"
@@ -1957,5 +2589,82 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("{}", payload);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_is_generated_for_every_top_level_command() {
+        let schema = build_schema(None);
+        let expected = Cli::command()
+            .get_subcommands()
+            .filter(|command| command.get_name() != "help")
+            .count();
+        assert_eq!(schema["schema_version"], 1);
+        assert_eq!(schema["commands"].as_array().unwrap().len(), expected);
+        assert!(
+            expected >= 40,
+            "new commands must not disappear from schema"
+        );
+    }
+
+    #[test]
+    fn schema_includes_deep_actions_arguments_and_id_contracts() {
+        let calendar = build_schema(Some("calendar"));
+        assert_eq!(calendar["identifiers"]["stable"], true);
+        let actions = calendar["actions"].as_array().unwrap();
+        let update = actions
+            .iter()
+            .find(|action| action["name"] == "update")
+            .unwrap();
+        assert_eq!(update["kind"], "write");
+        assert!(update["arguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|argument| argument["name"] == "id" && argument["required"] == true));
+
+        let mail = build_schema(Some("mail"));
+        assert_eq!(mail["identifiers"]["format"], "rfc_message_id");
+        assert!(mail["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["name"] == "batch-trash"));
+    }
+
+    #[test]
+    fn stable_targets_parse_and_legacy_targets_remain_compatible() {
+        assert!(Cli::try_parse_from(["cider", "mail", "read", "--id", "<m@example.com>"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "mail", "read", "--index", "1"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "calendar",
+            "delete",
+            "--title",
+            "Meeting",
+            "--date",
+            "2026-09-01"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["cider", "calendar", "delete"]).is_err());
+        assert!(Cli::try_parse_from(["cider", "contacts", "create", "--org", "Acme"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "contacts", "create"]).is_err());
+        assert!(Cli::try_parse_from(["cider", "calendar", "update", "--id", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["cider", "contacts", "update", "--id", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["cider", "reminders", "update", "--id", "abc"]).is_err());
+    }
+
+    #[test]
+    fn envelope_preserves_inner_failure_status() {
+        let wrapped = envelope_value(&serde_json::json!({
+            "ok": false,
+            "action": "batch-delete"
+        }));
+        assert_eq!(wrapped["ok"], false);
+        assert_eq!(wrapped["data"]["action"], "batch-delete");
     }
 }

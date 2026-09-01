@@ -223,6 +223,63 @@ pub struct ActionResult {
     pub message: Option<String>,
 }
 
+/// Per-item outcome from a batch mutation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchItemResult {
+    pub id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BatchItemResult {
+    pub fn success(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ok: true,
+            error: None,
+        }
+    }
+
+    pub fn failure(id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ok: false,
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// Stable result shape for a mutation that targets several records.
+///
+/// `ok` is true only when every requested item succeeded. Callers can retry
+/// only `results` entries whose `ok` is false without guessing how far a
+/// partially successful AppleScript got.
+#[derive(Debug, serde::Serialize)]
+pub struct BatchActionResult {
+    pub ok: bool,
+    pub action: String,
+    pub requested: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub results: Vec<BatchItemResult>,
+}
+
+impl BatchActionResult {
+    pub fn new(action: &str, results: Vec<BatchItemResult>) -> Self {
+        let succeeded = results.iter().filter(|result| result.ok).count();
+        let requested = results.len();
+        Self {
+            ok: succeeded == requested,
+            action: action.to_string(),
+            requested,
+            succeeded,
+            failed: requested - succeeded,
+            results,
+        }
+    }
+}
+
 impl ActionResult {
     pub fn success(action: &str) -> Self {
         Self {
@@ -325,6 +382,21 @@ mod tests {
             escape_applescript("say \"hi\" \\ bye"),
             "say \\\"hi\\\" \\\\ bye"
         );
+    }
+
+    #[test]
+    fn batch_result_counts_partial_success() {
+        let result = BatchActionResult::new(
+            "batch-delete",
+            vec![
+                BatchItemResult::success("a"),
+                BatchItemResult::failure("b", "not found"),
+            ],
+        );
+        assert!(!result.ok);
+        assert_eq!(result.requested, 2);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 1);
     }
 
     #[test]

@@ -32,8 +32,16 @@ cider reminders complete --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
 # Check your calendar
 cider calendar
 
+# Fetch/update/delete the exact event by its stable id
+cider calendar get --id <event-id>
+cider --dry-run calendar update --id <event-id> --location "Zoom"
+
 # Search contacts
 cider contacts list --search Smith
+
+# Check local data access without triggering permission dialogs
+cider doctor
+cider auth-status
 
 # Control music
 cider music play
@@ -60,11 +68,11 @@ cider spotlight --query "quarterly report"
 
 | App | Actions |
 |-----|---------|
-| Reminders | `list`, `get`, `create`, `update`, `complete`, `delete`, `lists` |
-| Calendar | `list`, `create`, `delete`, `calendars` |
+| Reminders | `list`, `get`, `create`, `update`, `complete`, `reopen`, `delete`, batch actions, `lists` |
+| Calendar | `list`, `get`, `create`, `batch-create`, `update`, `delete`, `calendars` |
 | Contacts | `list`, `get`, `create`, `update`, `delete`, `groups` |
 | Notes | `list`, `get`, `create`, `update`, `delete`, `folders` |
-| Mail | `list`, `get`, `read`, `unread`, `trash`, `mailboxes`, `send` |
+| Mail | `list`/search, `get`, `read`, `unread`, `trash`, batch actions, `mailboxes`, `send` |
 | Keychain | `list`, `search`, `get-password`, `add`, `delete`, `keychains` |
 
 ### Actions & Controls
@@ -120,6 +128,26 @@ $ cider --pretty reminders create --title "Buy milk" --list Shopping
 ✓ created (buy_milk) — Reminder added
 ```
 
+Batch writes use one app automation session and report every item, including
+partial failures:
+
+```json
+{"ok":false,"action":"batch-delete","requested":2,"succeeded":1,"failed":1,"results":[{"id":"a","ok":true},{"id":"b","ok":false,"error":"not found"}]}
+```
+
+A partial batch exits non-zero after writing this result, and `--envelope`
+keeps the outer `ok` value false as well.
+
+Repeat `--id` for Reminders and Mail batches. Calendar batch creation accepts
+a JSON array, or `--json -` to read it from stdin:
+
+```sh
+cider --dry-run reminders batch-complete --id <id-1> --id <id-2>
+cider mail batch-read --id '<message-1@example.com>' --id '<message-2@example.com>'
+printf '%s' '[{"title":"1:1","start":"2026-09-02T17:00:00Z","end":"2026-09-02T17:30:00Z"}]' \
+  | cider calendar batch-create --json -
+```
+
 `reminders complete` and `reminders delete` take either `--title` or `--id`.
 Titles are not unique, so a `--title` call acts on the first open match and
 says so when there were others:
@@ -147,6 +175,53 @@ $ long-notes-command | cider reminders update --id 4b7c5902-... --notes -
 `--notes -` (and `--append-notes -`) read from stdin, for long or multiline
 content that shell arguments handle badly.
 
+Calendar mutations likewise prefer the `id` printed by `calendar list`.
+Legacy `--title` plus `--date` deletion remains accepted, but it now refuses
+to act if several events match instead of deleting an arbitrary one.
+
+Mail list/get output uses the RFC Message-ID as `id` when Mail has one and
+also includes `local_id`. Stable `--id` targeting is preferred; the old
+one-based `--index` form remains available for compatibility. Mail listing can
+search subject/sender/preview, select a mailbox, and filter unread or flagged
+messages:
+
+```sh
+cider mail list --search invoice --mailbox INBOX --unread --limit 25
+cider mail get --id '<message-id@example.com>'
+```
+
+Contacts include all labeled emails, phones, URLs, and postal addresses plus
+middle name, nickname, job title, department, birthday, and notes when present. Create and
+update accept the same richer name and work fields; repeat `--email` or
+`--phone` during creation to add several values.
+
+## Schema And Diagnostics
+
+`cider schema` is generated from the real command parser. It describes every
+top-level command, action, argument, required/default value, read/write kind,
+dry-run support, and stable identifier contract. This avoids a second,
+hand-maintained command list drifting out of date:
+
+```sh
+cider schema
+cider schema --source calendar
+```
+
+`cider auth-status` reports prompt-free read access and write Automation state
+for Calendar, Contacts, Reminders, and Mail. `cider doctor` checks required macOS tools and the Calendar, Contacts,
+Reminders, and newest Mail data stores. It deliberately does not send an
+AppleEvent: even a permission probe can open a macOS dialog, so Automation
+authorization is reported as `not_probed` and real writes surface any denial.
+
+## How It Works
+
+Cider exposes one API, not user-selectable backends. Internally it uses the
+fastest reliable macOS path for each operation: local SQLite indexes for bulk
+reads, and the apps' supported JXA/AppleScript interfaces for writes. That
+keeps reads fast and writes supported without shipping Swift or Node sidecars.
+If a Calendar database read fails, Cider falls through to its slower app
+automation path and reports the failed fast path on stderr.
+
 ## Use as a Library
 
 cider is also a Rust crate, so another Rust program can skip the subprocess,
@@ -155,7 +230,7 @@ new enough:
 
 ```toml
 [dependencies]
-cider-cli = { version = "0.3", default-features = false }
+cider-cli = { version = "0.4", default-features = false }
 ```
 
 ```rust

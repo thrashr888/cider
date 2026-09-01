@@ -1,16 +1,30 @@
 use super::util::{
     escape_jxa, run_command_with_timeout, run_jxa, run_osascript_with_timeout, ActionResult,
-    SUBPROCESS_TIMEOUT,
+    BatchActionResult, BatchItemResult, SUBPROCESS_TIMEOUT,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailRecipient {
+    pub address: String,
+    /// Mail's recipient type value (To/Cc/Bcc); retained losslessly because
+    /// the numeric mapping has changed across Mail database revisions.
+    pub kind: i64,
+}
 
 #[derive(Debug, Serialize)]
 pub struct MailMessage {
+    /// Stable RFC Message-ID when available, otherwise `local:<rowid>`.
     pub id: String,
+    pub local_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub subject: String,
     pub sender: String,
     pub date_received: String,
     pub is_read: bool,
+    pub is_flagged: bool,
+    pub size: i64,
     pub mailbox: String,
     pub mailbox_url: String,
 }
@@ -18,14 +32,23 @@ pub struct MailMessage {
 #[derive(Debug, Clone, Serialize)]
 pub struct MailMessageDetail {
     pub id: String,
+    pub local_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub subject: String,
     pub sender: String,
     pub date_received: String,
     pub is_read: bool,
+    pub is_flagged: bool,
+    pub size: i64,
     pub mailbox: String,
     pub mailbox_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipients: Vec<MailRecipient>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,19 +63,55 @@ pub struct Mailbox {
     pub url: String,
 }
 
+#[derive(Debug, Default)]
+pub struct MailQuery<'a> {
+    pub search: Option<&'a str>,
+    pub mailbox: Option<&'a str>,
+    pub unread_only: bool,
+    pub flagged_only: bool,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Target<'a> {
+    Id(&'a str),
+    Index(usize),
+}
+
 pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
     let records = query_inbox_messages(50).await?;
-    if records.is_empty() {
-        anyhow::bail!("Mail inbox is empty or Mail.app is not configured");
-    }
     Ok(records
         .into_iter()
         .map(|m| MailMessage {
-            id: m.apple_mail_id.to_string(),
+            id: m.detail.id,
+            local_id: m.apple_mail_id,
+            message_id: m.detail.message_id,
             subject: m.detail.subject,
             sender: m.detail.sender,
             date_received: m.detail.date_received,
             is_read: m.detail.is_read,
+            is_flagged: m.detail.is_flagged,
+            size: m.detail.size,
+            mailbox: m.detail.mailbox,
+            mailbox_url: m.detail.mailbox_url,
+        })
+        .collect())
+}
+
+pub async fn search(query: &MailQuery<'_>) -> anyhow::Result<Vec<MailMessage>> {
+    Ok(query_messages(query, None, false)
+        .await?
+        .into_iter()
+        .map(|m| MailMessage {
+            id: m.detail.id,
+            local_id: m.apple_mail_id,
+            message_id: m.detail.message_id,
+            subject: m.detail.subject,
+            sender: m.detail.sender,
+            date_received: m.detail.date_received,
+            is_read: m.detail.is_read,
+            is_flagged: m.detail.is_flagged,
+            size: m.detail.size,
             mailbox: m.detail.mailbox,
             mailbox_url: m.detail.mailbox_url,
         })
@@ -60,31 +119,166 @@ pub async fn list() -> anyhow::Result<Vec<MailMessage>> {
 }
 
 pub async fn get(idx: usize) -> anyhow::Result<MailMessageDetail> {
-    Ok(inbox_message_for_index(idx, 50).await?.detail)
+    Ok(inbox_message_for_index(idx, 50, true).await?.detail)
+}
+
+pub async fn get_by_id(id: &str) -> anyhow::Result<MailMessageDetail> {
+    Ok(message_for_target(Target::Id(id), true).await?.detail)
 }
 
 pub async fn read(idx: usize) -> anyhow::Result<ActionResult> {
-    let record = inbox_message_for_index(idx, 50).await?;
-    mutate_inbox_message_by_id(record.apple_mail_id, |target| {
-        format!("set read status of ({target}) to true")
-    })
-    .await?;
-    Ok(ActionResult::success("read"))
+    mutate(Target::Index(idx), "read").await
+}
+
+pub async fn read_by_id(id: &str) -> anyhow::Result<ActionResult> {
+    mutate(Target::Id(id), "read").await
 }
 
 pub async fn unread(idx: usize) -> anyhow::Result<ActionResult> {
-    let record = inbox_message_for_index(idx, 50).await?;
-    mutate_inbox_message_by_id(record.apple_mail_id, |target| {
-        format!("set read status of ({target}) to false")
-    })
-    .await?;
-    Ok(ActionResult::success("unread"))
+    mutate(Target::Index(idx), "unread").await
+}
+
+pub async fn unread_by_id(id: &str) -> anyhow::Result<ActionResult> {
+    mutate(Target::Id(id), "unread").await
 }
 
 pub async fn trash(idx: usize) -> anyhow::Result<ActionResult> {
-    let record = inbox_message_for_index(idx, 50).await?;
-    mutate_inbox_message_by_id(record.apple_mail_id, |target| format!("delete ({target})")).await?;
-    Ok(ActionResult::success("trash"))
+    mutate(Target::Index(idx), "trash").await
+}
+
+pub async fn trash_by_id(id: &str) -> anyhow::Result<ActionResult> {
+    mutate(Target::Id(id), "trash").await
+}
+
+async fn mutate(target: Target<'_>, action: &str) -> anyhow::Result<ActionResult> {
+    let record = message_for_target(target, false).await?;
+    let id = record.detail.id.clone();
+    let apple_mail_id = record.apple_mail_id;
+    let build = |target: &str| match action {
+        "read" => format!("set read status of ({target}) to true"),
+        "unread" => format!("set read status of ({target}) to false"),
+        "trash" => format!("delete ({target})"),
+        _ => unreachable!(),
+    };
+    mutate_inbox_message_by_id(apple_mail_id, build).await?;
+    Ok(ActionResult::success_with_id(action, &id))
+}
+
+pub async fn batch_read(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_mutate(ids, "batch-read", "set read status of ({target}) to true").await
+}
+
+pub async fn batch_unread(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_mutate(
+        ids,
+        "batch-unread",
+        "set read status of ({target}) to false",
+    )
+    .await
+}
+
+pub async fn batch_trash(ids: &[String]) -> anyhow::Result<BatchActionResult> {
+    batch_mutate(ids, "batch-trash", "delete ({target})").await
+}
+
+async fn batch_mutate(
+    ids: &[String],
+    action_name: &str,
+    action_template: &str,
+) -> anyhow::Result<BatchActionResult> {
+    if ids.is_empty() {
+        anyhow::bail!("At least one mail message id is required");
+    }
+    if ids.len() > 500 {
+        anyhow::bail!("Mail batches are limited to 500 messages");
+    }
+    if ids.iter().any(|id| id.trim().is_empty()) {
+        anyhow::bail!("Mail message ids cannot be empty");
+    }
+    let records = query_inbox_messages(500).await?;
+    let mut resolved = Vec::new();
+    for id in ids {
+        let bare = id.trim().strip_prefix("local:").unwrap_or(id.trim());
+        let record = records.iter().find(|record| {
+            record.detail.id == id.trim()
+                || record.detail.message_id.as_deref() == Some(id.trim())
+                || record.apple_mail_id.to_string() == bare
+        });
+        if let Some(record) = record {
+            resolved.push((id.clone(), record.apple_mail_id));
+        }
+    }
+
+    let by_local_id = if resolved.is_empty() {
+        Vec::new()
+    } else {
+        let script = build_batch_mutation_script(&resolved, action_template);
+        let output = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
+        parse_batch_output(&output)
+    };
+    let results = ids
+        .iter()
+        .map(|id| {
+            let Some((_, local_id)) = resolved.iter().find(|(stable_id, _)| stable_id == id) else {
+                return BatchItemResult::failure(id, "Mail message not found");
+            };
+            match by_local_id
+                .iter()
+                .find(|result| result.id == local_id.to_string())
+            {
+                Some(result) if result.ok => BatchItemResult::success(id),
+                Some(result) => BatchItemResult::failure(
+                    id,
+                    result.error.as_deref().unwrap_or("Mail mutation failed"),
+                ),
+                None => BatchItemResult::failure(id, "Mail returned no result for this message"),
+            }
+        })
+        .collect();
+    Ok(BatchActionResult::new(action_name, results))
+}
+
+fn build_batch_mutation_script(records: &[(String, i64)], action_template: &str) -> String {
+    let mut actions = String::new();
+    for (_, local_id) in records {
+        let target = format!("first message of inbox whose id is {local_id}");
+        let action = action_template.replace("{target}", &target);
+        actions.push_str(&format!(
+            r#"
+    try
+        {action}
+        set end of batchResults to "{local_id}" & tab & "1" & tab & "0"
+    on error errMsg number errNum
+        set end of batchResults to "{local_id}" & tab & "0" & tab & (errNum as string)
+    end try
+"#
+        ));
+    }
+    build_mutation_script(&format!(
+        r#"
+set batchResults to {{}}
+{actions}
+set AppleScript's text item delimiters to linefeed
+return batchResults as string
+"#
+    ))
+}
+
+fn parse_batch_output(output: &str) -> Vec<BatchItemResult> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let id = fields.next()?.trim();
+            let ok = fields.next()?.trim() == "1";
+            let error_number = fields.next().unwrap_or("-1").trim();
+            Some(if ok {
+                BatchItemResult::success(id)
+            } else {
+                BatchItemResult::failure(id, format!("AppleScript error {error_number}"))
+            })
+        })
+        .collect()
 }
 
 pub async fn mailboxes() -> anyhow::Result<Vec<Mailbox>> {
@@ -137,24 +331,68 @@ msg.send();
 
 fn mail_db_path() -> anyhow::Result<String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let path = format!("{home}/Library/Mail/V10/MailData/Envelope Index");
-    if std::path::Path::new(&path).exists() {
-        Ok(path)
-    } else {
-        anyhow::bail!("Mail envelope index not found")
+    let root = std::path::Path::new(&home).join("Library/Mail");
+    let mut candidates = std::fs::read_dir(&root)
+        .map_err(|error| anyhow::anyhow!("Cannot read {}: {error}", root.display()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let version = name.strip_prefix('V')?.parse::<u32>().ok()?;
+            let path = entry.path().join("MailData/Envelope Index");
+            path.is_file().then_some((version, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(version, _)| *version);
+    match candidates.pop() {
+        Some((_, path)) => Ok(path.to_string_lossy().to_string()),
+        None => anyhow::bail!("Mail envelope index not found under {}/V*", root.display()),
     }
 }
 
-async fn inbox_message_for_index(idx: usize, limit: usize) -> anyhow::Result<MailMessageRecord> {
+async fn inbox_message_for_index(
+    idx: usize,
+    limit: usize,
+    include_details: bool,
+) -> anyhow::Result<MailMessageRecord> {
     if idx == 0 {
         anyhow::bail!("Message index out of range");
     }
 
-    let records = query_inbox_messages(limit).await?;
+    let records = query_messages(
+        &MailQuery {
+            mailbox: Some("INBOX"),
+            limit,
+            ..Default::default()
+        },
+        None,
+        include_details,
+    )
+    .await?;
     records
         .into_iter()
         .nth(idx - 1)
         .ok_or_else(|| anyhow::anyhow!("Message index out of range"))
+}
+
+async fn message_for_target(
+    target: Target<'_>,
+    include_details: bool,
+) -> anyhow::Result<MailMessageRecord> {
+    match target {
+        Target::Index(index) => inbox_message_for_index(index, 50, include_details).await,
+        Target::Id(id) => {
+            let query = MailQuery {
+                mailbox: Some("INBOX"),
+                limit: 1,
+                ..Default::default()
+            };
+            query_messages(&query, Some(id), include_details)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("Mail message not found: {id}"))
+        }
+    }
 }
 
 async fn mutate_inbox_message_by_id<F>(apple_mail_id: i64, build_action: F) -> anyhow::Result<()>
@@ -196,27 +434,101 @@ end timeout
 }
 
 async fn query_inbox_messages(limit: usize) -> anyhow::Result<Vec<MailMessageRecord>> {
+    query_messages(
+        &MailQuery {
+            mailbox: Some("INBOX"),
+            limit,
+            ..Default::default()
+        },
+        None,
+        false,
+    )
+    .await
+}
+
+fn escape_sql(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+async fn query_messages(
+    options: &MailQuery<'_>,
+    id: Option<&str>,
+    include_details: bool,
+) -> anyhow::Result<Vec<MailMessageRecord>> {
     let db_path = mail_db_path()?;
+    let mut clauses = vec!["m.deleted = 0".to_string()];
+    if let Some(mailbox) = options.mailbox {
+        let mailbox = escape_sql(mailbox);
+        clauses.push(format!(
+            "(mb.url = '{mailbox}' OR mb.url LIKE '%/{mailbox}' OR mb.url LIKE '%/{mailbox}/')"
+        ));
+    }
+    if let Some(search) = options.search {
+        let search = escape_sql(search);
+        clauses.push(format!(
+            "(COALESCE(s.subject, '') LIKE '%{search}%' OR COALESCE(a.address, '') LIKE '%{search}%' OR COALESCE(sm.summary, '') LIKE '%{search}%')"
+        ));
+    }
+    if options.unread_only {
+        clauses.push("m.read = 0".to_string());
+    }
+    if options.flagged_only {
+        clauses.push("m.flagged = 1".to_string());
+    }
+    if let Some(id) = id {
+        let bare_local = id.trim().strip_prefix("local:").unwrap_or(id.trim());
+        if let Ok(local_id) = bare_local.parse::<i64>() {
+            clauses.push(format!("m.ROWID = {local_id}"));
+        } else {
+            clauses.push(format!("g.message_id_header = '{}'", escape_sql(id.trim())));
+        }
+    }
+    let limit = if options.limit == 0 {
+        50
+    } else {
+        options.limit.min(500)
+    };
+    let detail_columns = if include_details {
+        r#"
+    COALESCE((
+        SELECT json_group_array(att.name)
+        FROM attachments att
+        WHERE att.message = m.ROWID AND att.name IS NOT NULL AND att.name != ''
+    ), '[]') AS attachments,
+    COALESCE((
+        SELECT json_group_array(json_object('address', COALESCE(ra.address, ''), 'kind', recipient.type))
+        FROM recipients recipient
+        LEFT JOIN addresses ra ON recipient.address = ra.ROWID
+        WHERE recipient.message = m.ROWID
+    ), '[]') AS recipients"#
+    } else {
+        "    '[]' AS attachments,\n    '[]' AS recipients"
+    };
     let query = format!(
         r#"
 SELECT
     m.ROWID AS rowid,
+    COALESCE(g.message_id_header, '') AS message_id,
     COALESCE(s.subject, '') AS subject,
     COALESCE(a.address, '') AS sender,
     datetime(m.date_received, 'unixepoch') AS date_received,
     m.read AS is_read,
+    m.flagged AS is_flagged,
+    m.size AS size,
     COALESCE(mb.url, 'INBOX') AS mailbox_url,
-    COALESCE(sm.summary, '') AS summary
+    COALESCE(sm.summary, '') AS summary,
+{detail_columns}
 FROM messages m
 LEFT JOIN addresses a ON m.sender = a.ROWID
 LEFT JOIN subjects s ON m.subject = s.ROWID
 LEFT JOIN summaries sm ON m.summary = sm.ROWID
 LEFT JOIN mailboxes mb ON m.mailbox = mb.ROWID
-WHERE m.mailbox IN (SELECT ROWID FROM mailboxes WHERE url LIKE '%/INBOX')
-  AND m.deleted = 0
+LEFT JOIN message_global_data g ON m.global_message_id = g.ROWID
+WHERE {}
 ORDER BY m.date_received DESC
 LIMIT {limit};
-"#
+"#,
+        clauses.join(" AND ")
     );
     let output = run_command_with_timeout(
         "sqlite3",
@@ -262,6 +574,11 @@ fn parse_json_rows(output: &str) -> Vec<MailMessageRecord> {
             continue;
         }
         let subject = row["subject"].as_str().unwrap_or("").trim().to_string();
+        let message_id = row["message_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from);
         let sender = row["sender"].as_str().unwrap_or("").trim().to_string();
         let date_received = row["date_received"]
             .as_str()
@@ -269,25 +586,43 @@ fn parse_json_rows(output: &str) -> Vec<MailMessageRecord> {
             .trim()
             .to_string();
         let is_read = json_i64(&row["is_read"]) == 1;
+        let is_flagged = json_i64(&row["is_flagged"]) == 1;
+        let size = json_i64(&row["size"]);
         let mailbox = row["mailbox_url"].as_str().unwrap_or("").trim().to_string();
         let body_preview = row["summary"]
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let id = apple_mail_id.to_string();
+        let id = message_id
+            .clone()
+            .unwrap_or_else(|| format!("local:{apple_mail_id}"));
+        let attachments = row["attachments"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+            .unwrap_or_default();
+        let recipients = row["recipients"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Vec<MailRecipient>>(raw).ok())
+            .unwrap_or_default();
         let mailbox_url = mailbox.clone();
         records.push(MailMessageRecord {
             apple_mail_id,
             detail: MailMessageDetail {
                 id,
+                local_id: apple_mail_id,
+                message_id,
                 subject,
                 sender,
                 date_received,
                 is_read,
+                is_flagged,
+                size,
                 mailbox: mailbox_display_name(&mailbox),
                 mailbox_url,
                 body_preview,
+                attachments,
+                recipients,
             },
         });
     }
@@ -311,12 +646,17 @@ mod tests {
     #[test]
     fn test_parse_json_rows() {
         let output = r#"[
-            {"rowid":42,"subject":"Meeting tomorrow","sender":"alice@example.com","date_received":"2026-02-07 12:00:00","is_read":0,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":"Can we move it to 3pm?"},
-            {"rowid":43,"subject":"Re: Meeting tomorrow","sender":"bob@example.com","date_received":"2026-02-07 12:05:00","is_read":1,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":""}
+            {"rowid":42,"message_id":"<stable@example.com>","subject":"Meeting tomorrow","sender":"alice@example.com","date_received":"2026-02-07 12:00:00","is_read":0,"is_flagged":1,"size":123,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":"Can we move it to 3pm?","attachments":"[\"agenda.pdf\"]","recipients":"[{\"address\":\"team@example.com\",\"kind\":1}]"},
+            {"rowid":43,"message_id":"","subject":"Re: Meeting tomorrow","sender":"bob@example.com","date_received":"2026-02-07 12:05:00","is_read":1,"is_flagged":0,"size":456,"mailbox_url":"imap://user@mail.example.com/INBOX","summary":"","attachments":"[]"}
         ]"#;
         let records = parse_json_rows(output);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].apple_mail_id, 42);
+        assert_eq!(records[0].detail.id, "<stable@example.com>");
+        assert_eq!(records[0].detail.local_id, 42);
+        assert_eq!(records[0].detail.attachments, vec!["agenda.pdf"]);
+        assert_eq!(records[0].detail.recipients[0].address, "team@example.com");
+        assert!(records[0].detail.is_flagged);
         assert_eq!(records[0].detail.subject, "Meeting tomorrow");
         assert_eq!(records[0].detail.sender, "alice@example.com");
         assert_eq!(records[0].detail.mailbox, "INBOX");
@@ -326,6 +666,7 @@ mod tests {
             Some("Can we move it to 3pm?")
         );
         assert!(records[1].detail.is_read);
+        assert_eq!(records[1].detail.id, "local:43");
         assert!(
             records[1].detail.body_preview.is_none(),
             "empty summary must be None"
@@ -371,5 +712,23 @@ mod tests {
         assert!(script.trim_end().ends_with("end timeout"));
         assert!(script.contains("delete (first message of inbox whose id is 42)"));
         assert!(script.contains("on error errMsg"));
+    }
+
+    #[test]
+    fn batch_mutation_uses_one_mail_session() {
+        let script = build_batch_mutation_script(
+            &[("first".to_string(), 42), ("second".to_string(), 43)],
+            "set read status of ({target}) to true",
+        );
+        assert_eq!(script.matches("tell application \"Mail\"").count(), 1);
+        assert!(script.contains("first message of inbox whose id is 42"));
+        assert!(script.contains("first message of inbox whose id is 43"));
+    }
+
+    #[test]
+    fn batch_output_is_partial_failure_aware() {
+        let results = parse_batch_output("42\t1\t0\n43\t0\t-1728");
+        assert!(results[0].ok);
+        assert_eq!(results[1].error.as_deref(), Some("AppleScript error -1728"));
     }
 }

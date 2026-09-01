@@ -1,8 +1,12 @@
-use super::util::{escape_jxa, run_command_with_timeout, run_jxa_with_timeout, ActionResult};
-use serde::Serialize;
+use super::util::{
+    escape_jxa, run_command_with_timeout, run_jxa_with_timeout, ActionResult, BatchActionResult,
+    BatchItemResult,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
 pub struct CalendarEvent {
+    pub id: String,
     pub title: String,
     pub calendar: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -14,6 +18,37 @@ pub struct CalendarEvent {
     pub is_all_day: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub has_attendees: bool,
+    pub has_recurrences: bool,
+    pub attendee_count: usize,
+    pub alarm_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewCalendarEvent {
+    pub title: String,
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub calendar: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub all_day: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct UpdateFields<'a> {
+    pub title: Option<&'a str>,
+    pub start: Option<&'a str>,
+    pub end: Option<&'a str>,
+    pub location: Option<&'a str>,
+    pub notes: Option<&'a str>,
+    pub all_day: Option<bool>,
 }
 
 /// List calendar events, with optional day range and calendar filter.
@@ -31,15 +66,19 @@ pub async fn list(
     let group_db =
         format!("{home}/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb");
     if tokio::fs::metadata(&group_db).await.is_ok() {
-        let events = fetch_from_group_db(&group_db, back, ahead).await?;
-        return Ok(filter_by_calendar(events, calendar_filter));
+        match fetch_from_group_db(&group_db, back, ahead).await {
+            Ok(events) => return Ok(filter_by_calendar(events, calendar_filter)),
+            Err(error) => eprintln!("Calendar database read failed; trying fallback: {error}"),
+        }
     }
 
     // Try legacy Calendar Cache
     let cache_db = format!("{home}/Library/Calendars/Calendar Cache");
     if tokio::fs::metadata(&cache_db).await.is_ok() {
-        let events = fetch_from_cache_db(&cache_db, back, ahead).await?;
-        return Ok(filter_by_calendar(events, calendar_filter));
+        match fetch_from_cache_db(&cache_db, back, ahead).await {
+            Ok(events) => return Ok(filter_by_calendar(events, calendar_filter)),
+            Err(error) => eprintln!("Legacy Calendar database read failed; trying JXA: {error}"),
+        }
     }
 
     // Fall back to JXA — slower but works when no local database exists
@@ -57,6 +96,7 @@ pub async fn create(
     notes: Option<&str>,
     all_day: bool,
 ) -> anyhow::Result<ActionResult> {
+    validate_event_range(start, end)?;
     let escaped_title = escape_jxa(title);
     let escaped_start = escape_jxa(start);
     let escaped_end = escape_jxa(end);
@@ -88,17 +128,248 @@ const app = Application("Calendar");
 const cal = app.calendars.byName("{}");
 const ev = app.Event({{ {} }});
 cal.events.push(ev);
-ev.summary();
+ev.uid();
 "#,
         escaped_cal, props
     );
 
     let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(30)).await?;
 
-    Ok(ActionResult::success_with_message(
-        "created",
-        &format!("Created event '{}'", output.trim()),
-    ))
+    Ok(ActionResult::success_with_id("created", output.trim()))
+}
+
+/// Create several calendar events in one Calendar automation session.
+pub async fn batch_create(events: &[NewCalendarEvent]) -> anyhow::Result<BatchActionResult> {
+    validate_batch(events)?;
+    let mut statements = String::new();
+    for (index, event) in events.iter().enumerate() {
+        let mut props = format!(
+            "summary: \"{}\", startDate: new Date(\"{}\"), endDate: new Date(\"{}\")",
+            escape_jxa(&event.title),
+            escape_jxa(&event.start),
+            escape_jxa(&event.end)
+        );
+        if event.all_day {
+            props.push_str(", alldayEvent: true");
+        }
+        if let Some(location) = &event.location {
+            props.push_str(&format!(", location: \"{}\"", escape_jxa(location)));
+        }
+        if let Some(notes) = &event.notes {
+            props.push_str(&format!(", description: \"{}\"", escape_jxa(notes)));
+        }
+        let calendar = escape_jxa(event.calendar.as_deref().unwrap_or("Calendar"));
+        statements.push_str(&format!(
+            r#"
+try {{
+    const cal{index} = app.calendars.byName("{calendar}");
+    const ev{index} = app.Event({{{props}}});
+    cal{index}.events.push(ev{index});
+    results.push({{id: ev{index}.uid(), ok: true}});
+}} catch (error) {{
+    results.push({{id: "item:{index}", ok: false, error: String(error)}});
+}}
+"#
+        ));
+    }
+    let script = format!(
+        r#"
+const app = Application("Calendar");
+const results = [];
+{statements}
+JSON.stringify(results)
+"#
+    );
+    let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    let results: Vec<BatchItemResult> = serde_json::from_str(&output)?;
+    Ok(BatchActionResult::new("batch-create", results))
+}
+
+pub fn validate_batch(events: &[NewCalendarEvent]) -> anyhow::Result<()> {
+    if events.is_empty() {
+        anyhow::bail!("At least one event is required");
+    }
+    if events.len() > 100 {
+        anyhow::bail!("Calendar batches are limited to 100 events");
+    }
+    for (index, event) in events.iter().enumerate() {
+        if event.title.trim().is_empty()
+            || event.start.trim().is_empty()
+            || event.end.trim().is_empty()
+        {
+            anyhow::bail!("Calendar batch item {index} requires title, start, and end");
+        }
+        validate_event_range(&event.start, &event.end)
+            .map_err(|error| anyhow::anyhow!("Calendar batch item {index}: {error}"))?;
+    }
+    Ok(())
+}
+
+pub fn validate_event_range(start: &str, end: &str) -> anyhow::Result<()> {
+    fn parse(value: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        if let Ok(date_time) = chrono::DateTime::parse_from_rfc3339(value) {
+            return Ok(date_time.with_timezone(&chrono::Utc));
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+            return Ok(date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is valid")
+                .and_utc());
+        }
+        anyhow::bail!("Invalid ISO 8601 date/time: {value}")
+    }
+
+    let start = parse(start)?;
+    let end = parse(end)?;
+    if end < start {
+        anyhow::bail!("Event end must not be before start");
+    }
+    Ok(())
+}
+
+/// Fetch one event by the stable UID printed by `calendar list`.
+pub async fn get(id: &str) -> anyhow::Result<CalendarEvent> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let group_db =
+        format!("{home}/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb");
+    if tokio::fs::metadata(&group_db).await.is_ok() {
+        match fetch_one_from_group_db(&group_db, id).await {
+            Ok(Some(event)) => return Ok(event),
+            Ok(None) => {}
+            Err(error) => eprintln!("Calendar database lookup failed; trying JXA: {error}"),
+        }
+    }
+    let script = build_find_by_id_script(id, "return JSON.stringify(eventRecord(ev, cal.name()));");
+    let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    parse_json_rows(&format!("[{output}]"))
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Calendar event not found: {id}"))
+}
+
+fn escape_sql(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+async fn fetch_one_from_group_db(db_path: &str, id: &str) -> anyhow::Result<Option<CalendarEvent>> {
+    let id = escape_sql(id);
+    let query = format!(
+        r#"
+SELECT
+    COALESCE(NULLIF(ci.unique_identifier, ''), NULLIF(ci.external_id, ''), NULLIF(ci.UUID, ''), CAST(ci.ROWID AS TEXT)) AS id,
+    COALESCE(ci.summary, '') AS title,
+    COALESCE(c.title, '') AS calendar,
+    COALESCE(l.title, '') AS location,
+    datetime(ci.start_date + 978307200, 'unixepoch') AS start_date,
+    datetime(ci.end_date + 978307200, 'unixepoch') AS end_date,
+    COALESCE(ci.all_day, 0) AS all_day,
+    COALESCE(ci.description, '') AS notes,
+    COALESCE(ci.url, '') AS url,
+    COALESCE(ci.has_attendees, 0) AS has_attendees,
+    COALESCE(ci.has_recurrences, 0) AS has_recurrences,
+    (SELECT COUNT(*) FROM Participant p WHERE p.owner_id = ci.ROWID) AS attendee_count,
+    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count
+FROM CalendarItem ci
+LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
+LEFT JOIN Location l ON ci.location_id = l.ROWID
+WHERE ci.unique_identifier = '{id}'
+   OR ci.external_id = '{id}'
+   OR ci.UUID = '{id}'
+LIMIT 1;
+"#
+    );
+    let output = run_command_with_timeout(
+        "sqlite3",
+        &["-json", db_path, query.trim()],
+        std::time::Duration::from_secs(10),
+    )
+    .await?;
+    Ok(parse_json_rows(&output).into_iter().next())
+}
+
+/// Update one event in place by stable UID.
+pub async fn update(id: &str, fields: &UpdateFields<'_>) -> anyhow::Result<ActionResult> {
+    if let Some(start) = fields.start {
+        validate_event_range(start, fields.end.unwrap_or(start))?;
+    } else if let Some(end) = fields.end {
+        validate_event_range(end, end)?;
+    }
+    let mut updates = Vec::new();
+    if let Some(title) = fields.title {
+        updates.push(format!("ev.summary = \"{}\";", escape_jxa(title)));
+    }
+    if let Some(start) = fields.start {
+        updates.push(format!(
+            "ev.startDate = new Date(\"{}\");",
+            escape_jxa(start)
+        ));
+    }
+    if let Some(end) = fields.end {
+        updates.push(format!("ev.endDate = new Date(\"{}\");", escape_jxa(end)));
+    }
+    if let Some(location) = fields.location {
+        updates.push(format!("ev.location = \"{}\";", escape_jxa(location)));
+    }
+    if let Some(notes) = fields.notes {
+        updates.push(format!("ev.description = \"{}\";", escape_jxa(notes)));
+    }
+    if let Some(all_day) = fields.all_day {
+        updates.push(format!("ev.alldayEvent = {all_day};"));
+    }
+    if updates.is_empty() {
+        anyhow::bail!("Nothing to update");
+    }
+    let action = format!("{} return ev.uid();", updates.join("\n"));
+    let script = build_find_by_id_script(id, &action);
+    let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    Ok(ActionResult::success_with_id("updated", output.trim()))
+}
+
+/// Delete one event by the stable UID printed by `calendar list`.
+pub async fn delete_by_id(id: &str) -> anyhow::Result<ActionResult> {
+    let script = build_find_by_id_script(id, "app.delete(ev); return targetId;");
+    let output = run_jxa_with_timeout(&script, std::time::Duration::from_secs(120)).await?;
+    Ok(ActionResult::success_with_id("deleted", output.trim()))
+}
+
+fn build_find_by_id_script(id: &str, action: &str) -> String {
+    format!(
+        r#"
+(function() {{
+const app = Application("Calendar");
+const targetId = "{}";
+function eventRecord(ev, calendar) {{
+    let location = "", endDate = "", notes = "", url = "", allDay = false;
+    try {{ location = ev.location() || ""; }} catch (error) {{}}
+    try {{ endDate = ev.endDate().toISOString(); }} catch (error) {{}}
+    try {{ notes = ev.description() || ""; }} catch (error) {{}}
+    try {{ url = ev.url() || ""; }} catch (error) {{}}
+    try {{ allDay = ev.alldayEvent(); }} catch (error) {{}}
+    return {{
+        id: ev.uid(), title: ev.summary() || "", calendar,
+        location, start_date: ev.startDate().toISOString(), end_date: endDate,
+        all_day: allDay ? 1 : 0, notes, url,
+        has_attendees: 0, has_recurrences: 0,
+        attendee_count: 0, alarm_count: 0
+    }};
+}}
+const calendars = app.calendars();
+for (let c = 0; c < calendars.length; c++) {{
+    const cal = calendars[c];
+    let events;
+    try {{ events = cal.events(); }} catch (error) {{ continue; }}
+    for (let i = 0; i < events.length; i++) {{
+        const ev = events[i];
+        let uid;
+        try {{ uid = ev.uid(); }} catch (error) {{ continue; }}
+        if (uid === targetId) {{ {action} }}
+    }}
+}}
+throw new Error("Calendar event not found: " + targetId);
+}})();
+"#,
+        escape_jxa(id)
+    )
 }
 
 /// Delete a calendar event by title and date via JXA.
@@ -125,7 +396,7 @@ const app = Application("Calendar");
 const targetDate = new Date("{}T00:00:00");
 const targetKey = [targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate()].join("-");
 {}
-let found = false;
+const matches = [];
 for (let i = 0; i < cals.length; i++) {{
     let events;
     try {{ events = cals[i].events(); }} catch(e) {{ continue; }}
@@ -135,15 +406,14 @@ for (let i = 0; i < cals.length; i++) {{
             const sd = ev.startDate();
             const sdKey = [sd.getFullYear(), sd.getMonth(), sd.getDate()].join("-");
             if (ev.summary() === "{}" && sdKey === targetKey) {{
-                app.delete(ev);
-                found = true;
-                break;
+                matches.push(ev);
             }}
         }} catch(e) {{ continue; }}
     }}
-    if (found) break;
 }}
-if (!found) throw new Error("Event not found: {} on {}");
+if (matches.length === 0) throw new Error("Event not found: {} on {}");
+if (matches.length > 1) throw new Error("Ambiguous event target: " + matches.length + " events match; pass --id");
+app.delete(matches[0]);
 "deleted"
 "#,
         escaped_date, calendar_setup, escaped_title, escaped_title, escaped_date
@@ -205,13 +475,19 @@ async fn fetch_from_group_db(
     let query = format!(
         r#"
 SELECT
+    COALESCE(NULLIF(ci.unique_identifier, ''), NULLIF(ci.external_id, ''), NULLIF(ci.UUID, ''), CAST(ci.ROWID AS TEXT)) AS id,
     COALESCE(ci.summary, '') AS title,
     COALESCE(c.title, '') AS calendar,
     COALESCE(l.title, '') AS location,
     datetime(ci.start_date + 978307200, 'unixepoch') AS start_date,
     datetime(ci.end_date + 978307200, 'unixepoch') AS end_date,
     COALESCE(ci.all_day, 0) AS all_day,
-    COALESCE(ci.description, '') AS notes
+    COALESCE(ci.description, '') AS notes,
+    COALESCE(ci.url, '') AS url,
+    COALESCE(ci.has_attendees, 0) AS has_attendees,
+    COALESCE(ci.has_recurrences, 0) AS has_recurrences,
+    (SELECT COUNT(*) FROM Participant p WHERE p.owner_id = ci.ROWID) AS attendee_count,
+    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count
 FROM CalendarItem ci
 LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
 LEFT JOIN Location l ON ci.location_id = l.ROWID
@@ -247,13 +523,19 @@ async fn fetch_from_cache_db(
     let query = format!(
         r#"
 SELECT
+    COALESCE(NULLIF(ci.ZUNIQUEIDENTIFIER, ''), CAST(ci.Z_PK AS TEXT)) AS id,
     COALESCE(ci.ZSUMMARY, '') AS title,
     COALESCE(cal.ZTITLE, '') AS calendar,
     COALESCE(ci.ZLOCATION, '') AS location,
     datetime(ci.ZSTARTDATE + 978307200, 'unixepoch') AS start_date,
     datetime(ci.ZENDDATE + 978307200, 'unixepoch') AS end_date,
     COALESCE(ci.ZISALLDAY, 0) AS all_day,
-    COALESCE(ci.ZNOTES, '') AS notes
+    COALESCE(ci.ZNOTES, '') AS notes,
+    '' AS url,
+    0 AS has_attendees,
+    0 AS has_recurrences,
+    0 AS attendee_count,
+    0 AS alarm_count
 FROM ZCALENDARITEM ci
 LEFT JOIN ZCALENDAR cal ON ci.ZCALENDAR = cal.Z_PK
 WHERE ci.ZSTARTDATE >= {start_cd}
@@ -295,13 +577,15 @@ for (let ci = 0; ci < cals.length; ci++) {{
         try {{ sd = ev.startDate(); }} catch(e) {{ continue; }}
         if (!sd || sd < start || sd > end) continue;
         count++;
-        let title = "", loc = "", ed = "", allday = false, notes = "";
+        let id = "", title = "", loc = "", ed = "", allday = false, notes = "", url = "";
+        try {{ id = ev.uid() || ""; }} catch(e) {{}}
         try {{ title = ev.summary() || ""; }} catch(e) {{}}
         try {{ loc = ev.location() || ""; }} catch(e) {{}}
         try {{ ed = ev.endDate().toISOString(); }} catch(e) {{}}
         try {{ allday = ev.alldayEvent(); }} catch(e) {{}}
         try {{ notes = ev.description() || ""; }} catch(e) {{}}
-        if (title) results.push({{title: title, calendar: calName, location: loc, start_date: sd.toISOString(), end_date: ed, all_day: allday ? 1 : 0, notes: notes}});
+        try {{ url = ev.url() || ""; }} catch(e) {{}}
+        if (title) results.push({{id: id, title: title, calendar: calName, location: loc, start_date: sd.toISOString(), end_date: ed, all_day: allday ? 1 : 0, notes: notes, url: url, has_attendees: 0, has_recurrences: 0, attendee_count: 0, alarm_count: 0}});
     }}
 }}
 JSON.stringify(results)
@@ -333,6 +617,7 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
 
     let mut records = Vec::new();
     for row in &rows {
+        let id = row["id"].as_str().unwrap_or("").trim();
         let title = row["title"].as_str().unwrap_or("").trim();
         if title.is_empty() {
             continue;
@@ -343,8 +628,10 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
         let end_date = row["end_date"].as_str().unwrap_or("").trim();
         let is_all_day = row["all_day"].as_i64().unwrap_or(0) != 0;
         let notes = row["notes"].as_str().map(str::trim).unwrap_or("");
+        let url = row["url"].as_str().map(str::trim).unwrap_or("");
 
         records.push(CalendarEvent {
+            id: id.to_string(),
             title: title.to_string(),
             calendar: calendar.to_string(),
             location: if location.is_empty() {
@@ -368,6 +655,15 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
             } else {
                 Some(notes.to_string())
             },
+            url: if url.is_empty() {
+                None
+            } else {
+                Some(url.to_string())
+            },
+            has_attendees: row["has_attendees"].as_i64().unwrap_or(0) != 0,
+            has_recurrences: row["has_recurrences"].as_i64().unwrap_or(0) != 0,
+            attendee_count: row["attendee_count"].as_u64().unwrap_or(0) as usize,
+            alarm_count: row["alarm_count"].as_u64().unwrap_or(0) as usize,
         });
     }
     records
@@ -380,12 +676,17 @@ mod tests {
     #[test]
     fn test_parse_json_rows() {
         let output = r#"[
-            {"title":"Team standup","calendar":"Work","location":"Zoom","start_date":"2026-03-14 10:00:00","end_date":"2026-03-14 10:30:00","all_day":0,"notes":""},
-            {"title":"Birthday","calendar":"Personal","location":"","start_date":"2026-03-15 00:00:00","end_date":"2026-03-16 00:00:00","all_day":1,"notes":"Bring cake"}
+            {"id":"evt-1","title":"Team standup","calendar":"Work","location":"Zoom","start_date":"2026-03-14 10:00:00","end_date":"2026-03-14 10:30:00","all_day":0,"notes":"","url":"","has_attendees":1,"has_recurrences":1,"attendee_count":3,"alarm_count":1},
+            {"id":"evt-2","title":"Birthday","calendar":"Personal","location":"","start_date":"2026-03-15 00:00:00","end_date":"2026-03-16 00:00:00","all_day":1,"notes":"Bring cake","url":"","has_attendees":0,"has_recurrences":0}
         ]"#;
         let records = parse_json_rows(output);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].title, "Team standup");
+        assert_eq!(records[0].id, "evt-1");
+        assert!(records[0].has_attendees);
+        assert!(records[0].has_recurrences);
+        assert_eq!(records[0].attendee_count, 3);
+        assert_eq!(records[0].alarm_count, 1);
         assert_eq!(records[0].calendar, "Work");
         assert_eq!(records[0].location.as_deref(), Some("Zoom"));
         assert!(!records[0].is_all_day);
@@ -429,6 +730,7 @@ mod tests {
     fn test_filter_by_calendar() {
         let events = vec![
             CalendarEvent {
+                id: "1".to_string(),
                 title: "Meeting".to_string(),
                 calendar: "Work".to_string(),
                 location: None,
@@ -436,8 +738,14 @@ mod tests {
                 end_date: None,
                 is_all_day: false,
                 notes: None,
+                url: None,
+                has_attendees: false,
+                has_recurrences: false,
+                attendee_count: 0,
+                alarm_count: 0,
             },
             CalendarEvent {
+                id: "2".to_string(),
                 title: "Birthday".to_string(),
                 calendar: "Personal".to_string(),
                 location: None,
@@ -445,6 +753,11 @@ mod tests {
                 end_date: None,
                 is_all_day: false,
                 notes: None,
+                url: None,
+                has_attendees: false,
+                has_recurrences: false,
+                attendee_count: 0,
+                alarm_count: 0,
             },
         ];
 
@@ -456,6 +769,7 @@ mod tests {
     #[test]
     fn test_filter_by_calendar_none() {
         let events = vec![CalendarEvent {
+            id: "1".to_string(),
             title: "Meeting".to_string(),
             calendar: "Work".to_string(),
             location: None,
@@ -463,9 +777,41 @@ mod tests {
             end_date: None,
             is_all_day: false,
             notes: None,
+            url: None,
+            has_attendees: false,
+            has_recurrences: false,
+            attendee_count: 0,
+            alarm_count: 0,
         }];
 
         let filtered = filter_by_calendar(events, None);
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn stable_id_script_targets_uid() {
+        let script = build_find_by_id_script("ABC-123", "app.delete(ev); return targetId;");
+        assert!(script.contains("uid = ev.uid()"));
+        assert!(script.contains("uid === targetId"));
+        assert!(script.contains("const targetId = \"ABC-123\""));
+        assert!(!script.contains("ev.summary() === targetId"));
+    }
+
+    #[test]
+    fn batch_validation_runs_before_automation() {
+        assert!(validate_batch(&[]).is_err());
+        assert!(validate_batch(&[NewCalendarEvent {
+            title: String::new(),
+            start: "2026-09-02T17:00:00Z".to_string(),
+            end: "2026-09-02T17:30:00Z".to_string(),
+            calendar: None,
+            location: None,
+            notes: None,
+            all_day: false,
+        }])
+        .is_err());
+        assert!(validate_event_range("not-a-date", "2026-09-02T17:30:00Z").is_err());
+        assert!(validate_event_range("2026-09-02T18:00:00Z", "2026-09-02T17:30:00Z").is_err());
+        assert!(validate_event_range("2026-09-02", "2026-09-03").is_ok());
     }
 }

@@ -8,6 +8,7 @@ pub mod clock;
 pub mod console_logs;
 pub mod contacts;
 pub mod disks;
+pub mod doctor;
 pub mod facetime;
 pub mod find_my;
 pub mod fonts;
@@ -39,7 +40,7 @@ mod util;
 /// The result every mutating call returns (`create`, `complete`, `update`, …).
 /// Re-exported because those signatures name it: the rest of `util` is
 /// AppleScript/subprocess plumbing that callers have no business reaching.
-pub use util::ActionResult;
+pub use util::{ActionResult, BatchActionResult, BatchItemResult};
 pub mod voice_memos;
 pub mod weather;
 pub mod wifi;
