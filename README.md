@@ -2,6 +2,27 @@
 
 Manage your Mac from the command line. Reminders, Calendar, Contacts, Notes, Mail, Music, Keychain, Safari, and 30+ more Apple apps.
 
+## API Highlights
+
+- **Fast reads, supported writes.** Bulk reads use local macOS indexes where
+  they are reliable; Calendar falls back to app automation when its fast path
+  is unavailable. Writes use the apps' supported JXA/AppleScript interfaces.
+- **Stable identity.** Calendar, Mail, Contacts, and Reminders expose durable
+  ids, and destructive operations prefer exact ids over titles or list
+  positions. Ambiguous legacy matches fail safely.
+- **Complete discovery.** `cider schema` is generated from the real command
+  parser, so agents can discover all commands, arguments, defaults, dry-run
+  support, and identifier contracts without a second hand-maintained API list.
+- **Efficient batches.** Calendar, Mail, and Reminders batch commands reuse one
+  app automation session and return a result for every item, including partial
+  failures.
+- **Full-fidelity PIM data.** Contacts return labeled multi-value fields and
+  richer profile data; Calendar, Mail, and Reminders expose deeper read and
+  mutation APIs without truncating content.
+- **Prompt-free diagnostics.** `cider doctor` and `cider auth-status` inspect
+  tools, data stores, and access state without triggering macOS permission
+  dialogs.
+
 ## Install
 
 ```sh
@@ -191,9 +212,9 @@ cider mail get --id '<message-id@example.com>'
 ```
 
 Contacts include all labeled emails, phones, URLs, and postal addresses plus
-middle name, nickname, job title, department, birthday, and notes when present. Create and
-update accept the same richer name and work fields; repeat `--email` or
-`--phone` during creation to add several values.
+middle name, nickname, job title, department, birthday, and notes when present.
+Create and update accept the same richer name and work fields; repeat `--email`
+or `--phone` during creation to add several values.
 
 ## Schema And Diagnostics
 
@@ -208,10 +229,11 @@ cider schema --source calendar
 ```
 
 `cider auth-status` reports prompt-free read access and write Automation state
-for Calendar, Contacts, Reminders, and Mail. `cider doctor` checks required macOS tools and the Calendar, Contacts,
-Reminders, and newest Mail data stores. It deliberately does not send an
-AppleEvent: even a permission probe can open a macOS dialog, so Automation
-authorization is reported as `not_probed` and real writes surface any denial.
+for Calendar, Contacts, Reminders, and Mail. `cider doctor` checks required
+macOS tools and the Calendar, Contacts, Reminders, and newest Mail data stores.
+It deliberately does not send an AppleEvent: even a permission probe can open
+a macOS dialog, so Automation authorization is reported as `not_probed` and
+real writes surface any denial.
 
 ## How It Works
 
@@ -230,7 +252,7 @@ new enough:
 
 ```toml
 [dependencies]
-cider-cli = { version = "0.4", default-features = false }
+cider-cli = { version = "0.5", default-features = false }
 ```
 
 ```rust
