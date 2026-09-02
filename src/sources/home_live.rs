@@ -38,7 +38,13 @@ pub async fn bridge_for(live: bool) -> Result<Option<Bridge>, BridgeError> {
     if !bridge::is_installed() {
         return Ok(None);
     }
-    Ok(Bridge::connect_running().await.ok())
+    match Bridge::connect_running().await {
+        Ok(bridge) => Ok(Some(bridge)),
+        // A running but stale bridge is an error to fix, not a reason to
+        // quietly answer from the cache.
+        Err(error @ BridgeError::Incompatible { .. }) => Err(error),
+        Err(_) => Ok(None),
+    }
 }
 
 fn args(pairs: &[(&str, Option<&str>)]) -> Json {

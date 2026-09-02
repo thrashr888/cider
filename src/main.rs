@@ -3435,6 +3435,7 @@ fn bridge_error_code(error: &sources::bridge::BridgeError) -> String {
         BridgeError::CliNotInstalled => "bridge_cli_not_installed".to_string(),
         BridgeError::Unreachable(_) => "bridge_unreachable".to_string(),
         BridgeError::Protocol(_) => "bridge_protocol_error".to_string(),
+        BridgeError::Incompatible { .. } => "bridge_incompatible".to_string(),
         BridgeError::Remote { code, .. } => match code.as_str() {
             "not_found" => "not_found".to_string(),
             "invalid_args" => "invalid_input".to_string(),
@@ -3801,6 +3802,12 @@ mod tests {
         assert_eq!(classify_error_code(&wrapped), "bridge_unreachable");
         let cli: anyhow::Error = BridgeError::CliNotInstalled.into();
         assert_eq!(classify_error_code(&cli), "bridge_cli_not_installed");
+        let stale: anyhow::Error = BridgeError::Incompatible {
+            have: "0.0.1".into(),
+            want: "0.1.0".into(),
+        }
+        .into();
+        assert_eq!(classify_error_code(&stale), "bridge_incompatible");
         let weather: anyhow::Error = BridgeError::Remote {
             code: "weather_unavailable".into(),
             message: "no".into(),

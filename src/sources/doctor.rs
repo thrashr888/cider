@@ -233,12 +233,20 @@ fn check_bridge_app() -> DoctorCheck {
 async fn check_bridge_socket() -> DoctorCheck {
     let socket = bridge::socket_path();
     let (status, detail) = match bridge::ping().await {
+        Some(pong) if bridge::check_version(&pong).is_err() => (
+            CheckStatus::NotConfigured,
+            format!(
+                "Cider Bridge answers ping on {} but {}",
+                socket.display(),
+                bridge::check_version(&pong).unwrap_err()
+            ),
+        ),
         Some(pong) => (
             CheckStatus::Ok,
             format!(
                 "Cider Bridge answers ping on {} (version {}, homekit_authorized {}, {} homes)",
                 socket.display(),
-                pong.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
+                bridge::ping_version(&pong),
                 pong.get("homekit_authorized")
                     .and_then(|v| v.as_bool())
                     .map(|b| b.to_string())

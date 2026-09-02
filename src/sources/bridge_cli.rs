@@ -23,7 +23,7 @@ use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::bridge::{parse_reply, BridgeError, APP_NAME};
+use super::bridge::{incompatible_if_unknown, parse_reply, ping_version, BridgeError, APP_NAME};
 
 /// The executable's file name.
 pub const CLI_NAME: &str = "cider-bridge";
@@ -32,6 +32,8 @@ pub const CLI_ENV: &str = "CIDER_BRIDGE_CLI";
 /// Per-call ceiling. A first call can wait on a TCC consent dialog, and an
 /// EventKit commit against a slow CalDAV account is not instant either.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// `ping` never touches a store, so it is quick or it is broken.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// The CLI answers every request with this id.
 const CLI_REQUEST_ID: u64 = 0;
 
@@ -123,6 +125,27 @@ pub async fn call_at(
     args: Json,
     timeout: Duration,
 ) -> Result<Json, BridgeError> {
+    match call_raw(cli, cmd, args, timeout).await {
+        // A CLI that predates `cmd` answers `unknown command`; name its
+        // version in the error, which costs one more `ping` and only on
+        // this path.
+        Err(error) if cmd != "ping" && super::bridge::is_unknown_command(&error) => {
+            let have = ping_at(cli).await.as_ref().map(ping_version);
+            Err(incompatible_if_unknown(error, || {
+                have.unwrap_or_else(|| "unknown".to_string())
+            }))
+        }
+        other => other,
+    }
+}
+
+/// One `cider-bridge <cmd> <json>` run, its envelope parsed and nothing more.
+async fn call_raw(
+    cli: &Path,
+    cmd: &str,
+    args: Json,
+    timeout: Duration,
+) -> Result<Json, BridgeError> {
     let encoded = serde_json::to_string(&args)
         .map_err(|error| BridgeError::Protocol(format!("could not encode {cmd} args: {error}")))?;
     let mut command = Command::new(cli);
@@ -163,6 +186,20 @@ pub async fn call_at(
             )))
         }
     }
+}
+
+/// `cider-bridge ping`: version and per-store authorization, without
+/// touching any store or opening a dialog. `None` when it is not installed
+/// or did not answer.
+pub async fn ping() -> Option<Json> {
+    ping_at(&cli_path()?).await
+}
+
+/// [`ping`] against an explicit executable.
+pub async fn ping_at(cli: &Path) -> Option<Json> {
+    call_raw(cli, "ping", Json::Object(Default::default()), PING_TIMEOUT)
+        .await
+        .ok()
 }
 
 /// Run `watch` for `sources` and hand each change's `data` object to
@@ -526,6 +563,8 @@ mod tests {
             r#"#!/bin/sh
 case "$1" in
   reminders.create) echo '{"id":0,"ok":true,"data":{"id":"R-1","title":"Milk","list":"Shopping","completed":false}}' ;;
+  ping) echo '{"id":0,"ok":true,"data":{"version":"0.7.0","calendar":"full_access","reminders":"denied","contacts":"not_determined"}}' ;;
+  unknown) echo "{\"id\":0,\"ok\":false,\"error\":{\"code\":\"invalid_args\",\"message\":\"unknown command '$1'\"}}"; exit 1 ;;
   echo) printf '{"id":0,"ok":true,"data":%s}\n' "$2" ;;
   denied) echo '{"id":0,"ok":false,"error":{"code":"permission_denied","message":"Reminders access is denied"}}'; exit 1 ;;
   slow) sleep 3; echo '{"id":0,"ok":true,"data":null}' ;;
@@ -672,6 +711,49 @@ esac
             matches!(error, BridgeError::Remote { ref code, .. } if code == "invalid_args"),
             "{error:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn ping_reports_version_and_unknown_command_is_incompatible() {
+        let dir = temp_dir("version");
+        let cli = stub_cli(&dir);
+
+        let pong = ping_at(&cli).await.unwrap();
+        assert_eq!(ping_version(&pong), "0.7.0");
+        assert_eq!(pong["reminders"], "denied");
+        assert!(ping_at(&dir.join("missing")).await.is_none());
+
+        let stale = call_at(&cli, "unknown", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stale,
+            BridgeError::Incompatible {
+                have: "0.7.0".into(),
+                want: super::super::bridge::BRIDGE_PROTOCOL_VERSION.into()
+            },
+            "the version comes from a follow-up ping"
+        );
+        assert!(stale.to_string().contains("Cider Bridge 0.7.0"));
+
+        // A CLI so old that even `ping` is unknown must not loop on itself.
+        let ancient = dir.join("ancient");
+        std::fs::write(
+            &ancient,
+            "#!/bin/sh\necho \"{\\\"id\\\":0,\\\"ok\\\":false,\\\"error\\\":{\\\"code\\\":\\\"invalid_args\\\",\\\"message\\\":\\\"unknown command '$1'\\\"}}\"; exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ancient, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ping_at(&ancient).await.is_none());
+        let error = call_at(&ancient, "reminders.create", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, BridgeError::Incompatible { ref have, .. } if have == "unknown"),
+            "{error:?}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

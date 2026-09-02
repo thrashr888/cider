@@ -32,6 +32,11 @@ use tokio::time::Instant;
 
 use super::util::{run_command_with_timeout, ActionResult};
 
+/// The protocol version this build of cider speaks. Both the app and the
+/// CLI report theirs in `ping.data.version`; the major must match
+/// ([`versions_compatible`]), and a bridge that answers `unknown command`
+/// is treated as a mismatch too, since that is what a stale one looks like.
+pub const BRIDGE_PROTOCOL_VERSION: &str = "0.1.0";
 /// The app bundle's file name, wherever it is installed.
 pub const APP_NAME: &str = "Cider Bridge.app";
 /// Environment variable naming an app bundle outside the standard folders.
@@ -66,6 +71,9 @@ pub enum BridgeError {
     /// No `cider-bridge` executable (see [`super::bridge_cli`]), or
     /// `CIDER_BRIDGE_CLI=off`.
     CliNotInstalled,
+    /// The bridge speaks a protocol version whose major differs from
+    /// [`BRIDGE_PROTOCOL_VERSION`], or answered a command it does not know.
+    Incompatible { have: String, want: String },
 }
 
 impl fmt::Display for BridgeError {
@@ -87,11 +95,74 @@ impl fmt::Display for BridgeError {
                 "cider-bridge is not installed; build it with `cider bridge build --install` \
                  (or unset CIDER_BRIDGE_CLI=off)"
             ),
+            BridgeError::Incompatible { have, want } => write!(
+                f,
+                "Cider Bridge {have} does not match the protocol cider expects ({want}); rebuild \
+                 it with `cider bridge build --install`, or `brew upgrade cider` for the packaged \
+                 bridge"
+            ),
         }
     }
 }
 
 impl std::error::Error for BridgeError {}
+
+/// The leading integer of a version string (`"0.1.0"` → `0`).
+fn major(version: &str) -> Option<u64> {
+    version.trim().split('.').next()?.parse().ok()
+}
+
+/// Semver-style: majors must match; minor and patch may differ.
+pub fn versions_compatible(have: &str, want: &str) -> bool {
+    matches!((major(have), major(want)), (Some(h), Some(w)) if h == w)
+}
+
+/// The `version` a `ping` reply carries, `"unknown"` when it has none.
+pub fn ping_version(pong: &Json) -> String {
+    pong.get("version")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Verify a `ping` reply against [`BRIDGE_PROTOCOL_VERSION`]; returns the
+/// version it reported.
+pub fn check_version(pong: &Json) -> Result<String, BridgeError> {
+    let have = ping_version(pong);
+    if versions_compatible(&have, BRIDGE_PROTOCOL_VERSION) {
+        Ok(have)
+    } else {
+        Err(BridgeError::Incompatible {
+            have,
+            want: BRIDGE_PROTOCOL_VERSION.to_string(),
+        })
+    }
+}
+
+/// `invalid_args: unknown command '…'` is how a bridge that predates a
+/// command answers it; callers turn that into [`BridgeError::Incompatible`].
+pub fn is_unknown_command(error: &BridgeError) -> bool {
+    matches!(
+        error,
+        BridgeError::Remote { code, message }
+            if code == "invalid_args" && message.trim_start().starts_with("unknown command")
+    )
+}
+
+/// Map an unknown-command reply to [`BridgeError::Incompatible`] naming the
+/// version `have`; every other error passes through.
+pub fn incompatible_if_unknown(error: BridgeError, have: impl FnOnce() -> String) -> BridgeError {
+    if is_unknown_command(&error) {
+        BridgeError::Incompatible {
+            have: have(),
+            want: BRIDGE_PROTOCOL_VERSION.to_string(),
+        }
+    } else {
+        error
+    }
+}
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -153,12 +224,15 @@ pub struct Bridge {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
     next_id: u64,
+    /// What the bridge said in `ping.data.version`.
+    version: String,
 }
 
 impl fmt::Debug for Bridge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bridge")
             .field("next_id", &self.next_id)
+            .field("version", &self.version)
             .finish()
     }
 }
@@ -174,14 +248,29 @@ impl Bridge {
     }
 
     /// Connect only if the bridge is already running; never launches it.
+    /// A running bridge with the wrong protocol version is
+    /// [`BridgeError::Incompatible`], not "not running".
     pub async fn connect_running() -> Result<Bridge, BridgeError> {
         Self::open(&socket_path(), PING_TIMEOUT)
             .await
-            .map(|(bridge, _)| bridge)
+            .and_then(Self::verified)
+    }
+
+    /// The version the bridge reported when this connection was opened.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The handshake: keep the connection only if its `ping` reply names a
+    /// compatible protocol version.
+    fn verified((bridge, pong): (Bridge, Json)) -> Result<Bridge, BridgeError> {
+        check_version(&pong).map(|_| bridge)
     }
 
     /// Connect to the socket at `path` and require a `ping` answer within
-    /// `timeout`. Returns the connection and the ping data.
+    /// `timeout`. Returns the connection and the ping data, unverified: the
+    /// callers that need the handshake apply [`check_version`], and the ones
+    /// that must work against any bridge (`ping`, `quit`) do not.
     pub async fn open(path: &Path, timeout: Duration) -> Result<(Bridge, Json), BridgeError> {
         let stream = match tokio::time::timeout(timeout, UnixStream::connect(path)).await {
             Ok(Ok(stream)) => stream,
@@ -203,8 +292,10 @@ impl Bridge {
             reader: BufReader::new(reader),
             writer,
             next_id: 0,
+            version: String::from("unknown"),
         };
         let pong = bridge.call_with_timeout("ping", json!({}), timeout).await?;
+        bridge.version = ping_version(&pong);
         Ok((bridge, pong))
     }
 
@@ -227,9 +318,8 @@ impl Bridge {
         line.push('\n');
         tokio::time::timeout(timeout, self.exchange(id, cmd, &line))
             .await
-            .map_err(|_| {
-                BridgeError::Unreachable(format!("no reply to {cmd} within {timeout:?}"))
-            })?
+            .map_err(|_| BridgeError::Unreachable(format!("no reply to {cmd} within {timeout:?}")))?
+            .map_err(|error| incompatible_if_unknown(error, || self.version.clone()))
     }
 
     async fn exchange(&mut self, id: u64, cmd: &str, line: &str) -> Result<Json, BridgeError> {
@@ -286,8 +376,8 @@ pub fn parse_reply(id: u64, line: &str) -> Result<Json, BridgeError> {
 /// [`Bridge::connect`] with the socket and app injectable, so the
 /// not-installed path is testable without ever running `open`.
 pub async fn connect_with(socket: &Path, app: Option<PathBuf>) -> Result<Bridge, BridgeError> {
-    if let Ok((bridge, _)) = Bridge::open(socket, PING_TIMEOUT).await {
-        return Ok(bridge);
+    if let Ok(pair) = Bridge::open(socket, PING_TIMEOUT).await {
+        return Bridge::verified(pair);
     }
     let app = app.ok_or(BridgeError::NotInstalled)?;
     launch(&app).await?;
@@ -296,7 +386,7 @@ pub async fn connect_with(socket: &Path, app: Option<PathBuf>) -> Result<Bridge,
     while Instant::now() < deadline {
         tokio::time::sleep(LAUNCH_POLL).await;
         match Bridge::open(socket, LAUNCH_PING_TIMEOUT).await {
-            Ok((bridge, _)) => return Ok(bridge),
+            Ok(pair) => return Bridge::verified(pair),
             Err(error) => last_error = error.to_string(),
         }
     }
@@ -333,6 +423,18 @@ pub struct BridgeStatus {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ping: Option<Json>,
+    /// [`BRIDGE_PROTOCOL_VERSION`]: what this cider was built against.
+    pub protocol_expected: String,
+    /// The running app's `ping.data.version`; absent while it is idle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// The installed CLI's `ping.data.version`; absent when not installed
+    /// or when it did not answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// `false` if any version that could be observed (running app,
+    /// installed CLI) has a different major than `protocol_expected`.
+    pub compatible: bool,
     /// Whether the native `cider-bridge` CLI is installed and not switched
     /// off — the condition under which Reminders and Calendar writes use it.
     pub cli_installed: bool,
@@ -351,12 +453,26 @@ pub async fn status() -> BridgeStatus {
     let app = app_path();
     let pong = ping().await;
     let cli = super::bridge_cli::cli_path();
+    let cli_pong = match &cli {
+        Some(path) => super::bridge_cli::ping_at(path).await,
+        None => None,
+    };
+    let app_version = pong.as_ref().map(ping_version);
+    let cli_version = cli_pong.as_ref().map(ping_version);
+    let compatible = [&app_version, &cli_version]
+        .into_iter()
+        .flatten()
+        .all(|have| versions_compatible(have, BRIDGE_PROTOCOL_VERSION));
     BridgeStatus {
         installed: app.is_some(),
         app_path: app.map(|p| p.to_string_lossy().into_owned()),
         socket_path: socket_path().to_string_lossy().into_owned(),
         running: pong.is_some(),
         ping: pong,
+        protocol_expected: BRIDGE_PROTOCOL_VERSION.to_string(),
+        app_version,
+        cli_version,
+        compatible,
         cli_installed: cli.is_some(),
         cli_path: cli.map(|p| p.to_string_lossy().into_owned()),
         cli_disabled: super::bridge_cli::is_disabled(),
@@ -367,8 +483,9 @@ pub async fn status() -> BridgeStatus {
 /// Ask a running bridge to exit. Not running is success: there is nothing
 /// to quit, and this never launches the app just to stop it.
 pub async fn quit() -> Result<ActionResult, BridgeError> {
-    match Bridge::connect_running().await {
-        Ok(mut bridge) => {
+    // `open`, not `connect_running`: a stale bridge must still be quittable.
+    match Bridge::open(&socket_path(), PING_TIMEOUT).await {
+        Ok((mut bridge, _)) => {
             bridge.call("quit", json!({})).await?;
             Ok(ActionResult::success_with_message(
                 "bridge.quit",
@@ -593,6 +710,136 @@ mod tests {
             }
         });
         (received, server)
+    }
+
+    /// A bridge of some other vintage: answers `ping` with `version` and
+    /// every other command the way the router answers one it lacks.
+    async fn versioned_stub(path: &Path, version: &str) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(path).unwrap();
+        let version = version.to_string();
+        tokio::spawn(async move {
+            // Serve every connection in turn: a test may open more than one.
+            while let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let request: Json = serde_json::from_str(&line).unwrap();
+                    let id = request["id"].clone();
+                    let reply = match request["cmd"].as_str() {
+                        Some("ping") => json!({"id": id, "ok": true,
+                                               "data": {"version": version, "homes": 0}}),
+                        Some(other) => json!({
+                            "id": id, "ok": false,
+                            "error": {"code": "invalid_args",
+                                      "message": format!("unknown command '{other}'")}
+                        }),
+                        None => json!({"id": id, "ok": false,
+                                       "error": {"code": "invalid_args", "message": "cmd missing"}}),
+                    };
+                    writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn stale_app_version_fails_the_handshake() {
+        let path = temp_socket();
+        let server = versioned_stub(&path, "1.0.0").await;
+
+        let error = connect_with(&path, None).await.map(|_| ()).unwrap_err();
+        assert_eq!(
+            error,
+            BridgeError::Incompatible {
+                have: "1.0.0".into(),
+                want: BRIDGE_PROTOCOL_VERSION.into()
+            }
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("Cider Bridge 1.0.0 does not match"),
+            "{message}"
+        );
+        assert!(
+            message.contains("cider bridge build --install"),
+            "{message}"
+        );
+        assert!(message.contains("brew upgrade cider"), "{message}");
+
+        // `ping` and `quit` still work against it: status must be able to
+        // report the stale version, and the user must be able to stop it.
+        let (_, pong) = Bridge::open(&path, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(ping_version(&pong), "1.0.0");
+
+        server.abort();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn newer_minor_is_compatible_but_unknown_command_is_not() {
+        let path = temp_socket();
+        let server = versioned_stub(&path, "0.9.3").await;
+
+        let mut bridge = connect_with(&path, None).await.unwrap();
+        assert_eq!(bridge.version(), "0.9.3");
+        let error = bridge.call("home.triggers", json!({})).await.unwrap_err();
+        assert_eq!(
+            error,
+            BridgeError::Incompatible {
+                have: "0.9.3".into(),
+                want: BRIDGE_PROTOCOL_VERSION.into()
+            },
+            "a bridge that lacks a command is a stale bridge"
+        );
+
+        drop(bridge);
+        server.abort();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn version_compatibility_is_by_major() {
+        assert!(versions_compatible("0.1.0", "0.1.0"));
+        assert!(versions_compatible("0.9.3", "0.1.0"));
+        assert!(versions_compatible("0.0.0-stub", "0.1.0"));
+        assert!(!versions_compatible("1.0.0", "0.1.0"));
+        assert!(!versions_compatible("unknown", "0.1.0"));
+        assert!(!versions_compatible("", "0.1.0"));
+        assert_eq!(BRIDGE_PROTOCOL_VERSION, "0.1.0");
+
+        assert_eq!(ping_version(&json!({"version": " 0.2.0 "})), "0.2.0");
+        assert_eq!(ping_version(&json!({"version": ""})), "unknown");
+        assert_eq!(ping_version(&json!({})), "unknown");
+        assert_eq!(
+            check_version(&json!({"version": "0.2.0"})).unwrap(),
+            "0.2.0"
+        );
+        assert!(matches!(
+            check_version(&json!({})).unwrap_err(),
+            BridgeError::Incompatible { ref have, .. } if have == "unknown"
+        ));
+
+        let unknown = BridgeError::Remote {
+            code: "invalid_args".into(),
+            message: "unknown command 'home.nope'".into(),
+        };
+        assert!(is_unknown_command(&unknown));
+        assert!(matches!(
+            incompatible_if_unknown(unknown, || "0.1.0".into()),
+            BridgeError::Incompatible { ref have, .. } if have == "0.1.0"
+        ));
+        let bad_args = BridgeError::Remote {
+            code: "invalid_args".into(),
+            message: "home is ambiguous".into(),
+        };
+        assert!(!is_unknown_command(&bad_args));
+        assert_eq!(
+            incompatible_if_unknown(bad_args.clone(), || unreachable!()),
+            bad_args
+        );
     }
 
     #[tokio::test]
