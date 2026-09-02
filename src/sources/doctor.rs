@@ -73,7 +73,20 @@ pub async fn inspect() -> DoctorReport {
         )
         .await,
         check_mail_store(&home).await,
+        check_home_cache(&home).await,
+        check_path(
+            "shortcuts_database",
+            &home.join("Library/Shortcuts/Shortcuts.sqlite"),
+            false,
+        )
+        .await,
     ];
+    checks.push(DoctorCheck {
+        name: "find_my".to_string(),
+        status: CheckStatus::NotConfigured,
+        required: false,
+        detail: "Not supported: the Find My caches under ~/Library/Caches/com.apple.findmy.fmipcore are encrypted on current macOS, so cider has no find-my command".to_string(),
+    });
     checks.push(DoctorCheck {
         name: "automation_permissions".to_string(),
         status: CheckStatus::NotProbed,
@@ -128,6 +141,56 @@ pub async fn auth_status() -> AuthorizationReport {
     AuthorizationReport {
         prompt_free: true,
         domains,
+    }
+}
+
+/// The Home app keeps a decoded copy of the HomeKit configuration in its
+/// container cache. It appears after the app has been opened once.
+async fn check_home_cache(home: &Path) -> DoctorCheck {
+    let dir = home.join(
+        "Library/Containers/com.apple.Home/Data/Library/Caches/com.apple.HomeKit/com.apple.Home/com.apple.HomeKit.configurations",
+    );
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return DoctorCheck {
+                name: "home_cache".to_string(),
+                status: CheckStatus::PermissionDenied,
+                required: false,
+                detail: format!("{} is not readable: {error}", dir.display()),
+            };
+        }
+        Err(_) => {
+            return DoctorCheck {
+                name: "home_cache".to_string(),
+                status: CheckStatus::NotConfigured,
+                required: false,
+                detail: format!(
+                    "{} is not present; open the Home app once to create it",
+                    dir.display()
+                ),
+            };
+        }
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("homeData.") && name.ends_with(".config") {
+            return DoctorCheck {
+                name: "home_cache".to_string(),
+                status: CheckStatus::Ok,
+                required: false,
+                detail: format!("{} is readable", entry.path().display()),
+            };
+        }
+    }
+    DoctorCheck {
+        name: "home_cache".to_string(),
+        status: CheckStatus::NotConfigured,
+        required: false,
+        detail: format!(
+            "No homeData.*.config under {}; open the Home app once to create it",
+            dir.display()
+        ),
     }
 }
 
@@ -222,6 +285,14 @@ mod tests {
         let check = check_executable("definitely-missing", Path::new("/no/such/cider-tool"), true);
         assert_eq!(check.status, CheckStatus::Missing);
         assert!(check.required);
+    }
+
+    #[tokio::test]
+    async fn home_cache_check_reports_missing_cache_without_failing() {
+        let check = check_home_cache(Path::new("/no/such/home")).await;
+        assert_eq!(check.status, CheckStatus::NotConfigured);
+        assert!(!check.required);
+        assert!(check.detail.contains("open the Home app"));
     }
 
     #[tokio::test]
