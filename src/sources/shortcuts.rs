@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use plist::{Dictionary, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use uuid::Uuid;
 
+use super::home;
 use super::keyed_archive::{hex_decode, plist_to_json};
 use super::util::{run_command_with_timeout, ActionResult, APPLE_EPOCH};
 
@@ -337,6 +339,316 @@ pub async fn sign(input: &str, output: &str, mode: Option<&str>) -> anyhow::Resu
     ))
 }
 
+/// A shortcut to generate: a name and an ordered list of steps.
+///
+/// ```json
+/// {"name": "River: Night", "steps": [
+///   {"scene": {"home": "2183 26th Ave", "scene": "Good Night"}},
+///   {"delay_seconds": 600},
+///   {"speak": "Good night"},
+///   {"open_url": "https://example.com"},
+///   {"ssh": {"host": "mac.tail.ts.net", "user": "paul", "script": "~/bin/announce hi"}}
+/// ]}
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShortcutSpec {
+    pub name: String,
+    pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    /// Run a HomeKit scene; `home` and `scene` are names or UUIDs.
+    Scene {
+        home: String,
+        scene: String,
+    },
+    DelaySeconds(f64),
+    Speak(String),
+    OpenUrl(String),
+    /// Run Script Over SSH. The password is asked for in Shortcuts on the
+    /// first run; it is never part of the file.
+    Ssh {
+        host: String,
+        user: String,
+        script: String,
+        #[serde(default)]
+        port: Option<u16>,
+    },
+}
+
+pub fn parse_spec(json: &str) -> anyhow::Result<ShortcutSpec> {
+    let spec: ShortcutSpec =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid shortcut spec: {e}"))?;
+    if spec.name.trim().is_empty() {
+        anyhow::bail!("shortcut spec needs a non-empty name");
+    }
+    if spec.steps.is_empty() {
+        anyhow::bail!("shortcut spec '{}' has no steps", spec.name);
+    }
+    Ok(spec)
+}
+
+/// `./<name>.shortcut`, with path separators in the name flattened.
+pub fn default_output(name: &str) -> String {
+    format!("./{}.shortcut", name.replace(['/', ':'], "-"))
+}
+
+/// A step with every name turned into the identifier the file needs.
+#[derive(Debug, Clone, PartialEq)]
+enum ResolvedStep {
+    Scene {
+        home_id: Uuid,
+        scene_id: Uuid,
+    },
+    Delay(f64),
+    Speak(String),
+    OpenUrl(String),
+    Ssh {
+        host: String,
+        user: String,
+        script: String,
+        port: u16,
+    },
+}
+
+fn resolve_steps(spec: &ShortcutSpec, homes: &[home::Home]) -> anyhow::Result<Vec<ResolvedStep>> {
+    spec.steps
+        .iter()
+        .map(|step| {
+            Ok(match step {
+                Step::Scene { home, scene } => {
+                    let home = home::find_home(homes, home)?;
+                    let scene = home::find_scene(home, scene)?;
+                    ResolvedStep::Scene {
+                        home_id: Uuid::parse_str(&home.id).map_err(|e| {
+                            anyhow::anyhow!("home '{}' id {}: {e}", home.name, home.id)
+                        })?,
+                        scene_id: Uuid::parse_str(&scene.id).map_err(|e| {
+                            anyhow::anyhow!("scene '{}' id {}: {e}", scene.name, scene.id)
+                        })?,
+                    }
+                }
+                Step::DelaySeconds(seconds) => ResolvedStep::Delay(*seconds),
+                Step::Speak(text) => ResolvedStep::Speak(text.clone()),
+                Step::OpenUrl(url) => ResolvedStep::OpenUrl(url.clone()),
+                Step::Ssh {
+                    host,
+                    user,
+                    script,
+                    port,
+                } => ResolvedStep::Ssh {
+                    host: host.clone(),
+                    user: user.clone(),
+                    script: script.clone(),
+                    port: port.unwrap_or(22),
+                },
+            })
+        })
+        .collect()
+}
+
+/// The `HMActionSetSerializedData` protobuf for running a scene: field 4 =
+/// scene UUID bytes, field 5 = home UUID bytes. Inverse of
+/// `decode_action_set_ref`.
+fn encode_scene_ref(scene_id: &Uuid, home_id: &Uuid) -> Vec<u8> {
+    let mut out = Vec::with_capacity(36);
+    out.push(0x22);
+    out.push(16);
+    out.extend_from_slice(scene_id.as_bytes());
+    out.push(0x2a);
+    out.push(16);
+    out.extend_from_slice(home_id.as_bytes());
+    out
+}
+
+fn uppercase(id: &Uuid) -> String {
+    id.hyphenated().to_string().to_uppercase()
+}
+
+fn string_value(s: &str) -> Value {
+    Value::String(s.to_string())
+}
+
+fn action(identifier: &str, params: Dictionary) -> Value {
+    let mut out = Dictionary::new();
+    out.insert(
+        "WFWorkflowActionIdentifier".into(),
+        string_value(identifier),
+    );
+    out.insert(
+        "WFWorkflowActionParameters".into(),
+        Value::Dictionary(params),
+    );
+    Value::Dictionary(out)
+}
+
+fn build_action(step: &ResolvedStep) -> Value {
+    let mut params = Dictionary::new();
+    match step {
+        ResolvedStep::Scene { home_id, scene_id } => {
+            let mut set = Dictionary::new();
+            set.insert(
+                "HMActionSetSerializedData".into(),
+                Value::Data(encode_scene_ref(scene_id, home_id)),
+            );
+            set.insert(
+                "HMActionSetSerializedDictionaryProtocol".into(),
+                string_value("ProtoBuf"),
+            );
+            set.insert(
+                "HMActionSetSerializedDictionaryVersion".into(),
+                string_value("1.0"),
+            );
+            let mut trigger = Dictionary::new();
+            trigger.insert(
+                "WFHFTriggerActionSetsBuilderParameterStateActionSets".into(),
+                Value::Array(vec![Value::Dictionary(set)]),
+            );
+            trigger.insert(
+                "WFHFTriggerActionSetsBuilderParameterStateHome".into(),
+                string_value(&uppercase(home_id)),
+            );
+            params.insert("UUID".into(), string_value(&uppercase(&Uuid::new_v4())));
+            params.insert("WFHomeTriggerActionSets".into(), Value::Dictionary(trigger));
+            action(HOME_ACTION, params)
+        }
+        ResolvedStep::Delay(seconds) => {
+            params.insert("WFDelayTime".into(), Value::Real(*seconds));
+            action("is.workflow.actions.delay", params)
+        }
+        ResolvedStep::Speak(text) => {
+            params.insert("WFText".into(), string_value(text));
+            action("is.workflow.actions.speaktext", params)
+        }
+        ResolvedStep::OpenUrl(url) => {
+            params.insert("WFInput".into(), string_value(url));
+            action("is.workflow.actions.openurl", params)
+        }
+        ResolvedStep::Ssh {
+            host,
+            user,
+            script,
+            port,
+        } => {
+            params.insert("WFSSHHost".into(), string_value(host));
+            params.insert("WFSSHPort".into(), string_value(&port.to_string()));
+            params.insert("WFSSHUser".into(), string_value(user));
+            params.insert("WFSSHScript".into(), string_value(script));
+            params.insert("WFSSHAuthenticationType".into(), string_value("Password"));
+            action("is.workflow.actions.runsshscript", params)
+        }
+    }
+}
+
+/// The complete `.shortcut` plist for a name and its resolved steps.
+fn build_workflow(name: &str, steps: &[ResolvedStep]) -> Value {
+    let mut icon = Dictionary::new();
+    icon.insert(
+        "WFWorkflowIconStartColor".into(),
+        Value::Integer(4_282_601_983u64.into()),
+    );
+    icon.insert(
+        "WFWorkflowIconGlyphNumber".into(),
+        Value::Integer(59_511u64.into()),
+    );
+
+    let mut out = Dictionary::new();
+    out.insert(
+        "WFWorkflowActions".into(),
+        Value::Array(steps.iter().map(build_action).collect()),
+    );
+    out.insert("WFWorkflowName".into(), string_value(name));
+    out.insert("WFWorkflowClientVersion".into(), string_value("2607.0.3"));
+    out.insert(
+        "WFWorkflowMinimumClientVersion".into(),
+        Value::Integer(900u64.into()),
+    );
+    out.insert(
+        "WFWorkflowMinimumClientVersionString".into(),
+        string_value("900"),
+    );
+    out.insert("WFWorkflowIcon".into(), Value::Dictionary(icon));
+    out.insert(
+        "WFWorkflowTypes".into(),
+        Value::Array(vec![string_value("NCWidget"), string_value("WatchKit")]),
+    );
+    out.insert(
+        "WFWorkflowInputContentItemClasses".into(),
+        Value::Array(Vec::new()),
+    );
+    out.insert("WFWorkflowImportQuestions".into(), Value::Array(Vec::new()));
+    out.insert(
+        "WFWorkflowHasShortcutInputVariables".into(),
+        Value::Boolean(false),
+    );
+    out.insert("WFWorkflowHasOutputFallback".into(), Value::Boolean(false));
+    out.insert(
+        "WFWorkflowOutputContentItemClasses".into(),
+        Value::Array(Vec::new()),
+    );
+    Value::Dictionary(out)
+}
+
+/// Write `spec` as a `.shortcut` file at `output`, optionally signed for
+/// anyone via `shortcuts sign`. Scene steps are resolved against the Home
+/// app cache, so those need `cider home` to work first.
+pub async fn gen(spec: &ShortcutSpec, output: &str, sign_it: bool) -> anyhow::Result<ActionResult> {
+    let needs_homes = spec.steps.iter().any(|s| matches!(s, Step::Scene { .. }));
+    let homes = if needs_homes {
+        home::list().await?
+    } else {
+        Vec::new()
+    };
+    let steps = resolve_steps(spec, &homes)?;
+    let workflow = build_workflow(&spec.name, &steps);
+
+    let mut bytes = Vec::new();
+    workflow
+        .to_writer_binary(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("failed to encode shortcut plist: {e}"))?;
+
+    if sign_it {
+        let unsigned = std::env::temp_dir().join(format!("cider-{}.shortcut", Uuid::new_v4()));
+        let unsigned_path = unsigned.to_string_lossy().into_owned();
+        tokio::fs::write(&unsigned, &bytes).await?;
+        let signed = sign(&unsigned_path, output, Some("anyone")).await;
+        let _ = tokio::fs::remove_file(&unsigned).await;
+        signed?;
+        Ok(ActionResult::success_with_message(
+            "gen",
+            &format!(
+                "Generated and signed shortcut '{}' ({} actions) at '{output}'",
+                spec.name,
+                steps.len()
+            ),
+        ))
+    } else {
+        tokio::fs::write(output, &bytes).await?;
+        Ok(ActionResult::success_with_message(
+            "gen",
+            &format!(
+                "Generated unsigned shortcut '{}' ({} actions) at '{output}'; sign it with --sign or `cider shortcuts sign` before importing",
+                spec.name,
+                steps.len()
+            ),
+        ))
+    }
+}
+
+/// Hand a `.shortcut` file to the Shortcuts app, which asks the user to add it.
+pub async fn install(input: &str) -> anyhow::Result<ActionResult> {
+    if tokio::fs::metadata(input).await.is_err() {
+        anyhow::bail!("shortcut file not found: {input}");
+    }
+    run_command_with_timeout("open", &[input], Duration::from_secs(15)).await?;
+    Ok(ActionResult::success_with_message(
+        "install",
+        &format!("Opened '{input}' in Shortcuts; confirm the \"Add Shortcut\" prompt there to finish installing"),
+    ))
+}
+
 fn parse_output(output: &str) -> Vec<Shortcut> {
     output
         .lines()
@@ -466,6 +778,252 @@ mod tests {
         );
         assert_eq!(json[1]["WFWorkflowActionParameters"]["WFDelayTime"], 600.0);
         assert!(decode_actions(b"not a plist").is_err());
+    }
+
+    fn sample_homes() -> Vec<home::Home> {
+        home::map_cache(&serde_json::json!({
+            "kHomeDataKey": [{
+                "homeName": "2183 26th Ave",
+                "homeUUID": "CB31865C-3CAE-44E4-87FE-AC8F9C9BD81A",
+                "builtinActionSets": [{
+                    "actionSetName": "Good Night",
+                    "actionSetUUID": "E8AE569A-F872-5352-B271-26871610859D",
+                    "actionSetActions": [{}]
+                }]
+            }]
+        }))
+    }
+
+    #[test]
+    fn spec_parses_every_step_kind() {
+        let spec = parse_spec(
+            r#"{"name": "River: Night", "steps": [
+                {"scene": {"home": "2183 26th Ave", "scene": "Good Night"}},
+                {"delay_seconds": 600},
+                {"speak": "Good night"},
+                {"open_url": "https://example.com"},
+                {"ssh": {"host": "mac.tail.ts.net", "user": "paul", "script": "~/bin/announce hi"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.name, "River: Night");
+        assert_eq!(spec.steps.len(), 5);
+        assert!(
+            matches!(&spec.steps[0], Step::Scene { home, scene } if home == "2183 26th Ave" && scene == "Good Night")
+        );
+        assert!(matches!(spec.steps[1], Step::DelaySeconds(s) if s == 600.0));
+        assert!(matches!(&spec.steps[2], Step::Speak(t) if t == "Good night"));
+        assert!(matches!(&spec.steps[3], Step::OpenUrl(u) if u == "https://example.com"));
+        assert!(matches!(&spec.steps[4], Step::Ssh { port: None, .. }));
+
+        assert!(parse_spec(r#"{"name": "x", "steps": []}"#).is_err());
+        assert!(parse_spec(r#"{"name": "", "steps": [{"speak": "hi"}]}"#).is_err());
+        assert!(parse_spec(r#"{"name": "x", "steps": [{"bogus": 1}]}"#).is_err());
+        assert_eq!(default_output("River: Night"), "./River- Night.shortcut");
+    }
+
+    #[test]
+    fn scene_ref_encoder_round_trips_with_decoder() {
+        let scene = Uuid::parse_str("E8AE569A-F872-5352-B271-26871610859D").unwrap();
+        let home = Uuid::parse_str("CB31865C-3CAE-44E4-87FE-AC8F9C9BD81A").unwrap();
+        let bytes = encode_scene_ref(&scene, &home);
+        assert_eq!(bytes, hex_decode(GOOD_NIGHT_BLOB).unwrap());
+        let decoded = decode_action_set_ref(&bytes).unwrap();
+        assert_eq!(
+            decoded.get("scene_id").and_then(Value::as_string),
+            Some("E8AE569A-F872-5352-B271-26871610859D")
+        );
+        assert_eq!(
+            decoded.get("home_id").and_then(Value::as_string),
+            Some("CB31865C-3CAE-44E4-87FE-AC8F9C9BD81A")
+        );
+    }
+
+    #[test]
+    fn scene_action_has_the_exact_key_set() {
+        let spec = parse_spec(
+            r#"{"name": "n", "steps": [{"scene": {"home": "2183 26th ave", "scene": "good night"}}]}"#,
+        )
+        .unwrap();
+        let steps = resolve_steps(&spec, &sample_homes()).unwrap();
+        let action = build_action(&steps[0]);
+        let action = action.as_dictionary().unwrap();
+        let mut keys: Vec<&str> = action.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["WFWorkflowActionIdentifier", "WFWorkflowActionParameters"]
+        );
+        assert_eq!(
+            action
+                .get("WFWorkflowActionIdentifier")
+                .and_then(Value::as_string),
+            Some(HOME_ACTION)
+        );
+
+        let params = action
+            .get("WFWorkflowActionParameters")
+            .and_then(Value::as_dictionary)
+            .unwrap();
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["UUID", "WFHomeTriggerActionSets"]);
+        let uuid = params.get("UUID").and_then(Value::as_string).unwrap();
+        assert_eq!(uuid, uuid.to_uppercase());
+        assert!(Uuid::parse_str(uuid).is_ok());
+
+        let trigger = params
+            .get("WFHomeTriggerActionSets")
+            .and_then(Value::as_dictionary)
+            .unwrap();
+        let mut keys: Vec<&str> = trigger.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "WFHFTriggerActionSetsBuilderParameterStateActionSets",
+                "WFHFTriggerActionSetsBuilderParameterStateHome"
+            ]
+        );
+        assert_eq!(
+            trigger
+                .get("WFHFTriggerActionSetsBuilderParameterStateHome")
+                .and_then(Value::as_string),
+            Some("CB31865C-3CAE-44E4-87FE-AC8F9C9BD81A")
+        );
+
+        let sets = trigger
+            .get("WFHFTriggerActionSetsBuilderParameterStateActionSets")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(sets.len(), 1);
+        let set = sets[0].as_dictionary().unwrap();
+        let mut keys: Vec<&str> = set.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "HMActionSetSerializedData",
+                "HMActionSetSerializedDictionaryProtocol",
+                "HMActionSetSerializedDictionaryVersion"
+            ]
+        );
+        assert_eq!(
+            set.get("HMActionSetSerializedData")
+                .and_then(Value::as_data),
+            Some(hex_decode(GOOD_NIGHT_BLOB).unwrap().as_slice())
+        );
+        assert_eq!(
+            set.get("HMActionSetSerializedDictionaryProtocol")
+                .and_then(Value::as_string),
+            Some("ProtoBuf")
+        );
+        assert_eq!(
+            set.get("HMActionSetSerializedDictionaryVersion")
+                .and_then(Value::as_string),
+            Some("1.0")
+        );
+    }
+
+    #[test]
+    fn unknown_scene_or_home_is_an_error() {
+        let spec =
+            parse_spec(r#"{"name": "n", "steps": [{"scene": {"home": "Nope", "scene": "x"}}]}"#)
+                .unwrap();
+        let err = resolve_steps(&spec, &sample_homes()).unwrap_err();
+        assert!(err.to_string().contains("no home matches 'Nope'"));
+        let spec = parse_spec(
+            r#"{"name": "n", "steps": [{"scene": {"home": "2183 26th Ave", "scene": "x"}}]}"#,
+        )
+        .unwrap();
+        let err = resolve_steps(&spec, &sample_homes()).unwrap_err();
+        assert!(err.to_string().contains("no scene matches 'x'"));
+    }
+
+    #[test]
+    fn workflow_has_standard_envelope_and_one_action_per_step() {
+        let spec = parse_spec(
+            r#"{"name": "Night", "steps": [
+                {"delay_seconds": 1.5}, {"speak": "hi"}, {"open_url": "https://x"},
+                {"ssh": {"host": "h", "user": "u", "script": "s", "port": 2222}}
+            ]}"#,
+        )
+        .unwrap();
+        let steps = resolve_steps(&spec, &[]).unwrap();
+        let workflow = build_workflow(&spec.name, &steps);
+        let dict = workflow.as_dictionary().unwrap();
+        let mut keys: Vec<&str> = dict.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "WFWorkflowActions",
+                "WFWorkflowClientVersion",
+                "WFWorkflowHasOutputFallback",
+                "WFWorkflowHasShortcutInputVariables",
+                "WFWorkflowIcon",
+                "WFWorkflowImportQuestions",
+                "WFWorkflowInputContentItemClasses",
+                "WFWorkflowMinimumClientVersion",
+                "WFWorkflowMinimumClientVersionString",
+                "WFWorkflowName",
+                "WFWorkflowOutputContentItemClasses",
+                "WFWorkflowTypes"
+            ]
+        );
+        assert_eq!(
+            dict.get("WFWorkflowName").and_then(Value::as_string),
+            Some("Night")
+        );
+        assert_eq!(
+            dict.get("WFWorkflowMinimumClientVersion")
+                .and_then(Value::as_unsigned_integer),
+            Some(900)
+        );
+
+        let actions = dict
+            .get("WFWorkflowActions")
+            .and_then(Value::as_array)
+            .unwrap();
+        let ids: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| {
+                a.as_dictionary()?
+                    .get("WFWorkflowActionIdentifier")?
+                    .as_string()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "is.workflow.actions.delay",
+                "is.workflow.actions.speaktext",
+                "is.workflow.actions.openurl",
+                "is.workflow.actions.runsshscript"
+            ]
+        );
+        let param = |i: usize, key: &str| {
+            actions[i]
+                .as_dictionary()?
+                .get("WFWorkflowActionParameters")?
+                .as_dictionary()?
+                .get(key)
+                .cloned()
+        };
+        assert_eq!(param(0, "WFDelayTime"), Some(Value::Real(1.5)));
+        assert_eq!(param(1, "WFText"), Some(string_value("hi")));
+        assert_eq!(param(2, "WFInput"), Some(string_value("https://x")));
+        assert_eq!(param(3, "WFSSHPort"), Some(string_value("2222")));
+        assert_eq!(
+            param(3, "WFSSHAuthenticationType"),
+            Some(string_value("Password"))
+        );
+
+        // It must survive a binary round trip.
+        let mut bytes = Vec::new();
+        workflow.to_writer_binary(&mut bytes).unwrap();
+        let back = Value::from_reader(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(back, workflow);
     }
 
     #[test]

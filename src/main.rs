@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -833,6 +833,24 @@ enum ShortcutsAction {
         /// Shortcut name
         #[arg(long)]
         name: String,
+    },
+    /// Build a .shortcut file from a JSON spec (scene, delay_seconds, speak, open_url, ssh steps)
+    Gen {
+        /// Spec file path, or - for stdin
+        #[arg(long)]
+        spec: String,
+        /// Output .shortcut path (default: ./<name>.shortcut)
+        #[arg(long)]
+        output: Option<String>,
+        /// Sign the file for anyone so Shortcuts will import it
+        #[arg(long)]
+        sign: bool,
+    },
+    /// Open a .shortcut file in Shortcuts, which prompts to add it
+    Install {
+        /// Path to a signed .shortcut file
+        #[arg(long)]
+        input: String,
     },
     /// Sign a shortcut file
     Sign {
@@ -2517,6 +2535,47 @@ async fn run() -> anyhow::Result<()> {
             Some(ShortcutsAction::Export { name }) => {
                 let result = sources::shortcuts::export(&name).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+            }
+            Some(ShortcutsAction::Gen { spec, output, sign }) => {
+                let json = if spec == "-" {
+                    let mut buf = String::new();
+                    io::stdin().read_to_string(&mut buf)?;
+                    buf
+                } else {
+                    std::fs::read_to_string(&spec)?
+                };
+                let spec = sources::shortcuts::parse_spec(&json)?;
+                let output =
+                    output.unwrap_or_else(|| sources::shortcuts::default_output(&spec.name));
+                if cli.no_op {
+                    print_dry_run(
+                        "shortcuts.gen",
+                        format!(
+                            "Would generate {}shortcut '{}' ({} steps) at '{output}'",
+                            if sign { "signed " } else { "" },
+                            spec.name,
+                            spec.steps.len()
+                        ),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::shortcuts::gen(&spec, &output, sign).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(ShortcutsAction::Install { input }) => {
+                if cli.no_op {
+                    print_dry_run(
+                        "shortcuts.install",
+                        format!("Would open '{input}' in Shortcuts to add it"),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::shortcuts::install(&input).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
             }
             Some(ShortcutsAction::Sign {
                 input,
