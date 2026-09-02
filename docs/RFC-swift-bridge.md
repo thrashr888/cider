@@ -126,3 +126,17 @@ There is no API to *ask* Siri anything from a process. What exists:
 Not possible: sending a query to Siri, reading Siri's history, changing Siri settings.
 
 Order: iCloud (no Swift, can land now), Maps + location (native CLI), Siri App Shortcuts + speech (bridge app + native CLI).
+
+## Hardening before more apps (2026-09-02)
+
+Decision: no new sources until the batch shipped on 2026-09-01/02 is verified and robust. The gaps, each a bead:
+
+**Never exercised for real** — writes via `cider-bridge` (dry-run and stub only); `home set`; a timer trigger seen in the Home app and firing; shortcuts `delay|speak|open_url|ssh` steps; `icloud download|evict`; `watch` with a real store change; `weather --home "River House"`. Calendar reads through the CLI are blocked until the launching app has Full Access.
+
+**Robustness** — no protocol version handshake (a stale app answers "unknown command"); the dev profile expires 2027-09-02 with no warning path; the app has no log file; the socket trusts any local process (0600 only); cache reads do not report their age; home ids differ between cache and bridge while scene ids match; `--since` rejects bare dates; byte-level `head` prints a broken-pipe envelope.
+
+**Tests and CI** — CI never builds or tests Swift; the live suite skips every bridge path and now launches the app as a side effect; Rust and Swift each test against their own stubs with no shared fixtures.
+
+**Docs and release** — README carries two bridge sections from different agents; Homebrew users cannot get the bridge and are not told; no release since 0.5.0.
+
+Order: real writes and the Home-app trigger check first (they decide whether the design holds), then the version handshake and CI, then docs and the 0.6.0 release. Maps and Siri wait behind all of it.
