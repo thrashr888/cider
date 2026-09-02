@@ -100,3 +100,29 @@ Enable HomeKit (and WeatherKit, if wanted) on the App ID `dev.thrasher.cider.bri
 ## Not doing
 
 Distributing the signed app. A Homebrew formula for cider stays Rust-only; the bridge is `cider bridge build` on the user's own Mac. No background daemon: the app is launched by cider and exits on idle. No Notes, Messages, or Find My: no framework exists.
+
+## Addendum (2026-09-02): Maps, iCloud, Siri
+
+Asked for by the user; assessed against what Apple actually exposes.
+
+### Maps — yes, through the bridge (phase 6)
+`MapKit` and `CoreLocation` on native macOS need no special entitlement, only a signed binary with usage strings, so this is native CLI work in `cider-bridge`:
+- `maps.search {query, near? {lat,lon}, limit?}` (`MKLocalSearch`), `maps.geocode {address}` / `maps.reverse {lat, lon}` (`CLGeocoder`), `maps.directions {from, to, mode: driving|walking|transit, depart_at?}` (`MKDirections`: ETA, distance, steps), `maps.eta {from, to, mode}` (cheap `calculateETA`).
+- `location.current` (`CLLocationManager`, Location permission): the Mac's own position. This is the house-detection signal the household brain wanted.
+- `maps.open {to, from?, mode?}`: Rust-only, the `maps://` URL scheme, no bridge needed.
+Not possible: Maps bookmarks, favorites, guides, recents. No public API; that is why the old `maps` command was removed.
+
+### iCloud — partly, Rust-only (phase 7)
+Apple ships `/usr/bin/brctl` for iCloud Drive, and the account list lives in the `MobileMeAccounts` defaults domain. So `cider icloud`:
+- `account`: Apple ID, display name, which services are on (`defaults read MobileMeAccounts`).
+- `quota` (`brctl quota`), `status`/`log` (`brctl status`, `brctl log`), `download <path>` / `evict <path>` (`brctl download|evict`), `list [--folder] [--state]` (iCloud Drive root with per-file download state from the `com.apple.icloud.*` extended attributes and `.icloud` placeholders).
+Not possible: Family Sharing, iCloud+ features, storage plan changes, Keychain sync, Photos sync settings, Find My. No API, and most of it is server-side.
+
+### Siri — one direction only (phase 8)
+There is no API to *ask* Siri anything from a process. What exists:
+- **Give cider to Siri.** The bridge app declares App Shortcuts (`AppShortcutsProvider` + an `AppIntent` such as "Ask Cider ‹query›" and "Run Cider ‹command›"). Siri picks the phrases up from the installed app without the user building a shortcut; the intent shells out to `cider` (or to the household brain's `Ask House` script) and speaks the result. This is the sanctioned way to put a voice front end on cider, and it is what the household RFC's "Ask House" shortcut was approximating by hand.
+- **Speech to text.** `Speech.framework` (`SFSpeechRecognizer`, and the newer on-device `SpeechAnalyzer` on this OS) in the native CLI: `speech.transcribe {file}` and `speech.listen {seconds}`. Useful for Voice Memos and for a push-to-talk path into cider.
+- **Text to speech** already exists via `say`; Siri's own voices are not available to third parties.
+Not possible: sending a query to Siri, reading Siri's history, changing Siri settings.
+
+Order: iCloud (no Swift, can land now), Maps + location (native CLI), Siri App Shortcuts + speech (bridge app + native CLI).
