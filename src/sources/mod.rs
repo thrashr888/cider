@@ -10,7 +10,6 @@ pub mod contacts;
 pub mod disks;
 pub mod doctor;
 pub mod facetime;
-pub mod find_my;
 pub mod fonts;
 pub mod home;
 pub mod journal;

@@ -79,9 +79,6 @@ enum Commands {
         #[command(subcommand)]
         action: Option<FaceTimeAction>,
     },
-    /// Fetch devices from Find My
-    #[command(name = "find-my")]
-    FindMy,
     /// List installed fonts (Font Book)
     Fonts,
     /// List HomeKit accessories (Home)
@@ -1628,7 +1625,6 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::facetime::list(limit), cli.pretty, cli.envelope)
             }
         },
-        Commands::FindMy => run_source!(sources::find_my::fetch(), cli.pretty, cli.envelope),
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty, cli.envelope),
         Commands::Home => run_source!(sources::home::fetch(), cli.pretty, cli.envelope),
         Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty, cli.envelope),
