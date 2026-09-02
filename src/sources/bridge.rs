@@ -37,6 +37,12 @@ use super::util::{run_command_with_timeout, ActionResult};
 /// ([`versions_compatible`]), and a bridge that answers `unknown command`
 /// is treated as a mismatch too, since that is what a stale one looks like.
 pub const BRIDGE_PROTOCOL_VERSION: &str = "0.1.0";
+/// What a `home` live command says when the bridge it reached has no
+/// HomeKit entitlement (`ping.data.homekit_entitled == false`), which is
+/// every packaged build.
+pub const HOMEKIT_UNAVAILABLE_MESSAGE: &str = "the packaged Cider Bridge has no HomeKit \
+    entitlement (Apple allows it only in App Store or development builds); build a personal \
+    bridge with `cider bridge build --install` (needs Xcode and an Apple Developer team)";
 /// The app bundle's file name, wherever it is installed.
 pub const APP_NAME: &str = "Cider Bridge.app";
 /// Environment variable naming an app bundle outside the standard folders.
@@ -443,6 +449,10 @@ pub struct BridgeStatus {
     /// `true` when `CIDER_BRIDGE_CLI=off` forces the AppleScript/JXA path.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cli_disabled: bool,
+    /// Per-store TCC state from `cider-bridge ping`, with fixes; absent
+    /// when the CLI is not installed or did not answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_authorization: Option<super::bridge_cli::StoreAuthorization>,
     /// `bridge/scripts/build.sh` from the checkout this binary was built in,
     /// when it exists; `cider bridge build` needs it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -476,6 +486,9 @@ pub async fn status() -> BridgeStatus {
         cli_installed: cli.is_some(),
         cli_path: cli.map(|p| p.to_string_lossy().into_owned()),
         cli_disabled: super::bridge_cli::is_disabled(),
+        cli_authorization: cli_pong
+            .as_ref()
+            .map(super::bridge_cli::StoreAuthorization::from_ping),
         build_script: build_script_path().map(|p| p.to_string_lossy().into_owned()),
     }
 }

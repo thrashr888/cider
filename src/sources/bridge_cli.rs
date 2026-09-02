@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -193,6 +194,90 @@ async fn call_raw(
 /// or did not answer.
 pub async fn ping() -> Option<Json> {
     ping_at(&cli_path()?).await
+}
+
+/// What `cider-bridge ping` says about TCC, verbatim, plus the fix for
+/// each store that is not fully granted. Shown by `cider bridge status`
+/// and `cider doctor` (`bridge_authorization`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StoreAuthorization {
+    /// EventKit's status for events: `full_access`, `write_only`,
+    /// `denied`, `restricted`, `not_determined`.
+    pub calendar: String,
+    /// EventKit's status for reminders; same vocabulary.
+    pub reminders: String,
+    /// Contacts' status: `authorized`, `limited`, `denied`, `restricted`,
+    /// `not_determined`.
+    pub contacts: String,
+    /// `launcher` when TCC attributes the CLI's requests to the app that
+    /// launched cider (Terminal, an agent runner), `cider-bridge` when it
+    /// disclaims that responsibility and is prompted for itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcc_subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    /// One line per store that needs attention, naming the System Settings
+    /// pane and what to grant.
+    pub fixes: Vec<String>,
+}
+
+impl StoreAuthorization {
+    pub fn from_ping(pong: &Json) -> Self {
+        let field = |key: &str| pong.get(key).and_then(Json::as_str).map(str::to_string);
+        let calendar = field("calendar").unwrap_or_else(|| "unknown".into());
+        let reminders = field("reminders").unwrap_or_else(|| "unknown".into());
+        let contacts = field("contacts").unwrap_or_else(|| "unknown".into());
+        let tcc_subject = field("tcc_subject");
+        let grantee = match tcc_subject.as_deref() {
+            Some("cider-bridge") => "cider-bridge".to_string(),
+            _ => "the app that launches cider (Terminal, iTerm, or your agent runner)".to_string(),
+        };
+        let mut fixes = Vec::new();
+        for (store, status, pane, want) in [
+            ("calendar", &calendar, "Calendars", "Full Access"),
+            ("reminders", &reminders, "Reminders", "Full Access"),
+            ("contacts", &contacts, "Contacts", "access"),
+        ] {
+            let fix = match status.as_str() {
+                "full_access" | "authorized" | "unknown" => continue,
+                "not_determined" => format!(
+                    "{store} is not_determined: the first `cider {store}` call through \
+                     cider-bridge will prompt; grant {want} to {grantee}"
+                ),
+                other => format!(
+                    "{store} is {other}: System Settings › Privacy & Security › {pane}, grant \
+                     {want} to {grantee}"
+                ),
+            };
+            fixes.push(fix);
+        }
+        Self {
+            calendar,
+            reminders,
+            contacts,
+            tcc_subject,
+            executable: field("executable"),
+            fixes,
+        }
+    }
+
+    /// Every store fully granted.
+    pub fn all_granted(&self) -> bool {
+        self.fixes.is_empty()
+    }
+
+    /// Any store outright refused (`denied`, `restricted`, `add_only`,
+    /// `write_only`, `limited`), as opposed to merely not asked yet.
+    pub fn any_denied(&self) -> bool {
+        [&self.calendar, &self.reminders, &self.contacts]
+            .into_iter()
+            .any(|s| {
+                !matches!(
+                    s.as_str(),
+                    "full_access" | "authorized" | "not_determined" | "unknown"
+                )
+            })
+    }
 }
 
 /// [`ping`] against an explicit executable.
@@ -755,6 +840,48 @@ esac
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn store_authorization_summarizes_ping_verbatim_with_fixes() {
+        let auth = StoreAuthorization::from_ping(&json!({
+            "version": "0.1.0", "calendar": "not_determined", "reminders": "full_access",
+            "contacts": "denied", "executable": "/x/cider-bridge", "tcc_subject": "launcher"
+        }));
+        assert_eq!(auth.calendar, "not_determined");
+        assert_eq!(auth.reminders, "full_access");
+        assert_eq!(auth.contacts, "denied");
+        assert!(!auth.all_granted());
+        assert!(auth.any_denied());
+        assert_eq!(auth.fixes.len(), 2);
+        assert!(
+            auth.fixes[0].starts_with("calendar is not_determined"),
+            "{:?}",
+            auth.fixes
+        );
+        assert!(
+            auth.fixes[1].contains("Privacy & Security › Contacts"),
+            "{:?}",
+            auth.fixes
+        );
+        let json = serde_json::to_value(&auth).unwrap();
+        assert_eq!(json["tcc_subject"], "launcher");
+        assert_eq!(json["fixes"].as_array().unwrap().len(), 2);
+
+        let granted = StoreAuthorization::from_ping(&json!({
+            "calendar": "full_access", "reminders": "full_access", "contacts": "authorized"
+        }));
+        assert!(granted.all_granted());
+        assert!(!granted.any_denied());
+        assert!(serde_json::to_value(&granted)
+            .unwrap()
+            .get("executable")
+            .is_none());
+
+        // A ping without the fields (an older CLI) is unknown, not a problem.
+        let unknown = StoreAuthorization::from_ping(&json!({"version": "0.0.1"}));
+        assert_eq!(unknown.calendar, "unknown");
+        assert!(unknown.all_granted());
     }
 
     #[test]
