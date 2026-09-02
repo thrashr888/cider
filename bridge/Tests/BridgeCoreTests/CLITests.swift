@@ -100,6 +100,41 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(events.filter { $0.source == .contacts }.count, 1)
     }
 
+    /// Only a stdin the launcher can close ends the watch. `/dev/null` (what
+    /// `Stdio::null()` and a detached shell provide) is at EOF immediately, so
+    /// honouring it ended the watch before any store change could arrive.
+    func testStdinEndsWatchOnlyForPipesSocketsAndTerminals() throws {
+        var pipeEnds: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeEnds), 0)
+        defer { pipeEnds.forEach { close($0) } }
+        XCTAssertTrue(WatchLifetime.stdinEndsWatch(fileDescriptor: pipeEnds[0]))
+
+        var socketEnds: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &socketEnds), 0)
+        defer { socketEnds.forEach { close($0) } }
+        XCTAssertTrue(WatchLifetime.stdinEndsWatch(fileDescriptor: socketEnds[0]))
+
+        let pty = posix_openpt(O_RDWR | O_NOCTTY)
+        if pty >= 0 {
+            defer { close(pty) }
+            XCTAssertTrue(WatchLifetime.stdinEndsWatch(fileDescriptor: pty))
+        }
+
+        let null = open("/dev/null", O_RDONLY)
+        XCTAssertGreaterThanOrEqual(null, 0)
+        defer { close(null) }
+        XCTAssertFalse(WatchLifetime.stdinEndsWatch(fileDescriptor: null), "/dev/null is EOF before the first read")
+
+        let (dir, path) = try temporarySocketPath()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = open(path, O_CREAT | O_RDWR, 0o600)
+        XCTAssertGreaterThanOrEqual(file, 0)
+        defer { close(file) }
+        XCTAssertFalse(WatchLifetime.stdinEndsWatch(fileDescriptor: file), "a regular file reaches EOF on its own")
+
+        XCTAssertFalse(WatchLifetime.stdinEndsWatch(fileDescriptor: -1), "a closed descriptor cannot signal anything")
+    }
+
     func testCoalescerCancelDropsPending() async throws {
         let box = EventBox()
         let coalescer = WatchCoalescer(window: .milliseconds(40)) { event in Task { await box.append(event) } }

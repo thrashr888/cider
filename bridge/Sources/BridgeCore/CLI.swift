@@ -159,6 +159,30 @@ public actor WatchCoalescer {
     }
 }
 
+// MARK: - Lifetime
+
+/// When a `watch` ends, besides `once`, SIGINT, and the launcher exiting.
+///
+/// The contract is "stream until stdin closes", and that only means something
+/// when stdin is a pipe, a socket, or a terminal: something the launcher holds
+/// and can close. `/dev/null` (what `Stdio::null()` and a detached shell hand
+/// us) is at EOF before the first read, a regular file reaches it after a few
+/// reads, and a closed descriptor never reads at all. Treating those as "stop"
+/// ended every such watch within milliseconds of the `watching` line, with
+/// exit 0 and no event ever emitted.
+public enum WatchLifetime {
+    /// Whether EOF on `fileDescriptor` should end the watch.
+    public static func stdinEndsWatch(fileDescriptor fd: Int32 = STDIN_FILENO) -> Bool {
+        var status = stat()
+        guard fstat(fd, &status) == 0 else { return false }
+        switch status.st_mode & S_IFMT {
+        case S_IFIFO, S_IFSOCK: return true
+        case S_IFCHR: return isatty(fd) == 1
+        default: return false
+        }
+    }
+}
+
 // MARK: - Store observation
 
 #if canImport(EventKit) && canImport(Contacts)
