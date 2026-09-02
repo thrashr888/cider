@@ -26,6 +26,12 @@
 	<true/>
 	<key>NSHomeKitUsageDescription</key>
 	<string>Cider Bridge reads and controls your HomeKit accessories, scenes, and automations on behalf of the cider command-line tool.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Cider Bridge reads and edits your calendar events on behalf of the cider command-line tool.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Cider Bridge reads and edits your reminders on behalf of the cider command-line tool.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Cider Bridge reads your contacts on behalf of the cider command-line tool.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

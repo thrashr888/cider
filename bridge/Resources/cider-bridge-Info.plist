@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.thrasher.cider.bridge.cli</string>
+	<key>CFBundleName</key>
+	<string>cider-bridge</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>cider-bridge reads and edits your calendar events on behalf of the cider command-line tool.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>cider-bridge reads and edits your reminders on behalf of the cider command-line tool.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>cider-bridge reads your contacts on behalf of the cider command-line tool.</string>
+</dict>
+</plist>

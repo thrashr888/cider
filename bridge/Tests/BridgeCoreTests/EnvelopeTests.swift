@@ -37,6 +37,7 @@ final class EnvelopeTests: XCTestCase {
         let cases: [(BridgeError, String)] = [
             (.notFound("a"), "not_found"), (.invalidArgs("a"), "invalid_args"),
             (.homekitDenied("a"), "homekit_denied"), (.homekitUnavailable("a"), "homekit_unavailable"),
+            (.permissionDenied("a"), "permission_denied"),
             (.timeout("a"), "timeout"), (.internalError("a"), "internal"),
         ]
         for (error, code) in cases {
