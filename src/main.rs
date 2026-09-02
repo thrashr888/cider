@@ -210,6 +210,10 @@ enum CalendarAction {
         /// Filter by calendar name
         #[arg(long)]
         calendar: Option<String>,
+        /// Only records modified at or after this RFC 3339 timestamp
+        /// (e.g. 2026-09-01T00:00:00Z)
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Create a new calendar event
     Create {
@@ -439,6 +443,10 @@ enum NotesAction {
         /// Skip note bodies — fast bulk listing of the whole library
         #[arg(long)]
         brief: bool,
+        /// Only records modified at or after this RFC 3339 timestamp
+        /// (e.g. 2026-09-01T00:00:00Z)
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Get a single note by ID
     Get {
@@ -496,6 +504,10 @@ enum RemindersAction {
         /// Include completed reminders
         #[arg(long)]
         include_completed: bool,
+        /// Only records modified at or after this RFC 3339 timestamp
+        /// (e.g. 2026-09-01T00:00:00Z)
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Create a new reminder
     Create {
@@ -731,6 +743,10 @@ enum MessagesAction {
         /// Limit the number of results returned
         #[arg(long)]
         limit: Option<usize>,
+        /// Only messages sent at or after this RFC 3339 timestamp
+        /// (e.g. 2026-09-01T00:00:00Z); replaces the --days window
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Send an iMessage/SMS
     Send {
@@ -1096,6 +1112,20 @@ fn print_batch_output(
     Ok(())
 }
 
+/// `--since` takes RFC 3339 only: the sources compare it against store
+/// timestamps, so it has to name an unambiguous instant (with an offset).
+fn parse_since(value: Option<&str>) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match chrono::DateTime::parse_from_rfc3339(value.trim()) {
+        Ok(dt) => Ok(Some(dt.with_timezone(&chrono::Utc))),
+        Err(_) => {
+            anyhow::bail!("--since must be RFC 3339, e.g. 2026-09-01T00:00:00Z (got {value:?})")
+        }
+    }
+}
+
 fn paginate_vec<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
     let offset = offset.unwrap_or(0);
     let iter = items.into_iter().skip(offset);
@@ -1342,7 +1372,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Calendar { action } => match action {
             None => {
                 run_source!(
-                    sources::calendar::list(None, None, None),
+                    sources::calendar::list(None, None, None, None),
                     cli.pretty,
                     cli.envelope
                 )
@@ -1351,9 +1381,11 @@ async fn run() -> anyhow::Result<()> {
                 days_back,
                 days_ahead,
                 calendar,
+                since,
             }) => {
+                let since = parse_since(since.as_deref())?;
                 run_source!(
-                    sources::calendar::list(days_back, days_ahead, calendar.as_deref()),
+                    sources::calendar::list(days_back, days_ahead, calendar.as_deref(), since),
                     cli.pretty,
                     cli.envelope
                 )
@@ -1837,14 +1869,17 @@ async fn run() -> anyhow::Result<()> {
         Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty, cli.envelope),
         Commands::Messages { action } => match action {
             None => {
-                run_source!(sources::messages::list(30), cli.pretty, cli.envelope)
+                run_source!(sources::messages::list(30, None), cli.pretty, cli.envelope)
             }
             Some(MessagesAction::List {
                 days,
                 offset,
                 limit,
+                since,
             }) => {
-                let records = paginate_vec(sources::messages::list(days).await?, offset, limit);
+                let since = parse_since(since.as_deref())?;
+                let records =
+                    paginate_vec(sources::messages::list(days, since).await?, offset, limit);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
             Some(MessagesAction::Send { to, text }) => {
@@ -2010,7 +2045,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Notes { action } => match action {
             None => {
                 run_source!(
-                    sources::notes::list(None, Some(50)),
+                    sources::notes::list(None, Some(50), None),
                     cli.pretty,
                     cli.envelope
                 )
@@ -2020,15 +2055,17 @@ async fn run() -> anyhow::Result<()> {
                 offset,
                 limit,
                 brief,
+                since,
             }) => {
+                let since = parse_since(since.as_deref())?;
                 // Bodies cost one Apple event per note, so the walk stops at
                 // offset+limit (default 50); --brief skips bodies and lists
                 // the whole library in bulk.
                 let records = if brief {
-                    sources::notes::list_brief(folder.as_deref()).await?
+                    sources::notes::list_brief(folder.as_deref(), since).await?
                 } else {
                     let cap = limit.map(|l| l + offset.unwrap_or(0)).or(Some(50));
-                    sources::notes::list(folder.as_deref(), cap).await?
+                    sources::notes::list(folder.as_deref(), cap, since).await?
                 };
                 let records = paginate_vec(records, offset, limit);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
@@ -2117,12 +2154,15 @@ async fn run() -> anyhow::Result<()> {
                 limit,
                 search,
                 include_completed,
+                since,
             }) => {
+                let since = parse_since(since.as_deref())?;
                 let records = paginate_vec(
                     sources::reminders::query(
                         list.as_deref(),
                         search.as_deref(),
                         include_completed,
+                        since,
                     )
                     .await?,
                     offset,
@@ -2591,6 +2631,34 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_since_accepts_rfc3339_and_normalizes_to_utc() {
+        assert!(parse_since(None).unwrap().is_none());
+        let utc = parse_since(Some("2026-09-01T00:00:00Z")).unwrap().unwrap();
+        assert_eq!(utc.to_rfc3339(), "2026-09-01T00:00:00+00:00");
+        let offset = parse_since(Some(" 2026-09-01T02:30:00+02:30 "))
+            .unwrap()
+            .unwrap();
+        assert_eq!(offset, utc, "offsets normalize to the same instant");
+    }
+
+    #[test]
+    fn parse_since_rejects_non_rfc3339() {
+        for bad in [
+            "2026-09-01",
+            "yesterday",
+            "2026-09-01 00:00:00",
+            "",
+            "1756684800",
+        ] {
+            let error = parse_since(Some(bad)).expect_err(bad).to_string();
+            assert!(
+                error.starts_with("--since must be RFC 3339, e.g. 2026-09-01T00:00:00Z"),
+                "{bad}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn schema_is_generated_for_every_top_level_command() {

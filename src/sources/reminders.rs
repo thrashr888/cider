@@ -1,8 +1,8 @@
 use super::util::{
-    escape_applescript, run_command_with_timeout, run_osascript_with_timeout, slug, ActionResult,
-    BatchActionResult, BatchItemResult, APPLE_EPOCH,
+    apple_json_date, apple_seconds, escape_applescript, modified_since, run_command_with_timeout,
+    run_osascript_with_timeout, slug, ActionResult, BatchActionResult, BatchItemResult,
 };
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 const ID_SCHEME: &str = "x-apple-reminder://";
@@ -150,10 +150,17 @@ LIMIT 500;
 
 /// List incomplete reminders, optionally filtered by list name.
 pub async fn list(list_filter: Option<&str>) -> anyhow::Result<Vec<Reminder>> {
-    query(list_filter, None, false).await
+    query(list_filter, None, false, None).await
 }
 
-/// Search reminders with optional list and completion filters.
+/// SQL narrowing to rows last modified at or after `since`. `ZLASTMODIFIEDDATE`
+/// is Apple-epoch seconds, so the comparison happens in the store's own unit.
+fn since_where(since: DateTime<Utc>) -> String {
+    format!("r.ZLASTMODIFIEDDATE >= {}", apple_seconds(since))
+}
+
+/// Search reminders with optional list, completion, and modified-since
+/// filters.
 ///
 /// This is separate from [`list`] so existing library callers keep the
 /// incomplete-only behavior while the CLI can expose a richer query.
@@ -161,19 +168,33 @@ pub async fn query(
     list_filter: Option<&str>,
     search: Option<&str>,
     include_completed: bool,
+    since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<Reminder>> {
-    let where_sql = search.map(|term| {
+    let mut clauses = Vec::new();
+    if let Some(term) = search {
         let term = escape_sql(term);
-        format!(
+        clauses.push(format!(
             "(LOWER(COALESCE(r.ZTITLE, '')) LIKE LOWER('%{term}%') OR LOWER(COALESCE(r.ZNOTES, '')) LIKE LOWER('%{term}%'))"
-        )
-    });
+        ));
+    }
+    if let Some(since) = since {
+        clauses.push(since_where(since));
+    }
+    let where_sql = if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join(" AND "))
+    };
     let mut all = fetch(include_completed, where_sql.as_deref()).await?;
 
     if let Some(filter) = list_filter {
         let filter_lower = filter.to_lowercase();
         all.retain(|r| r.list.to_lowercase() == filter_lower);
     }
+
+    // The SQL already narrowed on ZLASTMODIFIEDDATE; this pass keeps the
+    // result honest for any store whose column did not answer as expected.
+    all.retain(|r| modified_since(r.modified_at, since));
 
     Ok(all)
 }
@@ -616,22 +637,6 @@ pub async fn lists() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-fn apple_date(value: &serde_json::Value) -> Option<DateTime<chrono::Utc>> {
-    match value {
-        serde_json::Value::Number(n) => n
-            .as_f64()
-            .and_then(|ts| DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)),
-        serde_json::Value::String(s) => {
-            if let Ok(ts) = s.parse::<f64>() {
-                DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)
-            } else {
-                super::util::parse_plist_date(s)
-            }
-        }
-        _ => None,
-    }
-}
-
 fn parse_json_rows(output: &str) -> Vec<Reminder> {
     let output = output.trim();
     if output.is_empty() {
@@ -662,7 +667,7 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
         let flagged = row["flagged"].as_i64().unwrap_or(0) != 0;
         let is_all_day = row["all_day"].as_i64().unwrap_or(0) != 0;
 
-        let due_date = apple_date(&row["due"]);
+        let due_date = apple_json_date(&row["due"]);
 
         let notes = row["notes"]
             .as_str()
@@ -685,10 +690,10 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
             flagged,
             is_all_day,
             due_date,
-            start_date: apple_date(&row["start_date"]),
-            completion_date: apple_date(&row["completion_date"]),
-            created_at: apple_date(&row["created_at"]),
-            modified_at: apple_date(&row["modified_at"]),
+            start_date: apple_json_date(&row["start_date"]),
+            completion_date: apple_json_date(&row["completion_date"]),
+            created_at: apple_json_date(&row["created_at"]),
+            modified_at: apple_json_date(&row["modified_at"]),
             url: row["url"]
                 .as_str()
                 .map(str::trim)
@@ -758,6 +763,16 @@ mod tests {
     fn test_parse_json_rows_empty() {
         assert!(parse_json_rows("").is_empty());
         assert!(parse_json_rows("[]").is_empty());
+    }
+
+    /// `--since` narrows in SQL in the store's own unit (Apple-epoch seconds),
+    /// not on the 500-row result window.
+    #[test]
+    fn since_where_uses_apple_epoch_seconds() {
+        let since = DateTime::parse_from_rfc3339("2001-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(since_where(since), "r.ZLASTMODIFIEDDATE >= 86400");
     }
 
     /// The reason for `-json`: notes keep their newlines and full length,

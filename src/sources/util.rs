@@ -212,6 +212,46 @@ pub fn slug(s: &str) -> String {
 /// Apple epoch offset: seconds between Unix epoch and 2001-01-01.
 pub const APPLE_EPOCH: i64 = 978_307_200;
 
+/// Seconds since the Apple epoch for a UTC timestamp — the unit Core Data
+/// and EventKit stores keep their dates in.
+pub fn apple_seconds(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp() - APPLE_EPOCH
+}
+
+/// Nanoseconds since the Apple epoch — the unit Messages' `chat.db` keeps
+/// `message.date` in.
+pub fn apple_nanos(dt: DateTime<Utc>) -> i64 {
+    apple_seconds(dt) * 1_000_000_000
+}
+
+/// A date as `sqlite3 -json` or JXA emits it: Apple-epoch seconds (as a
+/// number or a numeric string) or an ISO 8601 string.
+pub fn apple_json_date(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .and_then(|ts| DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)),
+        serde_json::Value::String(s) => {
+            if let Ok(ts) = s.parse::<f64>() {
+                DateTime::from_timestamp(ts as i64 + APPLE_EPOCH, 0)
+            } else {
+                parse_plist_date(s)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a record last changed at `modified` passes a `since` filter. No
+/// filter passes everything; a record with no known modification date fails
+/// the filter, since it cannot be shown to have changed.
+pub fn modified_since(modified: Option<DateTime<Utc>>, since: Option<DateTime<Utc>>) -> bool {
+    match since {
+        None => true,
+        Some(since) => modified.is_some_and(|m| m >= since),
+    }
+}
+
 /// Result of a write action (create, update, delete, etc.)
 #[derive(Debug, serde::Serialize)]
 pub struct ActionResult {
@@ -410,6 +450,55 @@ mod tests {
     fn test_slug_long() {
         let long = "a".repeat(100);
         assert_eq!(slug(&long).len(), 60);
+    }
+
+    #[test]
+    fn apple_epoch_arithmetic() {
+        // 2001-01-01T00:00:00Z is the Apple epoch itself.
+        let epoch = DateTime::parse_from_rfc3339("2001-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(apple_seconds(epoch), 0);
+        assert_eq!(apple_nanos(epoch), 0);
+
+        let next_day = DateTime::parse_from_rfc3339("2001-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(apple_seconds(next_day), 86_400);
+        assert_eq!(apple_nanos(next_day), 86_400 * 1_000_000_000);
+    }
+
+    #[test]
+    fn apple_json_date_reads_numbers_strings_and_iso() {
+        let from_number = apple_json_date(&serde_json::json!(0)).unwrap();
+        assert_eq!(from_number.to_rfc3339(), "2001-01-01T00:00:00+00:00");
+        let from_float = apple_json_date(&serde_json::json!(86400.5)).unwrap();
+        assert_eq!(from_float.to_rfc3339(), "2001-01-02T00:00:00+00:00");
+        let from_string = apple_json_date(&serde_json::json!("86400")).unwrap();
+        assert_eq!(from_string, from_float);
+        let from_iso = apple_json_date(&serde_json::json!("2026-09-01T12:00:00.000Z")).unwrap();
+        assert_eq!(from_iso.to_rfc3339(), "2026-09-01T12:00:00+00:00");
+        assert!(apple_json_date(&serde_json::Value::Null).is_none());
+        assert!(apple_json_date(&serde_json::json!("garbage")).is_none());
+    }
+
+    #[test]
+    fn modified_since_filter() {
+        let since = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let before = since - Duration::from_secs(1);
+        let after = since + Duration::from_secs(1);
+
+        assert!(modified_since(Some(before), None), "no filter passes all");
+        assert!(modified_since(None, None));
+        assert!(modified_since(Some(after), Some(since)));
+        assert!(modified_since(Some(since), Some(since)), "inclusive");
+        assert!(!modified_since(Some(before), Some(since)));
+        assert!(
+            !modified_since(None, Some(since)),
+            "unknown modification date cannot be shown to have changed"
+        );
     }
 
     #[test]

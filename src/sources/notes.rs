@@ -1,7 +1,8 @@
 use super::util::{
-    escape_applescript, parse_applescript_date, run_osascript_with_timeout, slug, ActionResult,
-    SUBPROCESS_TIMEOUT,
+    escape_applescript, modified_since, parse_applescript_date, run_osascript_with_timeout, slug,
+    ActionResult, SUBPROCESS_TIMEOUT,
 };
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -36,11 +37,17 @@ fn folder_clause(folder_filter: Option<&str>) -> String {
     }
 }
 
-/// List notes, optionally filtered by folder name.
+/// List notes, optionally filtered by folder name and modification date.
 /// Includes the full body text for each note. Reading each body is one Apple
 /// event per note (~35ms), so `cap` bounds the walk; pass `None` to walk
-/// everything.
-pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Result<Vec<Note>> {
+/// everything. `since` is applied to the notes the walk returned, so a capped
+/// walk can surface fewer than `cap` matches — [`list_brief`] is the call for
+/// finding everything that changed.
+pub async fn list(
+    folder_filter: Option<&str>,
+    cap: Option<usize>,
+    since: Option<DateTime<Utc>>,
+) -> anyhow::Result<Vec<Note>> {
     let folder_clause = folder_clause(folder_filter);
     let cap_clause = cap
         .map(|c| format!("if noteCount >= {c} then exit repeat"))
@@ -102,14 +109,30 @@ pub async fn list(folder_filter: Option<&str>, cap: Option<usize>) -> anyhow::Re
     );
 
     let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
-    Ok(parse_json_output(&raw))
+    Ok(filter_since(parse_json_output(&raw), since))
+}
+
+/// Notes carry their modification date as AppleScript text, so `since` is
+/// applied here on the parsed value rather than inside the script.
+fn filter_since(notes: Vec<Note>, since: Option<DateTime<Utc>>) -> Vec<Note> {
+    match since {
+        Some(_) => notes
+            .into_iter()
+            .filter(|n| modified_since(n.modified, since))
+            .collect(),
+        None => notes,
+    }
 }
 
 /// List every note's id/title/folder/modified without bodies. Properties are
 /// fetched in bulk (one Apple event per property per folder instead of one
 /// per note), so this stays fast across a whole library — it's the catalog
-/// call for pickers and sync sweeps.
-pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>> {
+/// call for pickers and sync sweeps, and with `since` the way to find what
+/// changed.
+pub async fn list_brief(
+    folder_filter: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> anyhow::Result<Vec<Note>> {
     let folder_clause = folder_clause(folder_filter);
 
     let script = format!(
@@ -160,7 +183,7 @@ pub async fn list_brief(folder_filter: Option<&str>) -> anyhow::Result<Vec<Note>
     );
 
     let raw = run_osascript_with_timeout(&script, SUBPROCESS_TIMEOUT).await?;
-    Ok(parse_json_output(&raw))
+    Ok(filter_since(parse_json_output(&raw), since))
 }
 
 /// Get a single note by ID with full body content.
@@ -440,6 +463,33 @@ mod tests {
     #[test]
     fn test_parse_json_output_empty() {
         assert!(parse_json_output("[]").is_empty());
+    }
+
+    #[test]
+    fn test_filter_since() {
+        let since = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let note = |id: &str, modified: Option<DateTime<Utc>>| Note {
+            id: id.to_string(),
+            title: id.to_string(),
+            folder: "Notes".to_string(),
+            body: None,
+            modified,
+        };
+        let notes = vec![
+            note("before", Some(since - chrono::Duration::seconds(1))),
+            note("exact", Some(since)),
+            note("after", Some(since + chrono::Duration::seconds(1))),
+            note("unknown", None),
+        ];
+
+        let kept: Vec<String> = filter_since(notes, Some(since))
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(kept, vec!["exact", "after"]);
+        assert_eq!(filter_since(vec![note("unknown", None)], None).len(), 1);
     }
 
     /// Bodies with tabs/newlines and long titles must come through intact —

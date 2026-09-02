@@ -1,7 +1,8 @@
 use super::util::{
-    escape_jxa, run_command_with_timeout, run_jxa_with_timeout, ActionResult, BatchActionResult,
-    BatchItemResult,
+    apple_json_date, apple_seconds, escape_jxa, modified_since, run_command_with_timeout,
+    run_jxa_with_timeout, ActionResult, BatchActionResult, BatchItemResult,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
@@ -24,6 +25,10 @@ pub struct CalendarEvent {
     pub has_recurrences: bool,
     pub attendee_count: usize,
     pub alarm_count: usize,
+    /// When the event was last changed. Read from the local store; the
+    /// legacy Calendar Cache does not expose it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,23 +56,37 @@ pub struct UpdateFields<'a> {
     pub all_day: Option<bool>,
 }
 
-/// List calendar events, with optional day range and calendar filter.
+/// List calendar events, with optional day range, calendar filter, and
+/// modified-since filter. `since` applies within the day window, against
+/// each event's `modified_at`.
 pub async fn list(
     days_back: Option<u32>,
     days_ahead: Option<u32>,
     calendar_filter: Option<&str>,
+    since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<CalendarEvent>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-
     let back = days_back.unwrap_or(7);
     let ahead = days_ahead.unwrap_or(30);
+    let events = fetch_in_window(back, ahead, since).await?;
+    let events = filter_by_calendar(events, calendar_filter);
+    // The group-db path already narrowed in SQL; the legacy and JXA paths
+    // did not, and this keeps the contract identical across all three.
+    Ok(filter_since(events, since))
+}
+
+async fn fetch_in_window(
+    days_back: u32,
+    days_ahead: u32,
+    since: Option<DateTime<Utc>>,
+) -> anyhow::Result<Vec<CalendarEvent>> {
+    let home = std::env::var("HOME").unwrap_or_default();
 
     // Try Group Container database first (modern macOS)
     let group_db =
         format!("{home}/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb");
     if tokio::fs::metadata(&group_db).await.is_ok() {
-        match fetch_from_group_db(&group_db, back, ahead).await {
-            Ok(events) => return Ok(filter_by_calendar(events, calendar_filter)),
+        match fetch_from_group_db(&group_db, days_back, days_ahead, since).await {
+            Ok(events) => return Ok(events),
             Err(error) => eprintln!("Calendar database read failed; trying fallback: {error}"),
         }
     }
@@ -75,15 +94,14 @@ pub async fn list(
     // Try legacy Calendar Cache
     let cache_db = format!("{home}/Library/Calendars/Calendar Cache");
     if tokio::fs::metadata(&cache_db).await.is_ok() {
-        match fetch_from_cache_db(&cache_db, back, ahead).await {
-            Ok(events) => return Ok(filter_by_calendar(events, calendar_filter)),
+        match fetch_from_cache_db(&cache_db, days_back, days_ahead).await {
+            Ok(events) => return Ok(events),
             Err(error) => eprintln!("Legacy Calendar database read failed; trying JXA: {error}"),
         }
     }
 
     // Fall back to JXA — slower but works when no local database exists
-    let events = fetch_from_jxa(back, ahead).await?;
-    Ok(filter_by_calendar(events, calendar_filter))
+    fetch_from_jxa(days_back, days_ahead).await
 }
 
 /// Create a calendar event via JXA.
@@ -268,7 +286,8 @@ SELECT
     COALESCE(ci.has_attendees, 0) AS has_attendees,
     COALESCE(ci.has_recurrences, 0) AS has_recurrences,
     (SELECT COUNT(*) FROM Participant p WHERE p.owner_id = ci.ROWID) AS attendee_count,
-    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count
+    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count,
+    ci.last_modified AS modified_at
 FROM CalendarItem ci
 LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
 LEFT JOIN Location l ON ci.location_id = l.ROWID
@@ -339,18 +358,19 @@ fn build_find_by_id_script(id: &str, action: &str) -> String {
 const app = Application("Calendar");
 const targetId = "{}";
 function eventRecord(ev, calendar) {{
-    let location = "", endDate = "", notes = "", url = "", allDay = false;
+    let location = "", endDate = "", notes = "", url = "", allDay = false, modified = "";
     try {{ location = ev.location() || ""; }} catch (error) {{}}
     try {{ endDate = ev.endDate().toISOString(); }} catch (error) {{}}
     try {{ notes = ev.description() || ""; }} catch (error) {{}}
     try {{ url = ev.url() || ""; }} catch (error) {{}}
     try {{ allDay = ev.alldayEvent(); }} catch (error) {{}}
+    try {{ modified = ev.stampDate().toISOString(); }} catch (error) {{}}
     return {{
         id: ev.uid(), title: ev.summary() || "", calendar,
         location, start_date: ev.startDate().toISOString(), end_date: endDate,
         all_day: allDay ? 1 : 0, notes, url,
         has_attendees: 0, has_recurrences: 0,
-        attendee_count: 0, alarm_count: 0
+        attendee_count: 0, alarm_count: 0, modified_at: modified
     }};
 }}
 const calendars = app.calendars();
@@ -460,17 +480,38 @@ fn filter_by_calendar(
     }
 }
 
+fn filter_since(events: Vec<CalendarEvent>, since: Option<DateTime<Utc>>) -> Vec<CalendarEvent> {
+    match since {
+        Some(_) => events
+            .into_iter()
+            .filter(|e| modified_since(e.modified_at, since))
+            .collect(),
+        None => events,
+    }
+}
+
+/// The extra `WHERE` line that narrows the group-db scan to events changed
+/// at or after `since`; `last_modified` is Apple-epoch seconds.
+fn since_clause(since: Option<DateTime<Utc>>) -> String {
+    match since {
+        Some(since) => format!("  AND ci.last_modified >= {}\n", apple_seconds(since)),
+        None => String::new(),
+    }
+}
+
 /// Modern macOS: ~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb
 async fn fetch_from_group_db(
     db_path: &str,
     days_back: u32,
     days_ahead: u32,
+    since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<CalendarEvent>> {
-    let now = chrono::Utc::now();
+    let now = Utc::now();
     let start = now - chrono::Duration::days(i64::from(days_back));
     let end = now + chrono::Duration::days(i64::from(days_ahead));
-    let start_cd = start.timestamp() - 978_307_200;
-    let end_cd = end.timestamp() - 978_307_200;
+    let start_cd = apple_seconds(start);
+    let end_cd = apple_seconds(end);
+    let since_clause = since_clause(since);
 
     let query = format!(
         r#"
@@ -487,13 +528,14 @@ SELECT
     COALESCE(ci.has_attendees, 0) AS has_attendees,
     COALESCE(ci.has_recurrences, 0) AS has_recurrences,
     (SELECT COUNT(*) FROM Participant p WHERE p.owner_id = ci.ROWID) AS attendee_count,
-    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count
+    (SELECT COUNT(*) FROM Alarm a WHERE a.calendaritem_owner_id = ci.ROWID) AS alarm_count,
+    ci.last_modified AS modified_at
 FROM CalendarItem ci
 LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
 LEFT JOIN Location l ON ci.location_id = l.ROWID
 WHERE ci.start_date >= {start_cd}
   AND ci.start_date <= {end_cd}
-ORDER BY ci.start_date ASC
+{since_clause}ORDER BY ci.start_date ASC
 LIMIT 500;
 "#
     );
@@ -514,11 +556,11 @@ async fn fetch_from_cache_db(
     days_back: u32,
     days_ahead: u32,
 ) -> anyhow::Result<Vec<CalendarEvent>> {
-    let now = chrono::Utc::now();
+    let now = Utc::now();
     let start = now - chrono::Duration::days(i64::from(days_back));
     let end = now + chrono::Duration::days(i64::from(days_ahead));
-    let start_cd = start.timestamp() - 978_307_200;
-    let end_cd = end.timestamp() - 978_307_200;
+    let start_cd = apple_seconds(start);
+    let end_cd = apple_seconds(end);
 
     let query = format!(
         r#"
@@ -535,7 +577,8 @@ SELECT
     0 AS has_attendees,
     0 AS has_recurrences,
     0 AS attendee_count,
-    0 AS alarm_count
+    0 AS alarm_count,
+    NULL AS modified_at
 FROM ZCALENDARITEM ci
 LEFT JOIN ZCALENDAR cal ON ci.ZCALENDAR = cal.Z_PK
 WHERE ci.ZSTARTDATE >= {start_cd}
@@ -577,7 +620,7 @@ for (let ci = 0; ci < cals.length; ci++) {{
         try {{ sd = ev.startDate(); }} catch(e) {{ continue; }}
         if (!sd || sd < start || sd > end) continue;
         count++;
-        let id = "", title = "", loc = "", ed = "", allday = false, notes = "", url = "";
+        let id = "", title = "", loc = "", ed = "", allday = false, notes = "", url = "", modified = "";
         try {{ id = ev.uid() || ""; }} catch(e) {{}}
         try {{ title = ev.summary() || ""; }} catch(e) {{}}
         try {{ loc = ev.location() || ""; }} catch(e) {{}}
@@ -585,7 +628,8 @@ for (let ci = 0; ci < cals.length; ci++) {{
         try {{ allday = ev.alldayEvent(); }} catch(e) {{}}
         try {{ notes = ev.description() || ""; }} catch(e) {{}}
         try {{ url = ev.url() || ""; }} catch(e) {{}}
-        if (title) results.push({{id: id, title: title, calendar: calName, location: loc, start_date: sd.toISOString(), end_date: ed, all_day: allday ? 1 : 0, notes: notes, url: url, has_attendees: 0, has_recurrences: 0, attendee_count: 0, alarm_count: 0}});
+        try {{ modified = ev.stampDate().toISOString(); }} catch(e) {{}}
+        if (title) results.push({{id: id, title: title, calendar: calName, location: loc, start_date: sd.toISOString(), end_date: ed, all_day: allday ? 1 : 0, notes: notes, url: url, has_attendees: 0, has_recurrences: 0, attendee_count: 0, alarm_count: 0, modified_at: modified}});
     }}
 }}
 JSON.stringify(results)
@@ -664,6 +708,7 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
             has_recurrences: row["has_recurrences"].as_i64().unwrap_or(0) != 0,
             attendee_count: row["attendee_count"].as_u64().unwrap_or(0) as usize,
             alarm_count: row["alarm_count"].as_u64().unwrap_or(0) as usize,
+            modified_at: apple_json_date(&row["modified_at"]),
         });
     }
     records
@@ -743,6 +788,7 @@ mod tests {
                 has_recurrences: false,
                 attendee_count: 0,
                 alarm_count: 0,
+                modified_at: None,
             },
             CalendarEvent {
                 id: "2".to_string(),
@@ -758,12 +804,90 @@ mod tests {
                 has_recurrences: false,
                 attendee_count: 0,
                 alarm_count: 0,
+                modified_at: None,
             },
         ];
 
         let filtered = filter_by_calendar(events, Some("work"));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Meeting");
+    }
+
+    /// `modified_at` arrives as Apple-epoch seconds from sqlite and as an ISO
+    /// string from JXA; both must land as the same UTC instant, and a missing
+    /// value (legacy cache) must stay `None` rather than the Apple epoch.
+    #[test]
+    fn test_parse_json_rows_modified_at() {
+        let output = r#"[
+            {"id":"a","title":"From sqlite","calendar":"Work","modified_at":86400},
+            {"id":"b","title":"From sqlite float","calendar":"Work","modified_at":86400.25},
+            {"id":"c","title":"From JXA","calendar":"Work","modified_at":"2001-01-02T00:00:00.000Z"},
+            {"id":"d","title":"Legacy","calendar":"Work","modified_at":null},
+            {"id":"e","title":"JXA unknown","calendar":"Work","modified_at":""}
+        ]"#;
+        let records = parse_json_rows(output);
+        assert_eq!(records.len(), 5);
+        let expected = "2001-01-02T00:00:00+00:00";
+        assert_eq!(records[0].modified_at.unwrap().to_rfc3339(), expected);
+        assert_eq!(records[1].modified_at.unwrap().to_rfc3339(), expected);
+        assert_eq!(records[2].modified_at.unwrap().to_rfc3339(), expected);
+        assert!(records[3].modified_at.is_none());
+        assert!(records[4].modified_at.is_none());
+        // The JSON contract: absent when unknown, snake_case when present.
+        let json = serde_json::to_value(&records[0]).unwrap();
+        assert!(json["modified_at"].is_string());
+        let json = serde_json::to_value(&records[3]).unwrap();
+        assert!(json.get("modified_at").is_none());
+    }
+
+    #[test]
+    fn since_clause_narrows_group_db_scan() {
+        assert_eq!(since_clause(None), "");
+        let since = DateTime::parse_from_rfc3339("2001-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            since_clause(Some(since)),
+            "  AND ci.last_modified >= 86400\n"
+        );
+    }
+
+    #[test]
+    fn test_filter_since() {
+        let since = DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event = |id: &str, modified_at: Option<DateTime<Utc>>| CalendarEvent {
+            id: id.to_string(),
+            title: id.to_string(),
+            calendar: "Work".to_string(),
+            location: None,
+            start_date: None,
+            end_date: None,
+            is_all_day: false,
+            notes: None,
+            url: None,
+            has_attendees: false,
+            has_recurrences: false,
+            attendee_count: 0,
+            alarm_count: 0,
+            modified_at,
+        };
+        let events = vec![
+            event("before", Some(since - chrono::Duration::seconds(1))),
+            event("exact", Some(since)),
+            event("after", Some(since + chrono::Duration::seconds(1))),
+            event("unknown", None),
+        ];
+
+        let kept: Vec<String> = filter_since(events, Some(since))
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(kept, vec!["exact", "after"]);
+
+        let all = filter_since(vec![event("unknown", None)], None);
+        assert_eq!(all.len(), 1, "no filter keeps events without a date");
     }
 
     #[test]
@@ -782,6 +906,7 @@ mod tests {
             has_recurrences: false,
             attendee_count: 0,
             alarm_count: 0,
+            modified_at: None,
         }];
 
         let filtered = filter_by_calendar(events, None);
