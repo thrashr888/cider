@@ -16,6 +16,14 @@
 //! 3. If `doctor` reports a backing store as `ok`, the command that reads it
 //!    must succeed and return at least one row. A present store never yields
 //!    an empty list silently.
+//!
+//! A second section covers the Cider Bridge read paths (`bridge status`,
+//! `home --live`, `home state`, `home triggers`, `weather`, ...) and runs
+//! only when the app is installed. It is the one place the suite has a
+//! visible side effect: `--live` launches the bridge app if it is not
+//! running, so the suite prints a line before it does and leaves the app
+//! running afterwards (quitting would change state the user may rely on).
+//! Everything it runs is still a read.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -30,7 +38,24 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// The only subcommands this suite is allowed to invoke. Everything else a
 /// source offers (create, update, delete, send, complete, ...) mutates the
 /// machine and must never run from a test. `guard_read_only` enforces it.
-const READ_VERBS: &[&str] = &["list", "status", "show", "lists", "networks", "watchlists"];
+const READ_VERBS: &[&str] = &[
+    "list",
+    "status",
+    "show",
+    "lists",
+    "networks",
+    "watchlists",
+    "homes",
+    "scenes",
+    "state",
+    "triggers",
+    "quota",
+];
+
+/// Flags that consume the next token as a value. Any other flag is taken
+/// as bare, so the token after it is still checked as a verb: an unknown
+/// value-taking flag fails loudly instead of letting a verb slip past.
+const VALUE_FLAGS: &[&str] = &["--days", "--minutes", "--query", "--since"];
 
 /// Commands the generic walk must not run as-is, and why.
 const SKIP: &[(&str, &str)] = &[
@@ -68,15 +93,28 @@ const STORE_BACKED: &[(&str, &[&str])] = &[
 ];
 
 /// Refuse to run anything that is not a bare command or a read verb.
+///
+/// Every positional token after the command is a verb and must be in
+/// `READ_VERBS`, wherever it sits: `home --live homes` and `home triggers
+/// list` are both checked, and so is the `create-timer` in `home triggers
+/// create-timer`. Flags are skipped, along with the value of a flag in
+/// `VALUE_FLAGS`.
 fn guard_read_only(args: &[&str]) {
-    if let Some(verb) = args.get(1) {
-        if !verb.starts_with("--") {
-            assert!(
-                READ_VERBS.contains(verb),
-                "refusing to run `cider {}`: `{verb}` is not a read-only verb",
-                args.join(" ")
-            );
+    let mut expect_value = false;
+    for token in args.iter().skip(1) {
+        if expect_value {
+            expect_value = false;
+            continue;
         }
+        if token.starts_with("--") {
+            expect_value = VALUE_FLAGS.contains(token);
+            continue;
+        }
+        assert!(
+            READ_VERBS.contains(token),
+            "refusing to run `cider {}`: `{token}` is not a read-only verb",
+            args.join(" ")
+        );
     }
     for flag in args {
         assert!(
@@ -275,19 +313,7 @@ fn every_read_only_command_answers_honestly() {
     for case in &cases {
         let args: Vec<&str> = case.iter().map(String::as_str).collect();
         let run = run(&args);
-        let rows = json(&run.stdout)
-            .and_then(|v| v.as_array().map(Vec::len))
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        summary.push(format!(
-            "{:<45} exit={:<5} rows={:<5} {:.1}s",
-            args.join(" "),
-            run.code
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "hung".into()),
-            rows,
-            run.elapsed.as_secs_f32()
-        ));
+        summary.push(summarize(&run));
         for problem in [check_shape(&run), check_store_backed(&run, &doctor)]
             .into_iter()
             .flatten()
@@ -296,14 +322,116 @@ fn every_read_only_command_answers_honestly() {
         }
     }
 
+    let bridge_runs = bridge_section(&mut summary, &mut failures);
+
     println!("{}", summary.join("\n"));
     assert!(
         failures.is_empty(),
         "{} of {} runs failed:\n  {}",
         failures.len(),
-        cases.len(),
+        cases.len() + bridge_runs,
         failures.join("\n  ")
     );
+}
+
+/// One summary line per run, in the same shape for both sections.
+fn summarize(run: &Run) -> String {
+    let rows = row_count(run)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "{:<45} exit={:<5} rows={:<5} {:.1}s",
+        run.args.join(" "),
+        run.code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "hung".into()),
+        rows,
+        run.elapsed.as_secs_f32()
+    )
+}
+
+/// The `error.code` of a failed run's envelope, if it printed one.
+fn error_code(run: &Run) -> Option<String> {
+    json(&run.stderr)?
+        .get("error")?
+        .get("code")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn row_count(run: &Run) -> Option<usize> {
+    json(&run.stdout).and_then(|v| v.as_array().map(Vec::len))
+}
+
+/// The cases of the bridge section, in order. `bridge status` runs first
+/// on its own because it decides whether the rest run at all.
+const BRIDGE_CASES: &[&[&str]] = &[
+    &["home", "--live", "homes"],
+    &["home", "--live", "scenes"],
+    &["home", "state"],
+    &["home", "triggers"],
+    &["weather"],
+    &["weather", "--days", "2"],
+    &["permissions"],
+    &["icloud", "quota"],
+];
+
+/// The bridge read paths. Skipped, with a line saying so, when no
+/// `Cider Bridge.app` is installed. Returns how many runs it made.
+fn bridge_section(summary: &mut Vec<String>, failures: &mut Vec<String>) -> usize {
+    let status = run(&["bridge", "status"]);
+    summary.push(summarize(&status));
+    failures.extend(check_shape(&status).map(|p| format!("bridge status: {p}")));
+    let Some(value) = json(&status.stdout) else {
+        return 1;
+    };
+    if value["installed"] != Value::Bool(true) {
+        println!("live: Cider Bridge is not installed; skipping the bridge section");
+        return 1;
+    }
+    if value["running"] != Value::Bool(true) {
+        println!("live: launching Cider Bridge for the bridge section");
+    }
+
+    for case in BRIDGE_CASES {
+        let run = run(case);
+        summary.push(summarize(&run));
+        let name = case.join(" ");
+        failures.extend(check_shape(&run).map(|p| format!("{name}: {p}")));
+        failures.extend(check_bridge_case(&run).map(|p| format!("{name}: {p}")));
+    }
+    println!("live: Cider Bridge left running (the suite never quits it)");
+    BRIDGE_CASES.len() + 1
+}
+
+/// Rules specific to the bridge section, on top of `check_shape`: an
+/// installed bridge asked for its homes must answer with at least one (a
+/// present bridge that says `[]` is the find-my bug again), and `weather`
+/// may fail only with `weather_unavailable`.
+fn check_bridge_case(run: &Run) -> Option<String> {
+    let args: Vec<&str> = run.args.iter().map(String::as_str).collect();
+    match args.as_slice() {
+        ["home", "--live", "homes"] => match (run.code, error_code(run)) {
+            (Some(0), _) if row_count(run) == Some(0) => Some(
+                "bridge is installed but the command returned an empty list (the find-my bug)"
+                    .into(),
+            ),
+            (Some(0), _) => None,
+            // A packaged bridge without the HomeKit entitlement says so.
+            (_, Some(code)) if code == "homekit_unavailable" => None,
+            (code, error) => Some(format!(
+                "bridge is installed but the command failed (exit {code:?}, code {error:?})"
+            )),
+        },
+        ["weather", ..] => match (run.code, error_code(run)) {
+            (Some(0), _) => None,
+            (_, Some(code)) if code == "weather_unavailable" => None,
+            (code, error) => Some(format!(
+                "may only fail with weather_unavailable, got exit {code:?} code {error:?}"
+            )),
+        },
+        _ => None,
+    }
 }
 
 #[test]
@@ -312,11 +440,61 @@ fn guard_refuses_mutating_verbs() {
     guard_read_only(&["reminders", "delete", "--id", "x"]);
 }
 
+/// Every mutating verb the bridge, iCloud, and Shortcuts surfaces offer is
+/// refused wherever it sits in the argument list, including after `--live`
+/// and under `triggers`.
+#[test]
+fn guard_refuses_every_mutating_verb() {
+    let mutating: &[&[&str]] = &[
+        &[
+            "home",
+            "set",
+            "--accessory",
+            "a",
+            "--characteristic",
+            "c",
+            "--value",
+            "1",
+        ],
+        &["home", "run", "--scene", "s"],
+        &["home", "--live", "run", "--scene", "s"],
+        &["home", "triggers", "create-timer", "--name", "n"],
+        &["home", "triggers", "delete", "--trigger", "t"],
+        &["home", "triggers", "enable", "--trigger", "t"],
+        &["home", "triggers", "disable", "--trigger", "t"],
+        &["bridge", "install"],
+        &["bridge", "build"],
+        &["icloud", "download", "--path", "p"],
+        &["icloud", "evict", "--path", "p"],
+        &["shortcuts", "run", "--name", "n"],
+        &["shortcuts", "install", "--input", "f"],
+    ];
+    for args in mutating {
+        let message = std::panic::catch_unwind(|| guard_read_only(args))
+            .expect_err(&format!("guard let `cider {}` through", args.join(" ")))
+            .downcast::<String>()
+            .map(|s| *s)
+            .unwrap_or_default();
+        assert!(
+            message.contains("not a read-only verb"),
+            "`cider {}` was refused for the wrong reason: {message}",
+            args.join(" ")
+        );
+    }
+}
+
 #[test]
 fn guard_allows_bare_commands_and_read_verbs() {
     guard_read_only(&["reminders"]);
     guard_read_only(&["notes", "list", "--brief"]);
     guard_read_only(&["console", "--minutes", "5"]);
+    guard_read_only(&["spotlight", "--query", "cider"]);
+    guard_read_only(&["reminders", "list", "--since", "2000-01-01T00:00:00Z"]);
+    guard_read_only(&["home", "triggers", "list"]);
+    guard_read_only(&["bridge", "status"]);
+    for case in BRIDGE_CASES {
+        guard_read_only(case);
+    }
 }
 
 #[test]
