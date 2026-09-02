@@ -106,17 +106,130 @@ async fn brctl(args: &[&str], timeout: Duration) -> anyhow::Result<String> {
 /// The iCloud accounts signed in on this Mac, from the `MobileMeAccounts`
 /// defaults domain. Errors with `not configured` when nobody is signed in.
 pub async fn account() -> anyhow::Result<Vec<IcloudAccount>> {
-    let xml = run_command_with_timeout(
+    // Older macOS kept the signed-in account in the MobileMeAccounts
+    // defaults domain; current macOS leaves that domain empty and the
+    // Accounts framework store is the source of truth.
+    let from_defaults = run_command_with_timeout(
         "/usr/bin/defaults",
         &["export", "MobileMeAccounts", "-"],
         BRCTL_TIMEOUT,
     )
-    .await?;
-    let accounts = parse_accounts(&xml)?;
+    .await
+    .ok()
+    .and_then(|xml| parse_accounts(&xml).ok())
+    .unwrap_or_default();
+    if !from_defaults.is_empty() {
+        return Ok(from_defaults);
+    }
+    let accounts = accounts_from_store().await?;
     if accounts.is_empty() {
         anyhow::bail!("iCloud is not configured: no account is signed in on this Mac");
     }
     Ok(accounts)
+}
+
+/// Apple accounts from the Accounts framework store
+/// (`~/Library/Accounts/Accounts4.sqlite`), read-only.
+///
+/// The join table between accounts and enabled data classes carries
+/// schema-generated column names (`Z_2ENABLEDACCOUNTS`,
+/// `Z_7ENABLEDDATACLASSES`, numbered per macOS release), so both are
+/// discovered from `pragma table_info` rather than hard-coded.
+async fn accounts_from_store() -> anyhow::Result<Vec<IcloudAccount>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let db = format!("{home}/Library/Accounts/Accounts4.sqlite");
+    if tokio::fs::metadata(&db).await.is_err() {
+        return Ok(Vec::new());
+    }
+    let uri = format!("file:{db}?mode=ro&immutable=1");
+    let columns = run_command_with_timeout(
+        "sqlite3",
+        &[&uri, "pragma table_info(Z_2ENABLEDDATACLASSES);"],
+        BRCTL_TIMEOUT,
+    )
+    .await?;
+    let (account_col, class_col) = enabled_join_columns(&columns)
+        .ok_or_else(|| anyhow::anyhow!("Accounts store has no enabled-dataclass join table"))?;
+    let sql = format!(
+        "SELECT a.ZUSERNAME AS apple_id, a.ZACCOUNTDESCRIPTION AS description, \
+         a.ZACTIVE AS active, a.ZAUTHENTICATED AS authenticated, \
+         (SELECT group_concat(hex(d.ZNAME), '|') FROM Z_2ENABLEDDATACLASSES e \
+          JOIN ZDATACLASS d ON d.Z_PK = e.{class_col} \
+          WHERE e.{account_col} = a.Z_PK) AS enabled \
+         FROM ZACCOUNT a JOIN ZACCOUNTTYPE t ON a.ZACCOUNTTYPE = t.Z_PK \
+         WHERE t.ZIDENTIFIER = 'com.apple.account.AppleAccount' \
+         ORDER BY a.Z_PK;"
+    );
+    let json = run_command_with_timeout("sqlite3", &["-json", &uri, &sql], BRCTL_TIMEOUT).await?;
+    parse_account_rows(&json)
+}
+
+/// Pick the account and data-class columns out of `pragma table_info`
+/// output for the enabled-dataclasses join table.
+pub fn enabled_join_columns(pragma: &str) -> Option<(String, String)> {
+    let names: Vec<&str> = pragma
+        .lines()
+        .filter_map(|line| line.split('|').nth(1))
+        .collect();
+    let account = names.iter().find(|n| n.ends_with("ACCOUNTS"))?;
+    let class = names.iter().find(|n| n.ends_with("DATACLASSES"))?;
+    Some((account.to_string(), class.to_string()))
+}
+
+/// Map `sqlite3 -json` rows from the Accounts store into accounts. Only
+/// active, authenticated Apple accounts count as signed in. Data-class
+/// names are stored as NSKeyedArchiver blobs (an archived string such as
+/// `com.apple.Dataclass.Calendars`), so the query hexes them and this
+/// decodes each one; the last dotted component becomes the service name.
+pub fn parse_account_rows(json: &str) -> anyhow::Result<Vec<IcloudAccount>> {
+    parse_account_rows_with(json, decode_dataclass_name)
+}
+
+fn decode_dataclass_name(hex: &str) -> Option<String> {
+    let bytes = super::keyed_archive::hex_decode(hex).ok()?;
+    let value = super::keyed_archive::decode_bytes(&bytes).ok()?;
+    value.as_str().map(str::to_string)
+}
+
+/// `parse_account_rows` with the blob decoder injected, so tests need no
+/// real archives.
+pub fn parse_account_rows_with(
+    json: &str,
+    decode: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Vec<IcloudAccount>> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    Ok(rows
+        .iter()
+        .filter(|r| {
+            r["active"].as_i64().unwrap_or(0) == 1 && r["authenticated"].as_i64().unwrap_or(0) == 1
+        })
+        .filter_map(|r| {
+            let apple_id = r["apple_id"].as_str()?.to_string();
+            let display_name = r["description"]
+                .as_str()
+                .filter(|d| !d.is_empty())
+                .map(str::to_string);
+            let services = r["enabled"]
+                .as_str()
+                .unwrap_or("")
+                .split('|')
+                .filter(|s| !s.is_empty())
+                .filter_map(&decode)
+                .map(|id| IcloudService {
+                    name: id.rsplit('.').next().unwrap_or(&id).to_string(),
+                    enabled: true,
+                })
+                .collect();
+            Some(IcloudAccount {
+                apple_id,
+                display_name,
+                services,
+            })
+        })
+        .collect())
 }
 
 /// Parse the XML plist `defaults export MobileMeAccounts -` prints.
@@ -526,6 +639,70 @@ pub async fn evict(path: &str) -> anyhow::Result<ActionResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabled_join_columns_are_discovered_from_pragma() {
+        let pragma = "0|Z_2ENABLEDACCOUNTS|INTEGER|0||0\n1|Z_7ENABLEDDATACLASSES|INTEGER|0||0\n";
+        assert_eq!(
+            enabled_join_columns(pragma),
+            Some(("Z_2ENABLEDACCOUNTS".into(), "Z_7ENABLEDDATACLASSES".into()))
+        );
+        assert_eq!(enabled_join_columns(""), None);
+    }
+
+    #[test]
+    fn account_rows_keep_only_signed_in_apple_accounts() {
+        let json = r#"[
+          {"apple_id":"a@example.com","description":"iCloud","active":1,"authenticated":1,
+           "enabled":"CAFE|BEEF"},
+          {"apple_id":"old@example.com","description":"","active":0,"authenticated":1,"enabled":null}
+        ]"#;
+        let decode = |hex: &str| match hex {
+            "CAFE" => Some("com.apple.Dataclass.Calendars".to_string()),
+            "BEEF" => Some("com.apple.Dataclass.Reminders".to_string()),
+            _ => None,
+        };
+        let accounts = parse_account_rows_with(json, decode).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].apple_id, "a@example.com");
+        assert_eq!(accounts[0].display_name.as_deref(), Some("iCloud"));
+        let names: Vec<&str> = accounts[0]
+            .services
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Calendars", "Reminders"]);
+        assert!(accounts[0].services.iter().all(|s| s.enabled));
+        assert!(parse_account_rows("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dataclass_blob_decodes_to_its_identifier() {
+        // bplist00 NSKeyedArchiver with a single string root, as the store holds it.
+        let mut value = plist::Dictionary::new();
+        value.insert(
+            "$archiver".into(),
+            plist::Value::String("NSKeyedArchiver".into()),
+        );
+        value.insert(
+            "$objects".into(),
+            plist::Value::Array(vec![
+                plist::Value::String("$null".into()),
+                plist::Value::String("com.apple.Dataclass.Calendars".into()),
+            ]),
+        );
+        let mut top = plist::Dictionary::new();
+        top.insert("root".into(), plist::Value::Uid(plist::Uid::new(1)));
+        value.insert("$top".into(), plist::Value::Dictionary(top));
+        value.insert("$version".into(), plist::Value::Integer(100000.into()));
+        let mut bytes = Vec::new();
+        plist::to_writer_binary(&mut bytes, &plist::Value::Dictionary(value)).unwrap();
+        let hex = super::super::keyed_archive::hex_encode(&bytes);
+        assert_eq!(
+            decode_dataclass_name(&hex).as_deref(),
+            Some("com.apple.Dataclass.Calendars")
+        );
+    }
 
     #[test]
     fn quota_line_parses_bytes_gb_and_kind() {

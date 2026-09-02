@@ -52,6 +52,7 @@ fn explicit_cases() -> Vec<Vec<&'static str>> {
         vec!["spotlight", "--query", "cider"],
         vec!["reminders", "list", "--since", "2000-01-01T00:00:00Z"],
         vec!["calendar", "list", "--since", "2000-01-01T00:00:00Z"],
+        vec!["icloud", "list"],
     ]
 }
 
@@ -197,13 +198,14 @@ fn check_shape(run: &Run) -> Option<String> {
 
 /// Rule 3: a present store must yield rows.
 fn check_store_backed(run: &Run, doctor: &BTreeMap<String, String>) -> Option<String> {
-    let head = run.args.first().map(String::as_str).unwrap_or("");
-    if run.args.len() != 1 {
-        return None;
-    }
+    // The mapping names the exact invocation that reads the store, so a
+    // command whose default subcommand is something else (`icloud` →
+    // `account`) is judged on `icloud list`, not on the bare command.
     let store = STORE_BACKED
         .iter()
-        .find(|(_, commands)| commands.contains(&head))
+        .find(|(_, commands)| {
+            commands.len() == run.args.len() && commands.iter().zip(&run.args).all(|(a, b)| a == b)
+        })
         .map(|(store, _)| *store)?;
     if doctor.get(store).map(String::as_str) != Some("ok") {
         return None;
