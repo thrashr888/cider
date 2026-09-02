@@ -35,6 +35,19 @@ jobs:
   # The Swift bridge: the package (BridgeCore + cider-bridge CLI) with its
   # tests, then the Catalyst app unsigned. No team, no entitlements, no live
   # stores — signing and HomeKit are a personal-build concern (bridge/scripts).
+  # cargo publish verifies the crate by building it on the publish runner,
+  # which is Linux. Catch macOS-only code before a tag does.
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the crate builds on Linux
+        run: cargo check --all-targets
+      - name: Dry-run the publish
+        run: cargo publish --dry-run
+
   bridge:
     runs-on: macos-latest
     defaults:

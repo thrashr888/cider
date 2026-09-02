@@ -602,9 +602,17 @@ pub fn list_dir(dir: &Path, recursive: bool) -> anyhow::Result<Vec<DriveEntry>> 
 /// download, `stat` does not.
 const SF_DATALESS: u32 = 0x4000_0000;
 
+#[cfg(target_os = "macos")]
 fn meta_flags(meta: &std::fs::Metadata) -> u32 {
     use std::os::macos::fs::MetadataExt;
     meta.st_flags()
+}
+
+/// The crate is verified on Linux by `cargo publish`; there is no
+/// dataless flag there, so everything reads as local.
+#[cfg(not(target_os = "macos"))]
+fn meta_flags(_meta: &std::fs::Metadata) -> u32 {
+    0
 }
 
 /// Evicted (dataless) files are `cloud`; everything else is `local`.
