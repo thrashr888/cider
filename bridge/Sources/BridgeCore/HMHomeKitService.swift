@@ -10,7 +10,10 @@ import HomeKit
 /// actor. Callers await across the hop; nothing HomeKit-owned escapes.
 @MainActor
 public final class HMHomeKitService: NSObject, HomeKitService {
-    private let manager: HMHomeManager
+    /// `nil` when the process has no HomeKit entitlement: creating an
+    /// `HMHomeManager` there is a crash (Developer ID builds cannot carry the
+    /// entitlement), so every `home.*` call answers `homekit_unavailable`.
+    private let manager: HMHomeManager?
     private let loadLatch = Latch(count: 1)
 
     /// How long a `home.*` call waits for the first `homeManagerDidUpdateHomes`.
@@ -18,10 +21,15 @@ public final class HMHomeKitService: NSObject, HomeKitService {
     /// Upper bound on the live characteristic read pass in `accessories`.
     public var readTimeout: TimeInterval = 6
 
-    public override init() {
-        manager = HMHomeManager()
+    /// - Parameter entitled: whether this process may use HomeKit; defaults
+    ///   to reading the running code's `com.apple.developer.homekit`.
+    public init(entitled: Bool = BridgeBuild.current().homekitEntitled) {
+        manager = entitled ? HMHomeManager() : nil
         super.init()
-        manager.delegate = self
+        manager?.delegate = self
+        if !entitled {
+            NSLog("cider-bridge: no HomeKit entitlement in this build; home.* commands are unavailable")
+        }
     }
 
     // MARK: Readiness
@@ -32,6 +40,11 @@ public final class HMHomeKitService: NSObject, HomeKitService {
 
     /// Waits for HomeKit's first homes update, then checks authorization.
     private func authorizedHomes() async throws -> [HMHome] {
+        guard let manager else {
+            throw BridgeError.homekitUnavailable(
+                "this Cider Bridge build has no HomeKit entitlement (Developer ID builds cannot); "
+                    + "build a personal one with `cider bridge build --install`")
+        }
         guard await loadLatch.wait(timeout: loadTimeout) else {
             throw BridgeError.timeout("HomeKit did not report homes within \(Int(loadTimeout))s")
         }
@@ -49,7 +62,8 @@ public final class HMHomeKitService: NSObject, HomeKitService {
     // MARK: HomeKitService
 
     public func status() async -> HomeKitStatus {
-        HomeKitStatus(authorized: manager.authorizationStatus.contains(.authorized), homes: manager.homes.count)
+        guard let manager else { return HomeKitStatus(authorized: false, homes: 0) }
+        return HomeKitStatus(authorized: manager.authorizationStatus.contains(.authorized), homes: manager.homes.count)
     }
 
     public func homes() async throws -> [HomeRow] {

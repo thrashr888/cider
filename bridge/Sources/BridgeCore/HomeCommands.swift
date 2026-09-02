@@ -2,16 +2,22 @@ import Foundation
 
 /// Registers `ping` and every `home.*` command against `service`. Shared by
 /// the Catalyst app (with `HMHomeKitService`) and the tests (with the fake).
-public func registerHomeCommands(_ router: CommandRouter, service: some HomeKitService) async {
+///
+/// - Parameter build: what `ping` says about this process's entitlements and
+///   signing (`build`, `homekit_entitled`, `weatherkit_entitled`,
+///   `bundle_path`); defaults to the running process.
+public func registerHomeCommands(
+    _ router: CommandRouter, service: some HomeKitService, build: BridgeBuild = .current()
+) async {
     let version = router.version
 
     await router.register("ping") { _ in
         let status = await service.status()
-        return [
-            "version": .string(version),
-            "homekit_authorized": .bool(status.authorized),
-            "homes": .number(Double(status.homes)),
-        ]
+        var data = build.pingFields
+        data["version"] = .string(version)
+        data["homekit_authorized"] = .bool(status.authorized)
+        data["homes"] = .number(Double(status.homes))
+        return .object(data)
     }
 
     await router.register("home.homes") { _ in

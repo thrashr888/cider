@@ -9,10 +9,14 @@ final class HomeCommandsTests: XCTestCase {
     private var router: CommandRouter!
     private var service: FakeHomeKitService!
 
+    static let build = BridgeBuild(
+        kind: .development, homekitEntitled: true, weatherkitEntitled: true,
+        bundlePath: "/Users/me/Applications/Cider Bridge.app")
+
     override func setUp() async throws {
         service = FakeHomeKitService.sample()
         router = CommandRouter(version: "test")
-        await registerHomeCommands(router, service: service)
+        await registerHomeCommands(router, service: service, build: Self.build)
     }
 
     private func call(_ cmd: String, _ args: [String: JSONValue] = [:]) async -> Response {
@@ -43,13 +47,30 @@ final class HomeCommandsTests: XCTestCase {
 
     // MARK: ping
 
-    func testPingReportsAuthorizationAndHomeCount() async throws {
+    func testPingReportsAuthorizationHomeCountAndBuild() async throws {
         let authorized = await call("ping")
-        XCTAssertEqual(authorized, .success(id: 1, data: ["version": "test", "homekit_authorized": true, "homes": 2]))
+        XCTAssertEqual(authorized, .success(id: 1, data: [
+            "version": "test", "homekit_authorized": true, "homes": 2,
+            "build": "development", "homekit_entitled": true, "weatherkit_entitled": true,
+            "bundle_path": "/Users/me/Applications/Cider Bridge.app",
+        ]))
         await service.setAuthorized(false)
         let denied = await call("ping")
         XCTAssertEqual(denied.data?["homekit_authorized"], false)
         XCTAssertEqual(denied.data?["homes"], 0)
+    }
+
+    func testPingOnADeveloperIDBuildSaysNoHomeKit() async throws {
+        let router = CommandRouter(version: "test")
+        await registerHomeCommands(router, service: FakeHomeKitService(homes: [], authorized: false), build: BridgeBuild(
+            kind: .developerID, homekitEntitled: false, weatherkitEntitled: true, bundlePath: "/opt/homebrew/opt/cider/libexec/Cider Bridge.app"))
+        let response = await router.dispatch(Request(id: 1, cmd: "ping"))
+        XCTAssertEqual(response.data?["build"], "developer-id")
+        XCTAssertEqual(response.data?["homekit_entitled"], false)
+        XCTAssertEqual(response.data?["weatherkit_entitled"], true)
+        XCTAssertEqual(response.data?["homekit_authorized"], false)
+        XCTAssertEqual(response.data?["homes"], 0)
+        XCTAssertEqual(response.data?["bundle_path"], "/opt/homebrew/opt/cider/libexec/Cider Bridge.app")
     }
 
     func testDeniedHomeKitIsHomekitDenied() async {

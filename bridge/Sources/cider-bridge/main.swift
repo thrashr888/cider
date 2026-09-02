@@ -52,6 +52,7 @@ await registerContactsCommands(router, service: contacts)
 await router.register("ping") { _ in
     [
         "version": .string(BridgeInfo.version),
+        "build": .string(BridgeBuild.current().kind.rawValue),
         "calendar": .string(EKEventKitService.authorizationName(for: .event)),
         "reminders": .string(EKEventKitService.authorizationName(for: .reminder)),
         "contacts": .string(CNContactsService.authorizationName),
