@@ -1,0 +1,6 @@
+.build/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+.swiftpm/
+.env.local
