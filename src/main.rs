@@ -1356,12 +1356,17 @@ fn print_output(value: &serde_json::Value, human: bool, envelope: bool) -> anyho
 
     let mut out = io::stdout().lock();
     if human {
-        pretty::render(&mut out, value)
+        pretty::render(&mut out, value)?;
     } else {
         serde_json::to_writer(&mut out, value)?;
         writeln!(out)?;
-        Ok(())
     }
+    // Flush here rather than at drop, where a broken pipe is lost: surfaced
+    // as an error it reaches `main`, which ends quietly on a closed reader
+    // (no envelope, exit 0) — and `cider watch` uses the same signal to
+    // stop streaming.
+    out.flush()?;
+    Ok(())
 }
 
 fn envelope_value(value: &serde_json::Value) -> serde_json::Value {
@@ -3448,11 +3453,19 @@ fn stdin_if_dash(value: Option<String>) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// A reader that went away (`cider fonts | head -c 100`) is the normal end
+/// of a stream, not a failure. The io error can arrive bare or wrapped in a
+/// `serde_json::Error`, which does not expose its source through
+/// `std::error::Error` and has to be asked directly.
 fn is_broken_pipe(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
+        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
+            return io_err.kind() == io::ErrorKind::BrokenPipe;
+        }
         cause
-            .downcast_ref::<io::Error>()
-            .is_some_and(|io_err| io_err.kind() == io::ErrorKind::BrokenPipe)
+            .downcast_ref::<serde_json::Error>()
+            .and_then(serde_json::Error::io_error_kind)
+            .is_some_and(|kind| kind == io::ErrorKind::BrokenPipe)
     })
 }
 
@@ -3850,6 +3863,26 @@ mod tests {
         assert_eq!(kinds["run"], "write");
         assert_eq!(kinds["set"], "write");
         assert!(schema["supports_dry_run"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn broken_pipe_is_seen_bare_wrapped_and_inside_serde_json() {
+        let bare: anyhow::Error = io::Error::new(io::ErrorKind::BrokenPipe, "gone").into();
+        assert!(is_broken_pipe(&bare));
+        assert!(is_broken_pipe(&bare.context("writing output")));
+        // `serde_json::to_writer` reports the io error as its own type,
+        // which is what `head -c` hits mid-document.
+        let inside_json: anyhow::Error =
+            serde_json::Error::io(io::Error::new(io::ErrorKind::BrokenPipe, "gone")).into();
+        assert!(is_broken_pipe(&inside_json));
+        assert!(is_broken_pipe(&inside_json.context("serializing")));
+        let other_io: anyhow::Error = serde_json::Error::io(io::Error::other("disk")).into();
+        assert!(!is_broken_pipe(&other_io));
+        let syntax: anyhow::Error = serde_json::from_str::<u8>("nope").unwrap_err().into();
+        assert!(!is_broken_pipe(&syntax));
+        assert!(!is_broken_pipe(&anyhow::anyhow!(
+            "Broken pipe in a message only"
+        )));
     }
 
     #[test]
