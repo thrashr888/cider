@@ -828,6 +828,12 @@ enum ShortcutsAction {
         #[arg(long)]
         name: String,
     },
+    /// Dump an installed shortcut's actions as JSON
+    Export {
+        /// Shortcut name
+        #[arg(long)]
+        name: String,
+    },
     /// Sign a shortcut file
     Sign {
         /// Input shortcut file path
@@ -2507,6 +2513,10 @@ async fn run() -> anyhow::Result<()> {
                     let result = sources::shortcuts::view(&name).await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
+            }
+            Some(ShortcutsAction::Export { name }) => {
+                let result = sources::shortcuts::export(&name).await?;
+                print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
             Some(ShortcutsAction::Sign {
                 input,

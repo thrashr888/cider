@@ -102,7 +102,7 @@ cider spotlight --query "quarterly report"
 |-----|---------|
 | Music | `list`, `play`, `pause`, `next`, `previous`, `status`, `playlists` |
 | Messages | `list`, `send` |
-| Shortcuts | `list`, `run`, `view`, `sign` |
+| Shortcuts | `list`, `run`, `view`, `export`, `sign` |
 | Screenshots | `list`, `capture` |
 | Time Machine | `status`, `list`, `start`, `stop` |
 | Screen Sharing | `status`, `enable`, `disable` |
