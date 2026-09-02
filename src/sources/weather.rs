@@ -42,7 +42,13 @@ pub async fn resolve_location(
              not be read: {error})"
         )
     })?;
-    location_from_homes(&homes, home_selector)
+    // Name, cache id, or bridge id (through a running bridge): all resolve
+    // to the cache home's name.
+    let selector = match home_selector {
+        Some(selector) => Some(super::home_live::resolve_cache_selector(&homes, selector).await?),
+        None => None,
+    };
+    location_from_homes(&homes, selector.as_deref())
 }
 
 fn location_from_args(lat: f64, lon: f64) -> anyhow::Result<Location> {
@@ -146,6 +152,7 @@ mod tests {
             name: name.to_string(),
             primary,
             current: false,
+            cache_updated_at: None,
             location,
             rooms: vec![],
             zones: vec![],

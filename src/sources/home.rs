@@ -18,10 +18,17 @@ const CACHE_DIR: &str = "Library/Containers/com.apple.Home/Data/Library/Caches/c
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Home {
+    /// The cache's `homeUUID`. Not the id the bridge reports for the same
+    /// home (`HMHome.uniqueIdentifier`); room, accessory, and scene ids do
+    /// agree between the two. Select homes by name to be safe on both.
     pub id: String,
     pub name: String,
     pub primary: bool,
     pub current: bool,
+    /// When the Home app last wrote the cache this row came from (RFC 3339);
+    /// how stale the row can be. Absent on rows not read from the cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_updated_at: Option<String>,
     /// The home's address as HomeKit geocoded it, when location services
     /// were set up for the home. `cider weather --home` uses it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +105,8 @@ pub struct HomeSummary {
     pub name: String,
     pub primary: bool,
     pub current: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_updated_at: Option<String>,
     pub rooms: usize,
     pub zones: usize,
     pub accessories: usize,
@@ -131,9 +140,13 @@ pub struct SceneRow {
 pub async fn list() -> anyhow::Result<Vec<Home>> {
     let path = cache_path()?;
     let decoded = keyed_archive::decode_file(&path)?;
-    let homes = map_cache(&decoded);
+    let mut homes = map_cache(&decoded);
     if homes.is_empty() {
         anyhow::bail!("Home app cache decoded but contains no homes (path: {path})");
+    }
+    let updated_at = cache_updated_at().ok().map(|t| t.to_rfc3339());
+    for home in &mut homes {
+        home.cache_updated_at.clone_from(&updated_at);
     }
     Ok(homes)
 }
@@ -147,6 +160,7 @@ pub async fn homes() -> anyhow::Result<Vec<HomeSummary>> {
             name: h.name.clone(),
             primary: h.primary,
             current: h.current,
+            cache_updated_at: h.cache_updated_at.clone(),
             rooms: h.rooms.len(),
             zones: h.zones.len(),
             accessories: h.accessories.len(),
@@ -156,7 +170,8 @@ pub async fn homes() -> anyhow::Result<Vec<HomeSummary>> {
 }
 
 pub async fn rooms(home: Option<&str>) -> anyhow::Result<Vec<RoomRow>> {
-    Ok(select_homes(list().await?, home)?
+    Ok(select_homes(list().await?, home)
+        .await?
         .into_iter()
         .flat_map(|h| {
             h.rooms.into_iter().map(move |r| RoomRow {
@@ -172,7 +187,8 @@ pub async fn accessories(
     home: Option<&str>,
     room: Option<&str>,
 ) -> anyhow::Result<Vec<AccessoryRow>> {
-    Ok(select_homes(list().await?, home)?
+    Ok(select_homes(list().await?, home)
+        .await?
         .into_iter()
         .flat_map(|h| {
             h.accessories
@@ -193,7 +209,8 @@ pub async fn accessories(
 }
 
 pub async fn scenes(home: Option<&str>) -> anyhow::Result<Vec<SceneRow>> {
-    Ok(select_homes(list().await?, home)?
+    Ok(select_homes(list().await?, home)
+        .await?
         .into_iter()
         .flat_map(|h| {
             h.scenes.into_iter().map(move |s| SceneRow {
@@ -241,14 +258,31 @@ fn matches_selector(value: Option<&str>, selector: &str) -> bool {
     value.is_some_and(|v| v.eq_ignore_ascii_case(selector))
 }
 
-fn select_homes(homes: Vec<Home>, selector: Option<&str>) -> anyhow::Result<Vec<Home>> {
+/// Narrow to one home by name, cache id, or (through a running bridge)
+/// bridge id; see [`super::home_live::resolve_cache_selector`].
+async fn select_homes(homes: Vec<Home>, selector: Option<&str>) -> anyhow::Result<Vec<Home>> {
     match selector {
         Some(selector) => {
-            let wanted = find_home(&homes, selector)?.id.clone();
+            let name = super::home_live::resolve_cache_selector(&homes, selector).await?;
+            let wanted = find_home(&homes, &name)?.id.clone();
             Ok(homes.into_iter().filter(|h| h.id == wanted).collect())
         }
         None => Ok(homes),
     }
+}
+
+/// When the Home app last wrote its cache: the mtime of the newest
+/// `homeData.*.config`.
+pub fn cache_updated_at() -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    let modified = std::fs::metadata(cache_path()?)?.modified()?;
+    Ok(modified.into())
+}
+
+/// Seconds since [`cache_updated_at`], for the `--envelope` of a
+/// cache-backed `cider home` read. `None` when there is no cache.
+pub fn cache_age_s() -> Option<u64> {
+    let updated = cache_updated_at().ok()?;
+    Some((chrono::Utc::now() - updated).num_seconds().max(0) as u64)
 }
 
 /// The newest `homeData.*.config` in the Home app's cache directory.
@@ -347,6 +381,7 @@ fn map_home(value: &Json, primary: Option<&str>, current: Option<&str>) -> Optio
     Some(Home {
         primary: primary.is_some_and(|p| p.eq_ignore_ascii_case(&id)),
         current: current.is_some_and(|c| c.eq_ignore_ascii_case(&id)),
+        cache_updated_at: None,
         location: value.get("homeLocation").and_then(map_location),
         id,
         name,

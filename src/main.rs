@@ -1390,6 +1390,27 @@ fn print_sourced_output(
     print_output(&wrapped, human, false)
 }
 
+/// A `cider home` read: `source` says bridge or cache, and a cache-backed
+/// read also carries `cache_age_s` so staleness is visible without a
+/// second command.
+fn print_home_output(
+    value: &serde_json::Value,
+    human: bool,
+    envelope: bool,
+    source: sources::home_live::Source,
+    cache_age_s: Option<u64>,
+) -> anyhow::Result<()> {
+    if !envelope {
+        return print_output(value, human, false);
+    }
+    let mut wrapped = envelope_value(value);
+    wrapped["source"] = serde_json::json!(source.as_str());
+    if let Some(age) = cache_age_s {
+        wrapped["cache_age_s"] = serde_json::json!(age);
+    }
+    print_output(&wrapped, human, false)
+}
+
 /// A Reminders/Calendar write result from whichever backend ran it.
 fn print_write_output(
     value: &serde_json::Value,
@@ -1700,19 +1721,26 @@ async fn run_home(
         | HomeAction::Rooms { .. }
         | HomeAction::Accessories { .. }
         | HomeAction::Scenes { .. } => {
-            let (value, source) = match hl::bridge_for(live).await?.as_mut() {
+            let (value, source, cache_age_s) = match hl::bridge_for(live).await?.as_mut() {
                 Some(bridge) => {
                     let value = match &action {
                         HomeAction::List => hl::list(bridge).await?,
                         HomeAction::Homes => hl::homes(bridge).await?,
-                        HomeAction::Rooms { home } => hl::rooms(bridge, home.as_deref()).await?,
+                        HomeAction::Rooms { home } => {
+                            let home = hl::resolve_home(bridge, home.as_deref()).await?;
+                            hl::rooms(bridge, home.as_deref()).await?
+                        }
                         HomeAction::Accessories { home, room } => {
+                            let home = hl::resolve_home(bridge, home.as_deref()).await?;
                             hl::accessories(bridge, home.as_deref(), room.as_deref()).await?
                         }
-                        HomeAction::Scenes { home } => hl::scenes(bridge, home.as_deref()).await?,
+                        HomeAction::Scenes { home } => {
+                            let home = hl::resolve_home(bridge, home.as_deref()).await?;
+                            hl::scenes(bridge, home.as_deref()).await?
+                        }
                         _ => unreachable!("read subcommands only"),
                     };
-                    (value, Source::Bridge)
+                    (value, Source::Bridge, None)
                 }
                 None => {
                     let value = match &action {
@@ -1729,10 +1757,10 @@ async fn run_home(
                         }
                         _ => unreachable!("read subcommands only"),
                     };
-                    (value, Source::Cache)
+                    (value, Source::Cache, sources::home::cache_age_s())
                 }
             };
-            print_sourced_output(&value, pretty, envelope, source.as_str())
+            print_home_output(&value, pretty, envelope, source, cache_age_s)
         }
         HomeAction::State {
             home,
@@ -1740,6 +1768,7 @@ async fn run_home(
             accessory,
         } => {
             let mut bridge = Bridge::connect().await?;
+            let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let rows = hl::state(
                 &mut bridge,
                 home.as_deref(),
@@ -1759,6 +1788,7 @@ async fn run_home(
                 );
             }
             let mut bridge = Bridge::connect().await?;
+            let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let result = hl::run_scene(&mut bridge, home.as_deref(), scene).await?;
             print_output(&serde_json::to_value(&result)?, pretty, envelope)
         }
@@ -1781,6 +1811,7 @@ async fn run_home(
                 );
             }
             let mut bridge = Bridge::connect().await?;
+            let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let result = hl::set(
                 &mut bridge,
                 home.as_deref(),
@@ -1799,6 +1830,7 @@ async fn run_home(
             match action {
                 HomeTriggersAction::List { home } => {
                     let mut bridge = Bridge::connect().await?;
+                    let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let value = hl::triggers(&mut bridge, home.as_deref()).await?;
                     print_output(&value, pretty, envelope)
                 }
@@ -1827,6 +1859,7 @@ async fn run_home(
                         );
                     }
                     let mut bridge = Bridge::connect().await?;
+                    let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let row =
                         hl::create_timer(&mut bridge, home.as_deref(), name, at, recurrence, scene)
                             .await?;
@@ -1845,6 +1878,7 @@ async fn run_home(
                         );
                     }
                     let mut bridge = Bridge::connect().await?;
+                    let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let row =
                         hl::set_trigger_enabled(&mut bridge, home.as_deref(), trigger, enabled)
                             .await?;
@@ -1860,6 +1894,7 @@ async fn run_home(
                         );
                     }
                     let mut bridge = Bridge::connect().await?;
+                    let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let result = hl::delete_trigger(&mut bridge, home.as_deref(), trigger).await?;
                     print_output(&serde_json::to_value(&result)?, pretty, envelope)
                 }

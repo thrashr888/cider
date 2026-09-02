@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value as Json};
 
 use super::bridge::{self, Bridge, BridgeError};
+use super::home;
 use super::util::ActionResult;
 
 /// Which backend answered a `cider home` read; `--envelope` reports it.
@@ -59,6 +60,95 @@ fn args(pairs: &[(&str, Option<&str>)]) -> Json {
 
 pub async fn homes(bridge: &mut Bridge) -> Result<Json, BridgeError> {
     bridge.call("home.homes", json!({})).await
+}
+
+fn json_field<'a>(value: &'a Json, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Json::as_str)
+}
+
+fn same(a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| a.eq_ignore_ascii_case(b))
+}
+
+/// A `--home` selector the bridge will accept, given the bridge's
+/// `home.homes` rows and the cache. Names work on both sides, ids do not:
+/// the cache's `homeUUID` is not `HMHome.uniqueIdentifier`. So: a bridge
+/// name or id passes through; a cache id is mapped to its home's name,
+/// provided the bridge knows that name. Pure.
+pub fn resolve_home_from(
+    selector: &str,
+    live: &Json,
+    cached: &[home::Home],
+) -> anyhow::Result<String> {
+    let live: Vec<&Json> = live.as_array().into_iter().flatten().collect();
+    if live
+        .iter()
+        .any(|h| same(json_field(h, "name"), selector) || same(json_field(h, "id"), selector))
+    {
+        return Ok(selector.to_string());
+    }
+    if let Ok(home) = home::find_home(cached, selector) {
+        if live.iter().any(|h| same(json_field(h, "name"), &home.name)) {
+            return Ok(home.name.clone());
+        }
+    }
+    let known: Vec<&str> = live.iter().filter_map(|h| json_field(h, "name")).collect();
+    anyhow::bail!(
+        "no home matches '{selector}' on the bridge (known: {}); select homes by name, since \
+         cache and bridge ids differ",
+        known.join(", ")
+    )
+}
+
+/// [`resolve_home_from`] against the connected bridge; `None` stays `None`.
+pub async fn resolve_home(
+    bridge: &mut Bridge,
+    selector: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(selector) = selector else {
+        return Ok(None);
+    };
+    let live = homes(bridge).await?;
+    let cached = home::list().await.unwrap_or_default();
+    resolve_home_from(selector, &live, &cached).map(Some)
+}
+
+/// The cache home's name a selector refers to: by name or cache id, else
+/// by bridge id mapped through the bridge's `home.homes` rows. Pure.
+pub fn resolve_cache_selector_from(
+    cached: &[home::Home],
+    selector: &str,
+    live: Option<&Json>,
+) -> anyhow::Result<String> {
+    let miss = match home::find_home(cached, selector) {
+        Ok(home) => return Ok(home.name.clone()),
+        Err(error) => error,
+    };
+    let name = live
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .find(|h| same(json_field(h, "id"), selector))
+        .and_then(|h| json_field(h, "name"))
+        .and_then(|name| home::find_home(cached, name).ok())
+        .map(|home| home.name.clone());
+    name.ok_or(miss)
+}
+
+/// [`resolve_cache_selector_from`], asking a bridge that is already running
+/// for its ids. Never launches the bridge: a cache read stays a cache read.
+pub async fn resolve_cache_selector(
+    cached: &[home::Home],
+    selector: &str,
+) -> anyhow::Result<String> {
+    if let Ok(home) = home::find_home(cached, selector) {
+        return Ok(home.name.clone());
+    }
+    let live = match Bridge::connect_running().await {
+        Ok(mut bridge) => homes(&mut bridge).await.ok(),
+        Err(_) => None,
+    };
+    resolve_cache_selector_from(cached, selector, live.as_ref())
 }
 
 pub async fn rooms(bridge: &mut Bridge, home: Option<&str>) -> Result<Json, BridgeError> {
@@ -428,6 +518,75 @@ mod tests {
         assert!(validate_fire_at("2026-09-01T19:30:00Z").is_ok());
         assert!(validate_fire_at("2026-09-01 19:30").is_err());
         assert!(validate_fire_at("tomorrow").is_err());
+    }
+
+    fn cached_homes() -> Vec<home::Home> {
+        home::map_cache(&json!({
+            "kHomeDataKey": [
+                {"homeName": "Casa", "homeUUID": "CACHE-1"},
+                {"homeName": "Cabin", "homeUUID": "CACHE-2"}
+            ]
+        }))
+    }
+
+    fn live_homes() -> Json {
+        json!([
+            {"id": "LIVE-1", "name": "Casa", "primary": true},
+            {"id": "LIVE-2", "name": "Cabin", "primary": false}
+        ])
+    }
+
+    #[test]
+    fn bridge_selector_takes_names_bridge_ids_then_cache_ids() {
+        let cached = cached_homes();
+        let live = live_homes();
+        assert_eq!(resolve_home_from("casa", &live, &cached).unwrap(), "casa");
+        assert_eq!(
+            resolve_home_from("live-2", &live, &cached).unwrap(),
+            "live-2"
+        );
+        assert_eq!(
+            resolve_home_from("CACHE-2", &live, &cached).unwrap(),
+            "Cabin",
+            "a cache id becomes the name the bridge knows"
+        );
+        let error = resolve_home_from("Nope", &live, &cached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("known: Casa, Cabin"), "{error}");
+        assert!(error.contains("ids differ"), "{error}");
+        // A cache id whose home the bridge does not have is still unknown.
+        let only_casa = json!([{"id": "LIVE-1", "name": "Casa"}]);
+        assert!(resolve_home_from("CACHE-2", &only_casa, &cached).is_err());
+        // No cache at all: bridge names and ids still work.
+        assert_eq!(resolve_home_from("Cabin", &live, &[]).unwrap(), "Cabin");
+    }
+
+    #[test]
+    fn cache_selector_takes_names_cache_ids_then_bridge_ids() {
+        let cached = cached_homes();
+        let live = live_homes();
+        assert_eq!(
+            resolve_cache_selector_from(&cached, "CABIN", None).unwrap(),
+            "Cabin"
+        );
+        assert_eq!(
+            resolve_cache_selector_from(&cached, "cache-1", None).unwrap(),
+            "Casa"
+        );
+        assert_eq!(
+            resolve_cache_selector_from(&cached, "LIVE-2", Some(&live)).unwrap(),
+            "Cabin",
+            "a bridge id maps through the bridge's name"
+        );
+        let error = resolve_cache_selector_from(&cached, "LIVE-2", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("no home matches 'LIVE-2'"),
+            "without a running bridge the cache's own error stands: {error}"
+        );
+        assert!(resolve_cache_selector_from(&cached, "Nope", Some(&live)).is_err());
     }
 
     #[test]
