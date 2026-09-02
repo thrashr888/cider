@@ -4,3 +4,4 @@ DerivedData/
 *.xcworkspace/
 .swiftpm/
 .env.local
+dist/

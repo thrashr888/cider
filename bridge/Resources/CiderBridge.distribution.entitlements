@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Developer ID (Homebrew) build: WeatherKit only. Apple restricts the
+	HomeKit entitlement to App Store and development signing, so a Developer
+	ID build that carries it fails to sign/notarize. Live HomeKit needs a
+	personal build (scripts/build.sh with a team, no distribution).
+	-->
+	<key>com.apple.developer.weatherkit</key>
+	<true/>
+</dict>
+</plist>
