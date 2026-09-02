@@ -229,7 +229,7 @@ async fn check_bridge_socket() -> DoctorCheck {
         Some(pong) => (
             CheckStatus::Ok,
             format!(
-                "{} answers ping (version {}, homekit_authorized {}, {} homes)",
+                "Cider Bridge answers ping on {} (version {}, homekit_authorized {}, {} homes)",
                 socket.display(),
                 pong.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
                 pong.get("homekit_authorized")
@@ -367,8 +367,9 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_checks_are_optional_and_never_launch_the_app() {
-        // `inspect` only pings the socket; with no bridge running this is a
-        // fast refusal, not a launch. Both checks must be present and optional.
+        // `inspect` only pings the socket: a fast refusal when nothing runs,
+        // a ping reply when the bridge is up, never a launch. Both checks must
+        // be present and optional whichever state the machine is in.
         let report = inspect().await;
         for name in ["bridge_app", "bridge_socket"] {
             let check = report
