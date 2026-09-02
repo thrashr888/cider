@@ -9,6 +9,8 @@ public enum BridgeError: Error, Equatable, Sendable {
     /// Calendar, Reminders, or Contacts consent missing (TCC); the message
     /// names the System Settings pane and the binary to allow.
     case permissionDenied(String)
+    /// WeatherKit could not answer (entitlement, network, or service error).
+    case weatherUnavailable(String)
     case timeout(String)
     case internalError(String)
 
@@ -19,6 +21,7 @@ public enum BridgeError: Error, Equatable, Sendable {
         case .homekitDenied: "homekit_denied"
         case .homekitUnavailable: "homekit_unavailable"
         case .permissionDenied: "permission_denied"
+        case .weatherUnavailable: "weather_unavailable"
         case .timeout: "timeout"
         case .internalError: "internal"
         }
@@ -27,7 +30,7 @@ public enum BridgeError: Error, Equatable, Sendable {
     public var message: String {
         switch self {
         case .notFound(let m), .invalidArgs(let m), .homekitDenied(let m), .homekitUnavailable(let m),
-             .permissionDenied(let m), .timeout(let m), .internalError(let m):
+             .permissionDenied(let m), .weatherUnavailable(let m), .timeout(let m), .internalError(let m):
             m
         }
     }
@@ -42,6 +45,7 @@ public enum BridgeError: Error, Equatable, Sendable {
         case "homekit_denied": self = .homekitDenied(body.message)
         case "homekit_unavailable": self = .homekitUnavailable(body.message)
         case "permission_denied": self = .permissionDenied(body.message)
+        case "weather_unavailable": self = .weatherUnavailable(body.message)
         case "timeout": self = .timeout(body.message)
         default: self = .internalError(body.message)
         }
@@ -106,6 +110,18 @@ public struct Args: Sendable {
     public func requiredStringArray(_ key: String) throws -> [String] {
         guard let a = try stringArray(key), !a.isEmpty else { throw BridgeError.invalidArgs("'\(key)' is required") }
         return a
+    }
+
+    public func double(_ key: String) throws -> Double? {
+        guard let v = value(key) else { return nil }
+        if let n = v.doubleValue { return n }
+        if let s = v.stringValue, let n = Double(s.trimmingCharacters(in: .whitespaces)) { return n }
+        throw BridgeError.invalidArgs("'\(key)' must be a number")
+    }
+
+    public func requiredDouble(_ key: String) throws -> Double {
+        guard let n = try double(key) else { throw BridgeError.invalidArgs("'\(key)' is required") }
+        return n
     }
 
     public func int(_ key: String) throws -> Int? {

@@ -3,7 +3,8 @@ import BridgeCore
 import UIKit
 
 /// Cider Bridge: a faceless (`LSUIElement`) Mac Catalyst app that serves the
-/// bridge protocol on the RFC socket with the real HomeKit service, and quits
+/// bridge protocol on the RFC socket with the real HomeKit and WeatherKit
+/// services, and quits
 /// after ten idle minutes. No menu bar item in v1: Catalyst cannot link AppKit
 /// directly and a plugin bundle is not worth it for one status icon.
 @main
@@ -24,6 +25,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let service = HMHomeKitService()
         Task { @MainActor in
             await registerHomeCommands(router, service: service)
+            #if canImport(WeatherKit)
+            await registerWeatherCommands(router, service: WKWeatherService())
+            #endif
             do {
                 try server.start()
                 NSLog("cider-bridge: listening on %@", server.path)
