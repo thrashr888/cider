@@ -255,6 +255,20 @@ public struct TriggerRow: Codable, Equatable, Sendable {
     }
 }
 
+/// `home.set` reply: `{accessory, characteristic, value}`.
+public struct SetResult: Codable, Equatable, Sendable {
+    public var accessory: String
+    /// Human characteristic name (or type UUID for vendor types).
+    public var characteristic: String
+    public var value: JSONValue
+
+    public init(accessory: String, characteristic: String, value: JSONValue) {
+        self.accessory = accessory
+        self.characteristic = characteristic
+        self.value = value
+    }
+}
+
 // MARK: - Service protocol
 
 /// The `home.*` command surface from the RFC table. Every name argument is a
@@ -269,6 +283,76 @@ public protocol HomeKitService: Sendable {
     func accessories(home: String?, room: String?) async throws -> [AccessoryRow]
     func scenes(home: String?) async throws -> [SceneRow]
     func triggers(home: String?) async throws -> [TriggerRow]
+
+    func runScene(home: String?, scene: String) async throws
+    /// `characteristic` is a HAP short name (`power_state`), alias (`on`), type
+    /// UUID, or characteristic UUID; `service` narrows when an accessory has
+    /// several services carrying that characteristic.
+    func set(home: String?, accessory: String, service: String?, characteristic: String, value: JSONValue)
+        async throws -> SetResult
+    /// Creates, attaches `scenes`, and enables an `HMTimerTrigger`.
+    func createTimerTrigger(home: String?, name: String, fireAt: Date, recurrence: Recurrence?, scenes: [String])
+        async throws -> TriggerRow
+    func setTriggerEnabled(home: String?, trigger: String, enabled: Bool) async throws -> TriggerRow
+    func deleteTrigger(home: String?, trigger: String) async throws
+}
+
+// MARK: - Characteristic resolution (shared by the fake and the real service)
+
+public enum CharacteristicResolver {
+    public struct Match<Service, Characteristic> {
+        public let service: Service
+        public let characteristic: Characteristic
+    }
+
+    /// Finds one characteristic on an accessory. `serviceQuery` (name, human
+    /// type like `lightbulb`, type UUID, or service UUID) narrows the services.
+    /// The characteristic query is a HAP short name or alias, a type UUID, or
+    /// the characteristic's own UUID. Several hits is `invalid_args` asking for
+    /// `service`; none is `not_found`.
+    public static func resolve<S, C>(
+        _ query: String, service serviceQuery: String?, services: [S],
+        serviceID: (S) -> UUID, serviceName: (S) -> String, serviceType: (S) -> String,
+        characteristics: (S) -> [C], characteristicID: (C) -> UUID, characteristicType: (C) -> String
+    ) throws -> Match<S, C> {
+        var candidates = services
+        if let serviceQuery, !serviceQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+            let q = serviceQuery.trimmingCharacters(in: .whitespaces)
+            let qUUID = UUID(uuidString: q)
+            let qType = HAPTypes.serviceType(forName: q) ?? HAPTypes.shortID(q).map(HAPTypes.fullUUID(shortID:))
+            candidates = services.filter { s in
+                serviceID(s) == qUUID
+                    || serviceName(s).caseInsensitiveCompare(q) == .orderedSame
+                    || serviceType(s).caseInsensitiveCompare(qType ?? "") == .orderedSame
+            }
+            guard !candidates.isEmpty else { throw BridgeError.notFound("service '\(serviceQuery)' not found") }
+        }
+
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let qUUID = UUID(uuidString: q)
+        let qType = HAPTypes.characteristicType(forName: q)
+            ?? HAPTypes.shortID(q).map(HAPTypes.fullUUID(shortID:))
+            ?? q.uppercased()
+
+        var matches: [Match<S, C>] = []
+        for s in candidates {
+            for c in characteristics(s) {
+                if characteristicID(c) == qUUID || characteristicType(c).uppercased() == qType {
+                    matches.append(Match(service: s, characteristic: c))
+                }
+            }
+        }
+        switch matches.count {
+        case 0:
+            throw BridgeError.notFound("characteristic '\(query)' not found")
+        case 1:
+            return matches[0]
+        default:
+            let names = matches.map { "\(serviceName($0.service)) (\(serviceID($0.service).uuidString))" }
+            throw BridgeError.invalidArgs(
+                "characteristic '\(query)' is on \(matches.count) services; pass 'service': \(names.joined(separator: ", "))")
+        }
+    }
 }
 
 // MARK: - Name / UUID resolution

@@ -349,6 +349,15 @@ cargo build --release
 # Binary at target/release/cider
 ```
 
+## Bridge
+
+HomeKit has no file or script interface, so `cider` can talk to an optional
+signed Swift helper, **Cider Bridge**, over a Unix socket. The Swift half
+lives in [`bridge/`](bridge/) (`swift test` there runs its unit tests;
+`bridge/scripts/build.sh --team <id> --install` builds the Mac Catalyst app
+with your own Apple Developer team). The design, protocol, and command table
+are in [docs/RFC-swift-bridge.md](docs/RFC-swift-bridge.md).
+
 ## License
 
 MIT

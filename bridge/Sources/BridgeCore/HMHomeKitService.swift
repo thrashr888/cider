@@ -82,6 +82,152 @@ public final class HMHomeKitService: NSObject, HomeKitService {
         return home.triggers.map { triggerRow($0, home: home) }
     }
 
+    public func runScene(home: String?, scene: String) async throws {
+        let home = try await resolveHome(home)
+        let actionSet = try resolveActionSet(scene, in: home)
+        try await mapping { try await home.executeActionSet(actionSet) }
+    }
+
+    public func set(home: String?, accessory: String, service: String?, characteristic: String,
+                    value: JSONValue) async throws -> SetResult {
+        let home = try await resolveHome(home)
+        let target = try resolveAccessory(accessory, in: home)
+        let match = try CharacteristicResolver.resolve(
+            characteristic, service: service,
+            services: target.services.filter { !HAPTypes.isAccessoryInformation(serviceType: $0.serviceType) },
+            serviceID: \.uniqueIdentifier, serviceName: \.name, serviceType: \.serviceType,
+            characteristics: \.characteristics, characteristicID: \.uniqueIdentifier,
+            characteristicType: \.characteristicType)
+        let hm = match.characteristic
+        let name = HAPTypes.characteristicName(forType: hm.characteristicType)
+        guard hm.properties.contains(HMCharacteristicPropertyWritable) else {
+            throw BridgeError.invalidArgs("characteristic '\(name)' is read-only")
+        }
+        let native = try Self.nativeValue(value, for: hm)
+        try await mapping { try await hm.writeValue(native) }
+        let written = Self.jsonValue(of: hm)
+        return SetResult(accessory: target.name, characteristic: name, value: written.isNull ? value : written)
+    }
+
+    public func createTimerTrigger(home: String?, name: String, fireAt: Date, recurrence: Recurrence?,
+                                   scenes: [String]) async throws -> TriggerRow {
+        let home = try await resolveHome(home)
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw BridgeError.invalidArgs("'name' is required")
+        }
+        guard !scenes.isEmpty else { throw BridgeError.invalidArgs("'scenes' must name at least one scene") }
+        let actionSets = try scenes.map { try resolveActionSet($0, in: home) }
+        // HomeKit keeps timer fire dates at minute precision and rejects the past.
+        let fireDate = Date(timeIntervalSinceReferenceDate: (fireAt.timeIntervalSinceReferenceDate / 60).rounded(.down) * 60)
+        guard fireDate > Date() else {
+            throw BridgeError.invalidArgs("'fire_at' must be in the future (got \(DateCoding.format(fireAt)))")
+        }
+
+        let trigger = HMTimerTrigger(name: name, fireDate: fireDate, recurrence: recurrence?.dateComponents)
+        try await mapping { try await home.addTrigger(trigger) }
+        do {
+            for actionSet in actionSets {
+                try await mapping { try await trigger.addActionSet(actionSet) }
+            }
+            try await mapping { try await trigger.enable(true) }
+        } catch {
+            // Do not leave a half-built automation behind.
+            try? await home.removeTrigger(trigger)
+            throw error
+        }
+        return triggerRow(trigger, home: home)
+    }
+
+    public func setTriggerEnabled(home: String?, trigger: String, enabled: Bool) async throws -> TriggerRow {
+        let home = try await resolveHome(home)
+        let hm = try resolveTrigger(trigger, in: home)
+        try await mapping { try await hm.enable(enabled) }
+        return triggerRow(hm, home: home)
+    }
+
+    public func deleteTrigger(home: String?, trigger: String) async throws {
+        let home = try await resolveHome(home)
+        let hm = try resolveTrigger(trigger, in: home)
+        try await mapping { try await home.removeTrigger(hm) }
+    }
+
+    // MARK: Errors
+
+    /// Runs a HomeKit call and rewrites its `HMError` into the RFC's codes.
+    private func mapping<T>(_ body: () async throws -> T) async throws -> T {
+        do {
+            return try await body()
+        } catch let error as BridgeError {
+            throw error
+        } catch {
+            throw Self.bridgeError(from: error)
+        }
+    }
+
+    static func bridgeError(from error: Error) -> BridgeError {
+        let ns = error as NSError
+        let message = "HomeKit: \(ns.localizedDescription)"
+        guard ns.domain == HMErrorDomain, let code = HMError.Code(rawValue: ns.code) else {
+            return .internalError(message)
+        }
+        switch code {
+        case .notFound:
+            return .notFound(message)
+        case .invalidParameter, .invalidValueType, .readOnlyCharacteristic, .writeOnlyCharacteristic, .fireDateInPast:
+            return .invalidArgs(message)
+        case .homeAccessNotAuthorized:
+            return .homekitDenied(message)
+        case .accessoryNotReachable, .communicationFailure:
+            return .homekitUnavailable(message)
+        case .operationTimedOut:
+            return .timeout(message)
+        default:
+            return .internalError(message)
+        }
+    }
+
+    /// Converts a wire value to what `writeValue` expects, using the
+    /// characteristic's metadata format.
+    static func nativeValue(_ value: JSONValue, for characteristic: HMCharacteristic) throws -> Any {
+        let name = HAPTypes.characteristicName(forType: characteristic.characteristicType)
+        let format = characteristic.metadata?.format
+        func bad(_ expected: String) -> BridgeError {
+            .invalidArgs("'\(name)' expects \(expected), got \(value)")
+        }
+        switch format {
+        case HMCharacteristicMetadataFormatBool:
+            if let b = value.boolValue { return b }
+            if let n = value.doubleValue { return n != 0 }
+            if let s = value.stringValue?.lowercased() {
+                if ["true", "on", "yes", "1"].contains(s) { return true }
+                if ["false", "off", "no", "0"].contains(s) { return false }
+            }
+            throw bad("a boolean")
+        case HMCharacteristicMetadataFormatInt, HMCharacteristicMetadataFormatUInt8, HMCharacteristicMetadataFormatUInt16,
+             HMCharacteristicMetadataFormatUInt32, HMCharacteristicMetadataFormatUInt64:
+            if let i = value.intValue { return i }
+            if let b = value.boolValue { return b ? 1 : 0 }
+            if let s = value.stringValue, let i = Int(s) { return i }
+            throw bad("an integer")
+        case HMCharacteristicMetadataFormatFloat:
+            if let d = value.doubleValue { return d }
+            if let s = value.stringValue, let d = Double(s) { return d }
+            throw bad("a number")
+        case HMCharacteristicMetadataFormatString:
+            if let s = value.stringValue { return s }
+            if let d = value.doubleValue { return d.rounded() == d ? String(Int(d)) : String(d) }
+            if let b = value.boolValue { return b ? "true" : "false" }
+            throw bad("a string")
+        default:
+            switch value {
+            case .bool(let b): return b
+            case .number(let n): return n.rounded() == n ? Int(n) : n
+            case .string(let s): return s
+            default: throw bad("a scalar")
+            }
+        }
+    }
+
     // MARK: Resolution
 
     func resolveHome(_ query: String?) async throws -> HMHome {

@@ -38,4 +38,42 @@ public func registerHomeCommands(_ router: CommandRouter, service: some HomeKitS
         let args = Args(raw)
         return try JSONValue(encoding: try await service.triggers(home: try args.string("home")))
     }
+
+    await router.register("home.run_scene") { raw in
+        let args = Args(raw)
+        try await service.runScene(home: try args.string("home"), scene: try args.requiredString("scene"))
+        return ["ran": true]
+    }
+
+    await router.register("home.set") { raw in
+        let args = Args(raw)
+        let result = try await service.set(
+            home: try args.string("home"), accessory: try args.requiredString("accessory"),
+            service: try args.string("service"), characteristic: try args.requiredString("characteristic"),
+            value: try args.requiredValue("value"))
+        return try JSONValue(encoding: result)
+    }
+
+    await router.register("home.trigger_create_timer") { raw in
+        let args = Args(raw)
+        let row = try await service.createTimerTrigger(
+            home: try args.string("home"), name: try args.requiredString("name"),
+            fireAt: try args.requiredDate("fire_at"), recurrence: try Recurrence.parse(args.value("recurrence")),
+            scenes: try args.requiredStringArray("scenes"))
+        return try JSONValue(encoding: row)
+    }
+
+    await router.register("home.trigger_set_enabled") { raw in
+        let args = Args(raw)
+        let row = try await service.setTriggerEnabled(
+            home: try args.string("home"), trigger: try args.requiredString("trigger"),
+            enabled: try args.requiredBool("enabled"))
+        return try JSONValue(encoding: row)
+    }
+
+    await router.register("home.trigger_delete") { raw in
+        let args = Args(raw)
+        try await service.deleteTrigger(home: try args.string("home"), trigger: try args.requiredString("trigger"))
+        return ["deleted": true]
+    }
 }

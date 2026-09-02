@@ -22,6 +22,8 @@ public actor FakeHomeKitService: HomeKitService {
 
     public var authorized: Bool
     public private(set) var homesData: [Home]
+    /// Scene ids in the order `runScene` executed them.
+    public private(set) var executedScenes: [UUID] = []
 
     public init(homes: [Home], authorized: Bool = true) {
         self.homesData = homes
@@ -60,7 +62,78 @@ public actor FakeHomeKitService: HomeKitService {
         try resolveHome(home).triggers
     }
 
+    public func runScene(home: String?, scene: String) async throws {
+        let home = try resolveHome(home)
+        let resolved = try NameResolver.resolve(scene, in: home.scenes, kind: "scene", id: \.id, name: \.name)
+        executedScenes.append(resolved.id)
+    }
+
+    public func set(home: String?, accessory: String, service: String?, characteristic: String,
+                    value: JSONValue) async throws -> SetResult {
+        let h = try homeIndex(home)
+        let target = try NameResolver.resolve(
+            accessory, in: homesData[h].accessories, kind: "accessory", id: \.id, name: \.name)
+        let a = homesData[h].accessories.firstIndex { $0.id == target.id }!
+        let match = try CharacteristicResolver.resolve(
+            characteristic, service: service, services: homesData[h].accessories[a].services,
+            serviceID: \.id, serviceName: \.name, serviceType: \.typeID,
+            characteristics: \.characteristics, characteristicID: \.id, characteristicType: \.type)
+        let s = homesData[h].accessories[a].services.firstIndex { $0.id == match.service.id }!
+        let c = homesData[h].accessories[a].services[s].characteristics.firstIndex { $0.id == match.characteristic.id }!
+        var row = homesData[h].accessories[a].services[s].characteristics[c]
+        guard row.writable else { throw BridgeError.invalidArgs("characteristic '\(row.name)' is read-only") }
+        row.value = Self.coerce(value, like: row.value)
+        homesData[h].accessories[a].services[s].characteristics[c] = row
+        return SetResult(accessory: target.name, characteristic: row.name, value: row.value)
+    }
+
+    public func createTimerTrigger(home: String?, name: String, fireAt: Date, recurrence: Recurrence?,
+                                   scenes: [String]) async throws -> TriggerRow {
+        let h = try homeIndex(home)
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw BridgeError.invalidArgs("'name' is required")
+        }
+        guard !scenes.isEmpty else { throw BridgeError.invalidArgs("'scenes' must name at least one scene") }
+        let resolved = try scenes.map {
+            try NameResolver.resolve($0, in: homesData[h].scenes, kind: "scene", id: \.id, name: \.name)
+        }
+        let row = TriggerRow(
+            id: UUID(), name: name, home: homesData[h].row.name, kind: "timer", enabled: true,
+            fireDate: fireAt, recurrence: recurrence, scenes: resolved.map(\.name))
+        homesData[h].triggers.append(row)
+        return row
+    }
+
+    public func setTriggerEnabled(home: String?, trigger: String, enabled: Bool) async throws -> TriggerRow {
+        let h = try homeIndex(home)
+        let t = try triggerIndex(trigger, in: h)
+        homesData[h].triggers[t].enabled = enabled
+        return homesData[h].triggers[t]
+    }
+
+    public func deleteTrigger(home: String?, trigger: String) async throws {
+        let h = try homeIndex(home)
+        homesData[h].triggers.remove(at: try triggerIndex(trigger, in: h))
+    }
+
     // MARK: Internals
+
+    private func triggerIndex(_ query: String, in h: Int) throws -> Int {
+        let resolved = try NameResolver.resolve(query, in: homesData[h].triggers, kind: "trigger", id: \.id, name: \.name)
+        return homesData[h].triggers.firstIndex { $0.id == resolved.id }!
+    }
+
+    /// Mimics HomeKit's typed characteristics: keep the existing value's kind.
+    static func coerce(_ value: JSONValue, like existing: JSONValue) -> JSONValue {
+        switch (existing, value) {
+        case (.bool, .number(let n)): .bool(n != 0)
+        case (.bool, .string(let s)): .bool(["true", "on", "yes", "1"].contains(s.lowercased()))
+        case (.number, .bool(let b)): .number(b ? 1 : 0)
+        case (.number, .string(let s)): Double(s).map(JSONValue.number) ?? value
+        case (.string, .number(let n)): .string(n.rounded() == n ? String(Int(n)) : String(n))
+        default: value
+        }
+    }
 
     private func checkAuthorized() throws {
         guard authorized else { throw BridgeError.homekitDenied("HomeKit access denied") }
