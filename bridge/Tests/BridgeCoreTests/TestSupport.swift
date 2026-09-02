@@ -4,7 +4,7 @@ import XCTest
 
 /// Blocking Unix-socket client for end-to-end tests: one line out, one line in.
 final class LineSocketClient {
-    private let fd: Int32
+    let fd: Int32
     private var pending: [UInt8] = []
 
     init(path: String) throws {

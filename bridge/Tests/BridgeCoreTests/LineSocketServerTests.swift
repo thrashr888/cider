@@ -11,7 +11,9 @@ final class LineSocketServerTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeServer(idleTimer: IdleTimer? = nil) async throws -> (LineSocketServer, String) {
+    private func makeServer(
+        idleTimer: IdleTimer? = nil, peerPolicy: @escaping LineSocketServer.PeerPolicy = LineSocketServer.sameUserOnly
+    ) async throws -> (LineSocketServer, String) {
         let (dir, path) = try temporarySocketPath()
         tempDir = dir
         let router = CommandRouter(version: "t")
@@ -23,7 +25,47 @@ final class LineSocketServerTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(150))
             return "late"
         }
-        return (LineSocketServer(path: path, router: router, idleTimer: idleTimer), path)
+        return (LineSocketServer(path: path, router: router, idleTimer: idleTimer, peerPolicy: peerPolicy), path)
+    }
+
+    // MARK: peer uid
+
+    func testSameUserPeerIsAcceptedAndSeenByThePolicy() async throws {
+        let seen = OSAllocatedUnfairLock<[uid_t]>(initialState: [])
+        let (server, path) = try await makeServer(peerPolicy: { uid in
+            seen.withLock { $0.append(uid) }
+            return LineSocketServer.sameUserOnly(uid)
+        })
+        try server.start()
+        defer { server.stop() }
+
+        let client = try LineSocketClient(path: path)
+        XCTAssertEqual(try client.call(Request(id: 1, cmd: "ping")).ok, true)
+        XCTAssertEqual(seen.withLock { $0 }, [getuid()])
+        // The kernel reports our own uid for both ends of a local connection.
+        XCTAssertEqual(LineSocketServer.peerUID(of: client.fd), getuid())
+        XCTAssertNil(LineSocketServer.peerUID(of: -1))
+    }
+
+    func testRejectedPeerIsDroppedWithoutAReply() async throws {
+        let (server, path) = try await makeServer(peerPolicy: { _ in false })
+        try server.start()
+        defer { server.stop() }
+
+        // connect(2) completes in the kernel before accept, so the client sees
+        // the drop as EOF on its first read rather than a refused connection.
+        let rejected = try LineSocketClient(path: path)
+        rejected.send(#"{"id": 1, "cmd": "ping"}"#)
+        XCTAssertThrowsError(try rejected.readLine())
+
+        // The server is still serving: a later peer gets the same policy answer,
+        // and stop/start with the default policy admits us again.
+        XCTAssertThrowsError(try LineSocketClient(path: path).call(Request(id: 2, cmd: "ping")))
+        server.stop()
+        let (open, openPath) = try await makeServer()
+        try open.start()
+        defer { open.stop() }
+        XCTAssertEqual(try LineSocketClient(path: openPath).call(Request(id: 3, cmd: "ping")).ok, true)
     }
 
     func testPingAndFakeScenesEndToEnd() async throws {

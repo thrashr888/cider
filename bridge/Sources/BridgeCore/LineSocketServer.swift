@@ -6,7 +6,18 @@ import Foundation
 /// Multiple clients are served concurrently. All mutable state is confined to
 /// the serial `queue` (accept/read events are `DispatchSource`s targeting it),
 /// which is why the class is `@unchecked Sendable`.
+///
+/// Trust model: the bridge is single-user. The socket is 0600 in a 0700
+/// directory, and every accepted connection is additionally checked with
+/// `getpeereid`: a peer whose uid is not ours is dropped before a byte is
+/// read (defense in depth against a permissive umask or a moved socket).
 public final class LineSocketServer: @unchecked Sendable {
+    /// Decides whether a connecting peer (by effective uid) may talk to the
+    /// bridge. The default accepts only the server's own uid.
+    public typealias PeerPolicy = @Sendable (uid_t) -> Bool
+
+    public static let sameUserOnly: PeerPolicy = { $0 == getuid() }
+
     public enum SocketError: Error, CustomStringConvertible {
         case pathTooLong(String)
         case posix(String, Int32)
@@ -29,6 +40,7 @@ public final class LineSocketServer: @unchecked Sendable {
     public let path: String
     private let router: CommandRouter
     private let idleTimer: IdleTimer?
+    private let peerPolicy: PeerPolicy
     private let queue = DispatchQueue(label: "dev.thrasher.cider.bridge.socket")
 
     // Confined to `queue`.
@@ -36,10 +48,14 @@ public final class LineSocketServer: @unchecked Sendable {
     private var listenSource: DispatchSourceRead?
     private var connections: [UUID: Connection] = [:]
 
-    public init(path: String = LineSocketServer.defaultPath, router: CommandRouter, idleTimer: IdleTimer? = nil) {
+    public init(
+        path: String = LineSocketServer.defaultPath, router: CommandRouter, idleTimer: IdleTimer? = nil,
+        peerPolicy: @escaping PeerPolicy = LineSocketServer.sameUserOnly
+    ) {
         self.path = path
         self.router = router
         self.idleTimer = idleTimer
+        self.peerPolicy = peerPolicy
     }
 
     public var isRunning: Bool { queue.sync { listenFD >= 0 } }
@@ -128,6 +144,12 @@ public final class LineSocketServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 return  // EAGAIN: drained
             }
+            let peer = Self.peerUID(of: fd)
+            guard let uid = peer, peerPolicy(uid) else {
+                Self.log("rejected connection from uid \(peer.map(String.init) ?? "unknown") (server uid \(getuid()))")
+                close(fd)
+                continue
+            }
             // Accepted sockets inherit O_NONBLOCK on BSD; reads are readiness-driven
             // and writes are small, so blocking mode is what we want.
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
@@ -147,6 +169,19 @@ public final class LineSocketServer: @unchecked Sendable {
                     self.queue.async { self.connections[id] = nil }
                 })
         }
+    }
+
+    /// The effective uid of the process at the other end of a Unix socket, or
+    /// `nil` when the kernel will not say (treated as untrusted).
+    static func peerUID(of fd: Int32) -> uid_t? {
+        var uid: uid_t = 0
+        var gid: gid_t = 0
+        guard getpeereid(fd, &uid, &gid) == 0 else { return nil }
+        return uid
+    }
+
+    private static func log(_ message: String) {
+        FileHandle.standardError.write(Data("cider-bridge: \(message)\n".utf8))
     }
 }
 
