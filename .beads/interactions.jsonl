@@ -8,3 +8,6 @@
 {"id":"int-43986680","kind":"field_change","created_at":"2026-09-02T06:14:12.109715Z","actor":"Paul Thrasher","issue_id":"cider-lh7","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-48b4eff5","kind":"field_change","created_at":"2026-09-02T06:14:12.275776Z","actor":"Paul Thrasher","issue_id":"cider-lsh","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-9a2c6e07","kind":"field_change","created_at":"2026-09-02T06:14:12.450003Z","actor":"Paul Thrasher","issue_id":"cider-70e","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-a3e070c6","kind":"field_change","created_at":"2026-09-02T07:18:36.534745Z","actor":"Paul Thrasher","issue_id":"cider-brk","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-cd3f0a6d","kind":"field_change","created_at":"2026-09-02T07:18:36.708903Z","actor":"Paul Thrasher","issue_id":"cider-dbl","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-b0eb43cf","kind":"field_change","created_at":"2026-09-02T07:18:36.880056Z","actor":"Paul Thrasher","issue_id":"cider-rwa","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
