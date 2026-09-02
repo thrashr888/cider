@@ -26,6 +26,23 @@
 	<true/>
 	<key>NSHomeKitUsageDescription</key>
 	<string>Cider Bridge reads and controls your HomeKit accessories, scenes, and automations on behalf of the cider command-line tool.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>
