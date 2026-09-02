@@ -163,6 +163,9 @@ cider home state --room Office                 # live HomeKit values; needs Cide
 cider home run --scene "Good Night"
 cider home triggers create-timer --name "Porch on" --at 2026-09-01T19:30:00-07:00 --repeat daily --scene "Porch On"
 cider wifi status
+cider icloud quota                              # remaining iCloud storage via brctl
+cider icloud list --folder Documents --state cloud   # cloud-only placeholders; nothing is downloaded
+cider --dry-run icloud evict --path Documents/big.mov
 cider weather                                   # Apple Weather at the primary home's address; needs Cider Bridge
 cider weather --forecast --days 5 --home "Casa"
 cider weather --lat 37.75 --lon -122.49         # output includes the required `attribution` block
@@ -175,7 +178,7 @@ cider auth-status
 
 ## Safety And Permissions
 
-1. Always confirm with the user before any mutating command, especially `create`, `update`, `delete`, `send`, `add`, `set-name`, `defaults-write`, `screen-sharing enable`, and `time-machine start/stop`.
+1. Always confirm with the user before any mutating command, especially `create`, `update`, `delete`, `send`, `add`, `set-name`, `defaults-write`, `screen-sharing enable`, `time-machine start/stop`, and `icloud download/evict` (evict removes the local copy; paths must be inside iCloud Drive).
 
 2. Prefer `--dry-run` before real mutations whenever `cider schema --source <name>` reports `supports_dry_run: true`.
 

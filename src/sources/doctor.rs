@@ -85,6 +85,12 @@ pub async fn inspect() -> DoctorReport {
             false,
         )
         .await,
+        check_path(
+            "icloud_drive",
+            &home.join(super::icloud::DRIVE_RELATIVE_ROOT),
+            false,
+        )
+        .await,
     ];
     checks.push(DoctorCheck {
         name: "find_my".to_string(),

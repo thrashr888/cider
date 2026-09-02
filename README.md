@@ -110,6 +110,7 @@ cider spotlight --query "quarterly report"
 | Shortcuts | `list`, `run`, `view`, `export`, `gen`, `install`, `sign` |
 | Screenshots | `list`, `capture` |
 | Time Machine | `status`, `list`, `start`, `stop` |
+| iCloud Drive | `list`, `download`, `evict` (evict removes the local copy; the file stays in iCloud) |
 | Screen Sharing | `status`, `enable`, `disable` |
 | System Info | `show`, `set-name`, `defaults-read`, `defaults-write` |
 | Safari | `bookmarks`, `history`, `tabs`, `reading-list` |
@@ -124,7 +125,7 @@ cider spotlight --query "quarterly report"
 
 ### Read-Only
 
-Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
+Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), iCloud (`account`, `quota`, `status`, `log`, `list` — placeholder-aware, never downloads), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
 
 ### Home
 

@@ -15,6 +15,7 @@ pub mod facetime;
 pub mod fonts;
 pub mod home;
 pub mod home_live;
+pub mod icloud;
 pub mod keychain;
 pub mod keyed_archive;
 pub mod mail;

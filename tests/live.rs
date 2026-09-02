@@ -63,6 +63,7 @@ const STORE_BACKED: &[(&str, &[&str])] = &[
     ("mail_database", &["mail"]),
     ("home_cache", &["home"]),
     ("shortcuts_database", &["shortcuts"]),
+    ("icloud_drive", &["icloud", "list"]),
 ];
 
 /// Refuse to run anything that is not a bare command or a read verb.

@@ -96,6 +96,12 @@ enum Commands {
         #[command(subcommand)]
         action: Option<HomeAction>,
     },
+    /// iCloud account, Drive quota, sync status and log, and Drive files (via brctl)
+    #[command(name = "icloud")]
+    Icloud {
+        #[command(subcommand)]
+        action: Option<IcloudAction>,
+    },
     /// Manage Keychain passwords
     Keychain {
         #[command(subcommand)]
@@ -982,6 +988,50 @@ enum TimeMachineAction {
 }
 
 #[derive(Subcommand)]
+enum IcloudAction {
+    /// Signed-in iCloud account and its services (default)
+    Account,
+    /// Remaining iCloud storage, from `brctl quota`
+    Quota,
+    /// Items not yet fully synced, from `brctl status`
+    Status {
+        /// Restrict to one container, e.g. com.apple.CloudDocs
+        #[arg(long)]
+        container: Option<String>,
+    },
+    /// Recent iCloud Drive (CloudDocs) log lines, from `brctl log`
+    Log {
+        /// How far back to read, in minutes
+        #[arg(long, default_value_t = 30)]
+        minutes: u64,
+    },
+    /// List iCloud Drive entries as local or cloud-only, without downloading anything
+    List {
+        /// Folder relative to the iCloud Drive root (default: the root)
+        #[arg(long)]
+        folder: Option<String>,
+        /// Only entries in this state: local, cloud, or all
+        #[arg(long, default_value = "all", value_parser = ["local", "cloud", "all"])]
+        state: String,
+        /// Walk subfolders too
+        #[arg(long)]
+        recursive: bool,
+    },
+    /// Download a cloud-only item to this Mac (`brctl download`)
+    Download {
+        /// Path, relative to the iCloud Drive root or absolute inside it
+        #[arg(long)]
+        path: String,
+    },
+    /// Remove the local copy of an item, keeping it in iCloud (`brctl evict`)
+    Evict {
+        /// Path, relative to the iCloud Drive root or absolute inside it
+        #[arg(long)]
+        path: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum KeychainAction {
     /// List all keychain items including certs and keys (metadata only)
     List {
@@ -1598,6 +1648,8 @@ fn is_mutating_action(action: &str) -> bool {
             | "stop"
             | "build"
             | "install"
+            | "download"
+            | "evict"
     )
 }
 
@@ -3147,6 +3199,77 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         },
+        Commands::Icloud { action } => match action {
+            None | Some(IcloudAction::Account) => {
+                run_source!(sources::icloud::account(), cli.pretty, cli.envelope)
+            }
+            Some(IcloudAction::Quota) => {
+                run_source!(sources::icloud::quota(), cli.pretty, cli.envelope)
+            }
+            Some(IcloudAction::Status { container }) => {
+                run_source!(
+                    sources::icloud::status(container.as_deref()),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(IcloudAction::Log { minutes }) => {
+                run_source!(sources::icloud::log(minutes), cli.pretty, cli.envelope)
+            }
+            Some(IcloudAction::List {
+                folder,
+                state,
+                recursive,
+            }) => {
+                let state = match state.as_str() {
+                    "local" => Some(sources::icloud::DriveState::Local),
+                    "cloud" => Some(sources::icloud::DriveState::Cloud),
+                    _ => None,
+                };
+                run_source!(
+                    sources::icloud::list(folder.as_deref(), state, recursive),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(IcloudAction::Download { path }) => {
+                if cli.no_op {
+                    let target = sources::icloud::resolve_drive_path(
+                        &sources::icloud::drive_root()?,
+                        &path,
+                    )?;
+                    print_dry_run(
+                        "icloud.download",
+                        format!("Would download {} from iCloud", target.display()),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::icloud::download(&path).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+            Some(IcloudAction::Evict { path }) => {
+                if cli.no_op {
+                    let target = sources::icloud::resolve_drive_path(
+                        &sources::icloud::drive_root()?,
+                        &path,
+                    )?;
+                    print_dry_run(
+                        "icloud.evict",
+                        format!(
+                            "Would remove the local copy of {} (it stays in iCloud)",
+                            target.display()
+                        ),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    let result = sources::icloud::evict(&path).await?;
+                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                }
+            }
+        },
         Commands::TimeMachine { action } => match action {
             None | Some(TimeMachineAction::Status) => {
                 run_source!(sources::time_machine::status(), cli.pretty, cli.envelope)
@@ -3287,7 +3410,9 @@ fn classify_error_code(err: &anyhow::Error) -> String {
         return bridge_error_code(bridge);
     }
     let msg = err.to_string().to_lowercase();
-    if msg.contains("not found") {
+    if msg.contains("not configured") {
+        "not_configured"
+    } else if msg.contains("not found") {
         "not_found"
     } else if msg.contains("permission") || msg.contains("full disk access") {
         "permission_denied"
@@ -3691,6 +3816,74 @@ mod tests {
         assert_eq!(
             classify_error_code(&anyhow::anyhow!("thing not found")),
             "not_found"
+        );
+    }
+
+    #[test]
+    fn icloud_surface_parses_and_classifies_mutations() {
+        assert!(Cli::try_parse_from(["cider", "icloud"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "icloud", "account"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "icloud", "quota"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "icloud",
+            "status",
+            "--container",
+            "com.apple.CloudDocs"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["cider", "icloud", "log", "--minutes", "5"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "icloud",
+            "list",
+            "--folder",
+            "Documents",
+            "--state",
+            "cloud",
+            "--recursive"
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["cider", "icloud", "list", "--state", "remote"]).is_err(),
+            "--state is local|cloud|all"
+        );
+        assert!(Cli::try_parse_from([
+            "cider",
+            "--dry-run",
+            "icloud",
+            "evict",
+            "--path",
+            "Documents/x.txt"
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["cider", "icloud", "download"]).is_err(),
+            "--path is required"
+        );
+
+        let schema = build_schema(Some("icloud"));
+        let kinds: std::collections::HashMap<&str, &str> = schema["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| (a["name"].as_str().unwrap(), a["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(kinds["list"], "read");
+        assert_eq!(kinds["quota"], "read");
+        assert_eq!(kinds["download"], "write");
+        assert_eq!(kinds["evict"], "write");
+        assert!(schema["supports_dry_run"].as_bool().unwrap());
+
+        assert_eq!(
+            classify_error_code(&anyhow::anyhow!(
+                "iCloud is not configured: nobody signed in"
+            )),
+            "not_configured"
+        );
+        assert_eq!(
+            classify_error_code(&anyhow::anyhow!("invalid path: \"../x\" uses `..`")),
+            "invalid_input"
         );
     }
 }
