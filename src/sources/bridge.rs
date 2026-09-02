@@ -63,6 +63,9 @@ pub enum BridgeError {
     Remote { code: String, message: String },
     /// The bridge answered with something that is not the protocol.
     Protocol(String),
+    /// No `cider-bridge` executable (see [`super::bridge_cli`]), or
+    /// `CIDER_BRIDGE_CLI=off`.
+    CliNotInstalled,
 }
 
 impl fmt::Display for BridgeError {
@@ -79,6 +82,11 @@ impl fmt::Display for BridgeError {
             BridgeError::Protocol(detail) => {
                 write!(f, "Cider Bridge protocol error: {detail}")
             }
+            BridgeError::CliNotInstalled => write!(
+                f,
+                "cider-bridge is not installed; build it with `cider bridge build --install` \
+                 (or unset CIDER_BRIDGE_CLI=off)"
+            ),
         }
     }
 }
@@ -325,6 +333,14 @@ pub struct BridgeStatus {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ping: Option<Json>,
+    /// Whether the native `cider-bridge` CLI is installed and not switched
+    /// off — the condition under which Reminders and Calendar writes use it.
+    pub cli_installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_path: Option<String>,
+    /// `true` when `CIDER_BRIDGE_CLI=off` forces the AppleScript/JXA path.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cli_disabled: bool,
     /// `bridge/scripts/build.sh` from the checkout this binary was built in,
     /// when it exists; `cider bridge build` needs it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,12 +350,16 @@ pub struct BridgeStatus {
 pub async fn status() -> BridgeStatus {
     let app = app_path();
     let pong = ping().await;
+    let cli = super::bridge_cli::cli_path();
     BridgeStatus {
         installed: app.is_some(),
         app_path: app.map(|p| p.to_string_lossy().into_owned()),
         socket_path: socket_path().to_string_lossy().into_owned(),
         running: pong.is_some(),
         ping: pong,
+        cli_installed: cli.is_some(),
+        cli_path: cli.map(|p| p.to_string_lossy().into_owned()),
+        cli_disabled: super::bridge_cli::is_disabled(),
         build_script: build_script_path().map(|p| p.to_string_lossy().into_owned()),
     }
 }

@@ -2,6 +2,7 @@ use std::io::{self, Read, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
+use cider::sources::bridge_cli::{self, WriteBackend};
 use cider::{pretty, sources};
 
 #[derive(Parser)]
@@ -187,18 +188,53 @@ enum Commands {
     VoiceMemos,
     /// Stream changes to local Apple data stores as JSON lines until Ctrl-C
     #[command(
-        long_about = "Watch the on-disk stores behind Reminders, Calendar, Notes, Home, and \
+        long_about = "Watch the stores behind Reminders, Calendar, Contacts, Notes, Home, and \
                       Shortcuts and print one compact JSON object per line as they change. \
                       Runs in the foreground until interrupted; there is no daemon. Lines are \
-                      always compact (--pretty is ignored) and --envelope wraps each one."
+                      always compact (--pretty is ignored) and --envelope wraps each one.\n\n\
+                      Each line is {source, at, kind, paths?}. With the cider-bridge CLI \
+                      installed, reminders, calendar, and contacts stream EventKit/Contacts \
+                      change notifications: kind is \"store_changed\" and there are no paths. \
+                      Everything else (and everything, without the CLI or with --via \
+                      fsevents) is FSEvents: kind is \"files_changed\" and paths lists the \
+                      files that changed."
     )]
     Watch {
-        /// Store to watch (repeatable); omit to watch all five
+        /// Store to watch (repeatable); omit to watch all six
         #[arg(long, value_name = "SOURCE", value_parser = sources::watch::WatchSource::NAMES)]
         source: Vec<String>,
         /// Window, in milliseconds, for merging a burst of file events into one line
         #[arg(long = "debounce-ms", value_name = "MS", default_value_t = 2000)]
         debounce_ms: u64,
+        /// Backend for reminders, calendar, and contacts: auto (cider-bridge when
+        /// installed, else FSEvents), cli (require cider-bridge), or fsevents
+        #[arg(long, value_name = "BACKEND", default_value = "auto", value_parser = sources::watch::Via::NAMES)]
+        via: String,
+    },
+    /// Current conditions or forecast from Apple Weather (needs Cider Bridge)
+    #[command(
+        long_about = "WeatherKit through the Cider Bridge app (launched on demand): current \
+                      conditions by default, --forecast for daily plus the next 24 hours. \
+                      Location is --lat/--lon, else --home <name>, else the primary home's \
+                      address from the Home app. Output carries Apple's required attribution \
+                      block; show it alongside the data."
+    )]
+    Weather {
+        /// Home whose address to use, by name or UUID (default: the primary home)
+        #[arg(long, conflicts_with_all = ["lat", "lon"])]
+        home: Option<String>,
+        /// Latitude in degrees (with --lon)
+        #[arg(long, requires = "lon", allow_hyphen_values = true)]
+        lat: Option<f64>,
+        /// Longitude in degrees (with --lat)
+        #[arg(long, requires = "lat", allow_hyphen_values = true)]
+        lon: Option<f64>,
+        /// Daily forecast and the next 24 hours instead of current conditions
+        #[arg(long)]
+        forecast: bool,
+        /// Days of daily forecast to return (implies --forecast)
+        #[arg(long, value_name = "N")]
+        days: Option<u32>,
     },
     /// Wi-Fi status and known networks
     #[command(name = "wifi")]
@@ -1285,21 +1321,33 @@ fn envelope_value(value: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({"ok": ok, "data": value})
 }
 
-/// `print_output` for reads that have more than one backend: with
+/// `print_output` for commands that have more than one backend: with
 /// `--envelope` the wrapper carries `"source"` so a caller knows whether the
-/// data is live or cached. Without the envelope the output is unchanged.
+/// data is live or cached (`cider home`), or whether a write went through
+/// `cider-bridge` or AppleScript/JXA. Without the envelope the output is
+/// unchanged.
 fn print_sourced_output(
     value: &serde_json::Value,
     human: bool,
     envelope: bool,
-    source: sources::home_live::Source,
+    source: &str,
 ) -> anyhow::Result<()> {
     if !envelope {
         return print_output(value, human, false);
     }
     let mut wrapped = envelope_value(value);
-    wrapped["source"] = serde_json::json!(source.as_str());
+    wrapped["source"] = serde_json::json!(source);
     print_output(&wrapped, human, false)
+}
+
+/// A Reminders/Calendar write result from whichever backend ran it.
+fn print_write_output(
+    value: &serde_json::Value,
+    human: bool,
+    envelope: bool,
+    via: sources::bridge_cli::WriteBackend,
+) -> anyhow::Result<()> {
+    print_sourced_output(value, human, envelope, via.as_str())
 }
 
 fn print_batch_output(
@@ -1632,7 +1680,7 @@ async fn run_home(
                     (value, Source::Cache)
                 }
             };
-            print_sourced_output(&value, pretty, envelope, source)
+            print_sourced_output(&value, pretty, envelope, source.as_str())
         }
         HomeAction::State {
             home,
@@ -1876,25 +1924,44 @@ async fn run() -> anyhow::Result<()> {
                 all_day,
             }) => {
                 sources::calendar::validate_event_range(&start, &end)?;
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "calendar.create",
-                        format!("Would create event '{title}' starting {start} ending {end}"),
+                        format!(
+                            "Would create event '{title}' starting {start} ending {end} {}",
+                            via.label()
+                        ),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::calendar::create(
-                        &title,
-                        &start,
-                        &end,
-                        calendar.as_deref(),
-                        location.as_deref(),
-                        notes.as_deref(),
-                        all_day,
-                    )
-                    .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        bridge_cli::calendar_create(
+                            &title,
+                            &start,
+                            &end,
+                            calendar.as_deref(),
+                            location.as_deref(),
+                            notes.as_deref(),
+                            all_day,
+                        )
+                        .await?
+                    } else {
+                        serde_json::to_value(
+                            sources::calendar::create(
+                                &title,
+                                &start,
+                                &end,
+                                calendar.as_deref(),
+                                location.as_deref(),
+                                notes.as_deref(),
+                                all_day,
+                            )
+                            .await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(CalendarAction::BatchCreate { json }) => {
@@ -1935,10 +2002,11 @@ async fn run() -> anyhow::Result<()> {
                 } else if let Some(end) = end.as_deref() {
                     sources::calendar::validate_event_range(end, end)?;
                 }
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "calendar.update",
-                        format!("Would update calendar event '{id}'"),
+                        format!("Would update calendar event '{id}' {}", via.label()),
                         cli.pretty,
                         cli.envelope,
                     )?;
@@ -1951,8 +2019,12 @@ async fn run() -> anyhow::Result<()> {
                         notes: notes.as_deref(),
                         all_day,
                     };
-                    let result = sources::calendar::update(&id, &fields).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        bridge_cli::calendar_update(&id, &fields).await?
+                    } else {
+                        serde_json::to_value(sources::calendar::update(&id, &fields).await?)?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(CalendarAction::Delete {
@@ -1961,6 +2033,13 @@ async fn run() -> anyhow::Result<()> {
                 date,
                 calendar,
             }) => {
+                // The CLI deletes by id; the legacy title/date target stays
+                // on JXA, which is where its ambiguity check lives.
+                let via = if id.is_some() {
+                    WriteBackend::detect()
+                } else {
+                    WriteBackend::Native
+                };
                 if cli.no_op {
                     let target =
                         id.as_deref()
@@ -1974,22 +2053,26 @@ async fn run() -> anyhow::Result<()> {
                             });
                     print_dry_run(
                         "calendar.delete",
-                        format!("Would delete event {target}"),
+                        format!("Would delete event {target} {}", via.label()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = if let Some(id) = id {
-                        sources::calendar::delete_by_id(&id).await?
-                    } else {
-                        sources::calendar::delete(
-                            title.as_deref().unwrap_or(""),
-                            date.as_deref().unwrap_or(""),
-                            calendar.as_deref(),
-                        )
-                        .await?
+                    let value = match id {
+                        Some(id) if via.is_cli() => bridge_cli::calendar_delete(&id).await?,
+                        Some(id) => {
+                            serde_json::to_value(sources::calendar::delete_by_id(&id).await?)?
+                        }
+                        None => serde_json::to_value(
+                            sources::calendar::delete(
+                                title.as_deref().unwrap_or(""),
+                                date.as_deref().unwrap_or(""),
+                                calendar.as_deref(),
+                            )
+                            .await?,
+                        )?,
                     };
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(CalendarAction::Calendars) => {
@@ -2655,24 +2738,38 @@ async fn run() -> anyhow::Result<()> {
                 priority,
                 notes,
             }) => {
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "reminders.create",
-                        format!("Would create reminder '{title}'"),
+                        format!("Would create reminder '{title}' {}", via.label()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
                     let notes = stdin_if_dash(notes)?;
-                    let result = sources::reminders::create(
-                        &title,
-                        list.as_deref(),
-                        due.as_deref(),
-                        priority,
-                        notes.as_deref(),
-                    )
-                    .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        bridge_cli::reminders_create(
+                            &title,
+                            list.as_deref(),
+                            due.as_deref(),
+                            priority,
+                            notes.as_deref(),
+                        )
+                        .await?
+                    } else {
+                        serde_json::to_value(
+                            sources::reminders::create(
+                                &title,
+                                list.as_deref(),
+                                due.as_deref(),
+                                priority,
+                                notes.as_deref(),
+                            )
+                            .await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(RemindersAction::Get { id, title, list }) => {
@@ -2691,10 +2788,15 @@ async fn run() -> anyhow::Result<()> {
                 due,
             }) => {
                 let target = reminder_target(id.as_deref(), title.as_deref());
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "reminders.update",
-                        format!("Would update reminder {}", target.describe()),
+                        format!(
+                            "Would update reminder {} {}",
+                            target.describe(),
+                            via.label()
+                        ),
                         cli.pretty,
                         cli.envelope,
                     )?;
@@ -2708,93 +2810,120 @@ async fn run() -> anyhow::Result<()> {
                         priority,
                         due: due.as_deref(),
                     };
-                    let result =
-                        sources::reminders::update(target, list.as_deref(), &fields).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        let id = bridge_cli::reminder_id(target, list.as_deref()).await?;
+                        bridge_cli::reminders_update(&id, &fields).await?
+                    } else {
+                        serde_json::to_value(
+                            sources::reminders::update(target, list.as_deref(), &fields).await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(RemindersAction::Complete { id, title, list }) => {
                 // clap guarantees exactly one of the two is present.
                 let target = reminder_target(id.as_deref(), title.as_deref());
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "reminders.complete",
-                        format!("Would complete reminder {}", target.describe()),
+                        format!(
+                            "Would complete reminder {} {}",
+                            target.describe(),
+                            via.label()
+                        ),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::complete(target, list.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        let id = bridge_cli::reminder_id(target, list.as_deref()).await?;
+                        bridge_cli::reminders_set_completed(&id, true).await?
+                    } else {
+                        serde_json::to_value(
+                            sources::reminders::complete(target, list.as_deref()).await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(RemindersAction::Reopen { id, list }) => {
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "reminders.reopen",
-                        format!("Would reopen reminder id {id}"),
+                        format!("Would reopen reminder id {id} {}", via.label()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::reopen(
-                        sources::reminders::Target::Id(&id),
-                        list.as_deref(),
-                    )
-                    .await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        bridge_cli::reminders_set_completed(id.trim(), false).await?
+                    } else {
+                        serde_json::to_value(
+                            sources::reminders::reopen(
+                                sources::reminders::Target::Id(&id),
+                                list.as_deref(),
+                            )
+                            .await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
             Some(RemindersAction::Delete { id, title, list }) => {
                 let target = reminder_target(id.as_deref(), title.as_deref());
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
                         "reminders.delete",
-                        format!("Would delete reminder {}", target.describe()),
+                        format!(
+                            "Would delete reminder {} {}",
+                            target.describe(),
+                            via.label()
+                        ),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::delete(target, list.as_deref()).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let value = if via.is_cli() {
+                        let id = bridge_cli::reminder_id(target, list.as_deref()).await?;
+                        bridge_cli::reminders_delete(&id).await?
+                    } else {
+                        serde_json::to_value(
+                            sources::reminders::delete(target, list.as_deref()).await?,
+                        )?
+                    };
+                    print_write_output(&value, cli.pretty, cli.envelope, via)?;
                 }
             }
-            Some(RemindersAction::BatchComplete { ids }) => {
+            Some(RemindersAction::BatchComplete { ref ids })
+            | Some(RemindersAction::BatchReopen { ref ids })
+            | Some(RemindersAction::BatchDelete { ref ids }) => {
+                let verb = match action {
+                    Some(RemindersAction::BatchComplete { .. }) => "complete",
+                    Some(RemindersAction::BatchReopen { .. }) => "reopen",
+                    _ => "delete",
+                };
+                let via = WriteBackend::detect();
                 if cli.no_op {
                     print_dry_run(
-                        "reminders.batch-complete",
-                        format!("Would complete {} reminders", ids.len()),
+                        &format!("reminders.batch-{verb}"),
+                        format!("Would {verb} {} reminders {}", ids.len(), via.label()),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::reminders::batch_complete(&ids).await?;
-                    print_batch_output(&result, cli.pretty, cli.envelope)?;
-                }
-            }
-            Some(RemindersAction::BatchReopen { ids }) => {
-                if cli.no_op {
-                    print_dry_run(
-                        "reminders.batch-reopen",
-                        format!("Would reopen {} reminders", ids.len()),
-                        cli.pretty,
-                        cli.envelope,
-                    )?;
-                } else {
-                    let result = sources::reminders::batch_reopen(&ids).await?;
-                    print_batch_output(&result, cli.pretty, cli.envelope)?;
-                }
-            }
-            Some(RemindersAction::BatchDelete { ids }) => {
-                if cli.no_op {
-                    print_dry_run(
-                        "reminders.batch-delete",
-                        format!("Would delete {} reminders", ids.len()),
-                        cli.pretty,
-                        cli.envelope,
-                    )?;
-                } else {
-                    let result = sources::reminders::batch_delete(&ids).await?;
+                    let result = if via.is_cli() {
+                        bridge_cli::reminders_batch(verb, ids).await?
+                    } else {
+                        match verb {
+                            "complete" => sources::reminders::batch_complete(ids).await?,
+                            "reopen" => sources::reminders::batch_reopen(ids).await?,
+                            _ => sources::reminders::batch_delete(ids).await?,
+                        }
+                    };
                     print_batch_output(&result, cli.pretty, cli.envelope)?;
                 }
             }
@@ -3055,14 +3184,32 @@ async fn run() -> anyhow::Result<()> {
         Commands::VoiceMemos => {
             run_source!(sources::voice_memos::fetch(), cli.pretty, cli.envelope)
         }
+        Commands::Weather {
+            home,
+            lat,
+            lon,
+            forecast,
+            days,
+        } => {
+            let location = sources::weather::resolve_location(lat, lon, home.as_deref()).await?;
+            let mut bridge = sources::bridge::Bridge::connect().await?;
+            let value = if forecast || days.is_some() {
+                sources::weather::forecast(&mut bridge, &location, days).await?
+            } else {
+                sources::weather::current(&mut bridge, &location).await?
+            };
+            print_output(&value, cli.pretty, cli.envelope)?;
+        }
         Commands::Watch {
             source,
             debounce_ms,
+            via,
         } => {
             let targets = watch_sources(&source)?;
+            let via: sources::watch::Via = via.parse()?;
             let envelope = cli.envelope;
             let debounce = std::time::Duration::from_millis(debounce_ms);
-            sources::watch::watch(&targets, debounce, |event| {
+            sources::watch::watch_via(&targets, debounce, via, |event| {
                 // The callback cannot propagate an error; a closed stdout
                 // (`cider watch | head`) is the normal way a stream ends.
                 if let Err(err) = emit_watch_event(&event, envelope) {
@@ -3160,13 +3307,15 @@ fn bridge_error_code(error: &sources::bridge::BridgeError) -> String {
     use sources::bridge::BridgeError;
     match error {
         BridgeError::NotInstalled => "bridge_not_installed".to_string(),
+        BridgeError::CliNotInstalled => "bridge_cli_not_installed".to_string(),
         BridgeError::Unreachable(_) => "bridge_unreachable".to_string(),
         BridgeError::Protocol(_) => "bridge_protocol_error".to_string(),
         BridgeError::Remote { code, .. } => match code.as_str() {
             "not_found" => "not_found".to_string(),
             "invalid_args" => "invalid_input".to_string(),
-            "homekit_denied" => "permission_denied".to_string(),
+            "homekit_denied" | "permission_denied" => "permission_denied".to_string(),
             "timeout" => "timeout".to_string(),
+            "weather_unavailable" => "weather_unavailable".to_string(),
             other => format!("bridge_{other}"),
         },
     }
@@ -3303,26 +3452,76 @@ mod tests {
             Commands::Watch {
                 source,
                 debounce_ms,
+                via,
             } => {
                 assert_eq!(
                     watch_sources(&source).unwrap(),
                     vec![WatchSource::Reminders, WatchSource::Notes]
                 );
                 assert_eq!(debounce_ms, 500);
+                assert_eq!(via, "auto");
             }
             _ => panic!("expected watch"),
         }
-        match Cli::try_parse_from(["cider", "watch"]).unwrap().command {
+        match Cli::try_parse_from(["cider", "watch", "--via", "fsevents"])
+            .unwrap()
+            .command
+        {
             Commands::Watch {
                 source,
                 debounce_ms,
+                via,
             } => {
                 assert_eq!(watch_sources(&source).unwrap(), WatchSource::ALL.to_vec());
                 assert_eq!(debounce_ms, 2000);
+                assert_eq!(via, "fsevents");
             }
             _ => panic!("expected watch"),
         }
+        assert!(Cli::try_parse_from(["cider", "watch", "--source", "contacts"]).is_ok());
         assert!(Cli::try_parse_from(["cider", "watch", "--source", "mail"]).is_err());
+        assert!(Cli::try_parse_from(["cider", "watch", "--via", "socket"]).is_err());
+    }
+
+    #[test]
+    fn weather_takes_coordinates_together_or_a_home() {
+        match Cli::try_parse_from(["cider", "weather", "--lat", "37.75", "--lon", "-122.49"])
+            .unwrap()
+            .command
+        {
+            Commands::Weather {
+                lat,
+                lon,
+                forecast,
+                days,
+                home,
+            } => {
+                assert_eq!((lat, lon), (Some(37.75), Some(-122.49)));
+                assert!(!forecast);
+                assert!(days.is_none());
+                assert!(home.is_none());
+            }
+            _ => panic!("expected weather"),
+        }
+        match Cli::try_parse_from(["cider", "weather", "--home", "Casa", "--days", "3"])
+            .unwrap()
+            .command
+        {
+            Commands::Weather { home, days, .. } => {
+                assert_eq!(home.as_deref(), Some("Casa"));
+                assert_eq!(days, Some(3));
+            }
+            _ => panic!("expected weather"),
+        }
+        assert!(Cli::try_parse_from(["cider", "weather"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "weather", "--forecast"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "weather", "--lat", "1"]).is_err());
+        assert!(Cli::try_parse_from([
+            "cider", "weather", "--home", "x", "--lat", "1", "--lon", "2"
+        ])
+        .is_err());
+        let schema = build_schema(Some("weather"));
+        assert_eq!(schema["name"], "weather");
     }
 
     #[test]
@@ -3475,6 +3674,20 @@ mod tests {
         // Context added on the way up must not hide the typed error.
         let wrapped = anyhow::Error::from(BridgeError::Unreachable("x".into())).context("listing");
         assert_eq!(classify_error_code(&wrapped), "bridge_unreachable");
+        let cli: anyhow::Error = BridgeError::CliNotInstalled.into();
+        assert_eq!(classify_error_code(&cli), "bridge_cli_not_installed");
+        let weather: anyhow::Error = BridgeError::Remote {
+            code: "weather_unavailable".into(),
+            message: "no".into(),
+        }
+        .into();
+        assert_eq!(classify_error_code(&weather), "weather_unavailable");
+        let tcc: anyhow::Error = BridgeError::Remote {
+            code: "permission_denied".into(),
+            message: "no".into(),
+        }
+        .into();
+        assert_eq!(classify_error_code(&tcc), "permission_denied");
         assert_eq!(
             classify_error_code(&anyhow::anyhow!("thing not found")),
             "not_found"

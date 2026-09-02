@@ -120,6 +120,10 @@ cider reminders create --title "Buy milk" --list Shopping --due "2026-03-14T18:0
 # call acts on the first open match and reports when there were others.
 cider reminders complete --id 4b7c5902-46a7-4f7a-a385-91b562ca8eb6
 cider reminders batch-complete --id <id-1> --id <id-2>
+# Writes go through the native cider-bridge CLI (EventKit) when it is
+# installed, else AppleScript/JXA; --dry-run says which. CIDER_BRIDGE_CLI=off
+# forces the native path. Reads (list, --since) always use SQLite.
+CIDER_BRIDGE_CLI=off cider reminders complete --id <id>
 cider calendar list --days-ahead 14
 cider calendar get --id <event-id>
 cider calendar update --id <event-id> --location "Zoom"
@@ -159,7 +163,11 @@ cider home state --room Office                 # live HomeKit values; needs Cide
 cider home run --scene "Good Night"
 cider home triggers create-timer --name "Porch on" --at 2026-09-01T19:30:00-07:00 --repeat daily --scene "Porch On"
 cider wifi status
+cider weather                                   # Apple Weather at the primary home's address; needs Cider Bridge
+cider weather --forecast --days 5 --home "Casa"
+cider weather --lat 37.75 --lon -122.49         # output includes the required `attribution` block
 cider watch --source reminders --source calendar   # JSON line per change, runs until Ctrl-C
+cider watch --source contacts --via fsevents       # force FSEvents instead of cider-bridge store_changed events
 cider system-info show
 cider doctor
 cider auth-status

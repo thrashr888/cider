@@ -35,6 +35,7 @@ const READ_VERBS: &[&str] = &["list", "status", "show", "lists", "networks", "wa
 /// Commands the generic walk must not run as-is, and why.
 const SKIP: &[(&str, &str)] = &[
     ("watch", "runs until interrupted"),
+    ("weather", "launches Cider Bridge and needs WeatherKit"),
     ("schema", "not a data source"),
     (
         "spotlight",

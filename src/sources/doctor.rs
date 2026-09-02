@@ -78,6 +78,7 @@ pub async fn inspect() -> DoctorReport {
         check_home_cache(&home).await,
         check_bridge_app(),
         check_bridge_socket().await,
+        check_bridge_cli(),
         check_path(
             "shortcuts_database",
             &home.join("Library/Shortcuts/Shortcuts.sqlite"),
@@ -264,6 +265,49 @@ async fn check_bridge_socket() -> DoctorCheck {
     }
 }
 
+/// The native `cider-bridge` CLI (EventKit/Contacts writes and `watch`).
+/// Optional: without it those commands use AppleScript/JXA and FSEvents.
+fn check_bridge_cli() -> DoctorCheck {
+    use super::bridge_cli;
+    let (status, detail) = if bridge_cli::is_disabled() {
+        (
+            CheckStatus::NotConfigured,
+            format!(
+                "{}=off: Reminders and Calendar writes use AppleScript/JXA and `cider watch` \
+                 uses FSEvents",
+                bridge_cli::CLI_ENV
+            ),
+        )
+    } else {
+        match bridge_cli::cli_path() {
+            Some(path) => (
+                CheckStatus::Ok,
+                format!(
+                    "{} is installed; Reminders and Calendar writes and `cider watch` use it",
+                    path.display()
+                ),
+            ),
+            None => (
+                CheckStatus::NotConfigured,
+                format!(
+                    "{} is not installed (looked at ${}, {}/Contents/MacOS, ~/.local/bin, and \
+                     $PATH); writes fall back to AppleScript/JXA — build it with `cider bridge \
+                     build --install`",
+                    bridge_cli::CLI_NAME,
+                    bridge_cli::CLI_ENV,
+                    bridge::APP_NAME
+                ),
+            ),
+        }
+    };
+    DoctorCheck {
+        name: "bridge_cli".to_string(),
+        status,
+        required: false,
+        detail,
+    }
+}
+
 fn check_executable(name: &str, path: &Path, required: bool) -> DoctorCheck {
     let (status, detail) = if path.is_file() {
         (CheckStatus::Ok, format!("{} is available", path.display()))
@@ -380,6 +424,18 @@ mod tests {
             assert!(!check.required, "{name} must not gate doctor's ok");
             assert!(check.detail.contains("Cider Bridge"), "{}", check.detail);
         }
+        let cli = report
+            .checks
+            .iter()
+            .find(|check| check.name == "bridge_cli")
+            .expect("bridge_cli check missing");
+        assert!(!cli.required);
+        assert!(
+            matches!(cli.status, CheckStatus::Ok | CheckStatus::NotConfigured),
+            "{:?}",
+            cli.status
+        );
+        assert!(cli.detail.contains("cider-bridge"), "{}", cli.detail);
     }
 
     #[tokio::test]

@@ -22,10 +22,20 @@ pub struct Home {
     pub name: String,
     pub primary: bool,
     pub current: bool,
+    /// The home's address as HomeKit geocoded it, when location services
+    /// were set up for the home. `cider weather --home` uses it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<HomeLocation>,
     pub rooms: Vec<Room>,
     pub zones: Vec<Zone>,
     pub accessories: Vec<Accessory>,
     pub scenes: Vec<Scene>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct HomeLocation {
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,6 +347,7 @@ fn map_home(value: &Json, primary: Option<&str>, current: Option<&str>) -> Optio
     Some(Home {
         primary: primary.is_some_and(|p| p.eq_ignore_ascii_case(&id)),
         current: current.is_some_and(|c| c.eq_ignore_ascii_case(&id)),
+        location: value.get("homeLocation").and_then(map_location),
         id,
         name,
         rooms,
@@ -389,6 +400,22 @@ fn map_accessory(value: &Json, room_names: &HashMap<String, String>) -> Option<A
     })
 }
 
+/// `homeLocation` is an archived `CLLocation`: its coordinate lives under
+/// `kCLLocationCodingKeyCoordinateLatitude` / `...Longitude` (the `Raw...`
+/// twins are zero). Homes without location services archive `$null`.
+fn map_location(value: &Json) -> Option<HomeLocation> {
+    let coordinate = |key: &str| value.get(key).and_then(Json::as_f64);
+    let latitude = coordinate("kCLLocationCodingKeyCoordinateLatitude")?;
+    let longitude = coordinate("kCLLocationCodingKeyCoordinateLongitude")?;
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        return None;
+    }
+    Some(HomeLocation {
+        latitude,
+        longitude,
+    })
+}
+
 fn map_scene(value: &Json, kind: &str) -> Option<Scene> {
     Some(Scene {
         id: string(value, "actionSetUUID")?,
@@ -436,6 +463,14 @@ mod tests {
                     "$class": "HMHome",
                     "homeName": "Casa",
                     "homeUUID": "HOME-1",
+                    "homeLocation": {
+                        "$class": "CLLocation",
+                        "kCLLocationCodingKeyCoordinateLatitude": 37.75,
+                        "kCLLocationCodingKeyCoordinateLongitude": -122.49,
+                        "kCLLocationCodingKeyRawCoordinateLatitude": 0.0,
+                        "kCLLocationCodingKeyRawCoordinateLongitude": 0.0,
+                        "kCLLocationCodingKeyHorizontalAccuracy": 5.0
+                    },
                     "rooms": [
                         {"$class": "HMRoom", "roomName": "Kitchen", "roomUUID": "ROOM-K"},
                         {"$class": "HMRoom", "roomName": "Bedroom", "roomUUID": "ROOM-B"}
@@ -487,7 +522,8 @@ mod tests {
                 {
                     "$class": "HMHome",
                     "homeName": "Cabin",
-                    "homeUUID": "home-2"
+                    "homeUUID": "home-2",
+                    "homeLocation": null
                 },
                 {"$class": "HMHome", "homeName": "no uuid, dropped"}
             ]
@@ -538,6 +574,29 @@ mod tests {
         assert!(cabin.current, "UUID match is case-insensitive");
         assert!(!cabin.primary);
         assert!(cabin.accessories.is_empty());
+    }
+
+    #[test]
+    fn home_location_comes_from_the_archived_cllocation() {
+        let homes = map_cache(&sample_cache());
+        assert_eq!(
+            homes[0].location,
+            Some(HomeLocation {
+                latitude: 37.75,
+                longitude: -122.49
+            })
+        );
+        assert_eq!(homes[1].location, None, "$null location is absent");
+        assert_eq!(
+            map_location(&json!({"kCLLocationCodingKeyCoordinateLatitude": 95.0,
+                                 "kCLLocationCodingKeyCoordinateLongitude": 0.0})),
+            None,
+            "out-of-range coordinates are dropped"
+        );
+        assert_eq!(
+            map_location(&json!({"kCLLocationCodingKeyCoordinateLatitude": 1.0})),
+            None
+        );
     }
 
     #[test]

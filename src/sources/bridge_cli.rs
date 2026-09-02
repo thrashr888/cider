@@ -1,0 +1,748 @@
+//! Client for the native `cider-bridge` CLI (`docs/RFC-swift-bridge.md`).
+//!
+//! Where [`super::bridge`] talks to the Catalyst app over a socket (HomeKit,
+//! WeatherKit), this module runs the plain Swift executable that wraps
+//! EventKit and Contacts: `cider-bridge <cmd> [json-args]`, one envelope
+//! line on stdout, exit 0/1. cider prefers it for Reminders and Calendar
+//! writes when it is installed — EventKit commits in milliseconds where an
+//! AppleScript `whose` scan takes seconds — and keeps the SQLite fast path
+//! for bulk reads. `watch` is the exception to one-line-and-exit: it streams
+//! one envelope per store change until killed.
+//!
+//! The executable is found via `$CIDER_BRIDGE_CLI`, then inside the
+//! installed `Cider Bridge.app`, then `~/.local/bin`, then `$PATH`.
+//! `CIDER_BRIDGE_CLI=off` disables it, which forces every write back onto
+//! the AppleScript/JXA path.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use serde_json::Value as Json;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+
+use super::bridge::{parse_reply, BridgeError, APP_NAME};
+
+/// The executable's file name.
+pub const CLI_NAME: &str = "cider-bridge";
+/// Environment variable naming the executable, or `off` to disable it.
+pub const CLI_ENV: &str = "CIDER_BRIDGE_CLI";
+/// Per-call ceiling. A first call can wait on a TCC consent dialog, and an
+/// EventKit commit against a slow CalDAV account is not instant either.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The CLI answers every request with this id.
+const CLI_REQUEST_ID: u64 = 0;
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// Where the executable would be looked for, in order, given the inputs
+/// that decide it. `None` means the CLI is switched off (`CIDER_BRIDGE_CLI=off`).
+///
+/// Pure, so the search order is testable without touching the real home
+/// folder or the process environment.
+pub fn cli_candidates(
+    home: &Path,
+    env_override: Option<&OsStr>,
+    path_var: Option<&OsStr>,
+) -> Option<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    if let Some(value) = env_override {
+        if value.to_string_lossy().trim().eq_ignore_ascii_case("off") {
+            return None;
+        }
+        if !value.is_empty() {
+            candidates.push(PathBuf::from(value));
+        }
+    }
+    candidates.push(
+        home.join("Applications")
+            .join(APP_NAME)
+            .join("Contents/MacOS")
+            .join(CLI_NAME),
+    );
+    candidates.push(home.join(".local/bin").join(CLI_NAME));
+    if let Some(path_var) = path_var {
+        candidates.extend(std::env::split_paths(path_var).map(|dir| dir.join(CLI_NAME)));
+    }
+    Some(candidates)
+}
+
+/// The first candidate that is a file on disk.
+pub fn cli_path_from(candidates: Option<Vec<PathBuf>>) -> Option<PathBuf> {
+    candidates?.into_iter().find(|path| path.is_file())
+}
+
+/// The executable, or `None` when it is not installed or switched off.
+pub fn cli_path() -> Option<PathBuf> {
+    let env_override = std::env::var_os(CLI_ENV);
+    let path_var = std::env::var_os("PATH");
+    cli_path_from(cli_candidates(
+        &home_dir(),
+        env_override.as_deref(),
+        path_var.as_deref(),
+    ))
+}
+
+/// Whether `$CIDER_BRIDGE_CLI` is `off`.
+pub fn is_disabled() -> bool {
+    std::env::var_os(CLI_ENV)
+        .is_some_and(|value| value.to_string_lossy().trim().eq_ignore_ascii_case("off"))
+}
+
+/// Installed and not switched off: the condition under which writes route
+/// through the CLI.
+pub fn is_installed() -> bool {
+    cli_path().is_some()
+}
+
+/// Run one command and return its `data`, or the mapped error.
+pub async fn call(cmd: &str, args: Json) -> Result<Json, BridgeError> {
+    call_with_timeout(cmd, args, CALL_TIMEOUT).await
+}
+
+pub async fn call_with_timeout(
+    cmd: &str,
+    args: Json,
+    timeout: Duration,
+) -> Result<Json, BridgeError> {
+    let cli = cli_path().ok_or(BridgeError::CliNotInstalled)?;
+    call_at(&cli, cmd, args, timeout).await
+}
+
+/// [`call_with_timeout`] against an explicit executable, so tests can point
+/// at a stub without touching the process environment.
+pub async fn call_at(
+    cli: &Path,
+    cmd: &str,
+    args: Json,
+    timeout: Duration,
+) -> Result<Json, BridgeError> {
+    let encoded = serde_json::to_string(&args)
+        .map_err(|error| BridgeError::Protocol(format!("could not encode {cmd} args: {error}")))?;
+    let mut command = Command::new(cli);
+    command
+        .arg(cmd)
+        .arg(&encoded)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|error| {
+        BridgeError::Unreachable(format!("could not run {}: {error}", cli.display()))
+    })?;
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            BridgeError::Unreachable(format!("{CLI_NAME} {cmd} timed out after {timeout:?}"))
+        })?
+        .map_err(|error| BridgeError::Unreachable(format!("{CLI_NAME} {cmd} failed: {error}")))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.lines().rev().find(|line| !line.trim().is_empty()) {
+        Some(line) => parse_reply(CLI_REQUEST_ID, line),
+        None => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(BridgeError::Protocol(format!(
+                "{CLI_NAME} {cmd} printed no envelope (exit {}){}",
+                output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            )))
+        }
+    }
+}
+
+/// Run `watch` for `sources` and hand each change's `data` object to
+/// `on_line` until the CLI exits. An error envelope ends the stream as that
+/// error; a line that is not an envelope is skipped with a note on stderr.
+pub async fn stream_watch(sources: &[&str], on_line: impl FnMut(Json)) -> Result<(), BridgeError> {
+    let cli = cli_path().ok_or(BridgeError::CliNotInstalled)?;
+    stream_watch_at(&cli, sources, on_line).await
+}
+
+/// [`stream_watch`] against an explicit executable.
+pub async fn stream_watch_at(
+    cli: &Path,
+    sources: &[&str],
+    mut on_line: impl FnMut(Json),
+) -> Result<(), BridgeError> {
+    let args = serde_json::json!({ "sources": sources });
+    let mut command = Command::new(cli);
+    command
+        .arg("watch")
+        .arg(args.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        BridgeError::Unreachable(format!("could not run {}: {error}", cli.display()))
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        BridgeError::Unreachable(format!("{CLI_NAME} watch stdout was not captured"))
+    })?;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await.map_err(|error| {
+        BridgeError::Unreachable(format!("{CLI_NAME} watch read failed: {error}"))
+    })? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_reply(CLI_REQUEST_ID, &line) {
+            Ok(data) => on_line(data),
+            Err(BridgeError::Protocol(detail)) => eprintln!("cider watch: {CLI_NAME}: {detail}"),
+            Err(error) => return Err(error),
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| BridgeError::Unreachable(format!("{CLI_NAME} watch failed: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(BridgeError::Unreachable(format!(
+            "{CLI_NAME} watch exited with {status}"
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reminders and Calendar writes.
+//
+// Same verbs as the AppleScript/JXA paths in `reminders` and `calendar`, same
+// `ActionResult` shape (`ok`, `action`, `id`, `message`) so callers need not
+// care which path ran, plus the row EventKit handed back as `record`.
+// ---------------------------------------------------------------------------
+
+/// Which path a Reminders or Calendar write takes. Decided once per
+/// command from [`is_installed`]; `--envelope` reports it as `source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteBackend {
+    /// `cider-bridge` (EventKit).
+    Cli,
+    /// AppleScript (Reminders) or JXA (Calendar).
+    Native,
+}
+
+impl WriteBackend {
+    pub fn detect() -> Self {
+        if is_installed() {
+            Self::Cli
+        } else {
+            Self::Native
+        }
+    }
+
+    pub fn is_cli(self) -> bool {
+        self == Self::Cli
+    }
+
+    /// The `source` value in an `--envelope`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Native => "native",
+        }
+    }
+
+    /// How a dry-run message names the path.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "via cider-bridge",
+            Self::Native => "via AppleScript/JXA",
+        }
+    }
+}
+
+/// An `ActionResult`-shaped object with the CLI's row attached as `record`.
+pub fn action_with_record(
+    action: &str,
+    id: Option<&str>,
+    message: Option<String>,
+    record: Json,
+) -> Json {
+    let mut out = serde_json::Map::new();
+    out.insert("ok".into(), Json::Bool(true));
+    out.insert("action".into(), Json::String(action.to_string()));
+    let id = id
+        .map(str::to_string)
+        .or_else(|| record.get("id").and_then(Json::as_str).map(str::to_string));
+    if let Some(id) = id {
+        out.insert("id".into(), Json::String(id));
+    }
+    if let Some(message) = message {
+        out.insert("message".into(), Json::String(message));
+    }
+    if record.is_object() {
+        out.insert("record".into(), record);
+    }
+    Json::Object(out)
+}
+
+/// The id a `Target` names: an id as given, a title resolved through the
+/// SQLite read path (the CLI addresses reminders by id only).
+pub async fn reminder_id(
+    target: super::reminders::Target<'_>,
+    list: Option<&str>,
+) -> anyhow::Result<String> {
+    match target {
+        super::reminders::Target::Id(id) => Ok(id.trim().to_string()),
+        super::reminders::Target::Title(_) => Ok(super::reminders::get(target, list).await?.id),
+    }
+}
+
+fn optional_args(pairs: &[(&str, Option<Json>)]) -> serde_json::Map<String, Json> {
+    pairs
+        .iter()
+        .filter_map(|(key, value)| value.clone().map(|v| ((*key).to_string(), v)))
+        .collect()
+}
+
+pub async fn reminders_create(
+    title: &str,
+    list: Option<&str>,
+    due: Option<&str>,
+    priority: Option<i32>,
+    notes: Option<&str>,
+) -> Result<Json, BridgeError> {
+    let mut args = optional_args(&[
+        ("list", list.map(Json::from)),
+        ("due", due.map(Json::from)),
+        ("priority", priority.map(Json::from)),
+        ("notes", notes.map(Json::from)),
+    ]);
+    args.insert("title".into(), Json::from(title));
+    let row = call("reminders.create", Json::Object(args)).await?;
+    Ok(action_with_record("created", None, None, row))
+}
+
+/// `reminders.update`; `append_notes` is folded into `notes` after reading
+/// the current notes from the store, since EventKit has no append.
+pub async fn reminders_update(
+    id: &str,
+    fields: &super::reminders::UpdateFields<'_>,
+) -> anyhow::Result<Json> {
+    let notes = match (fields.notes, fields.append_notes) {
+        (Some(notes), _) => Some(notes.to_string()),
+        (None, Some(extra)) => {
+            let current = super::reminders::get(super::reminders::Target::Id(id), None)
+                .await?
+                .notes
+                .unwrap_or_default();
+            Some(if current.is_empty() {
+                extra.to_string()
+            } else {
+                format!("{current}\n{extra}")
+            })
+        }
+        (None, None) => None,
+    };
+    let mut args = optional_args(&[
+        ("title", fields.title.map(Json::from)),
+        ("notes", notes.map(Json::from)),
+        ("priority", fields.priority.map(Json::from)),
+        ("due", fields.due.map(Json::from)),
+    ]);
+    if args.is_empty() {
+        anyhow::bail!("Nothing to update");
+    }
+    args.insert("id".into(), Json::from(id));
+    let row = call("reminders.update", Json::Object(args)).await?;
+    Ok(action_with_record(
+        "updated",
+        Some(id),
+        Some(format!("Updated id {id}")),
+        row,
+    ))
+}
+
+/// `reminders.complete` / `reminders.reopen`.
+pub async fn reminders_set_completed(id: &str, completed: bool) -> Result<Json, BridgeError> {
+    let (cmd, action, past) = if completed {
+        ("reminders.complete", "completed", "Marked")
+    } else {
+        ("reminders.reopen", "reopened", "Reopened")
+    };
+    let row = call(cmd, serde_json::json!({"id": id})).await?;
+    Ok(action_with_record(
+        action,
+        Some(id),
+        Some(format!("{past} id {id}")),
+        row,
+    ))
+}
+
+pub async fn reminders_delete(id: &str) -> Result<Json, BridgeError> {
+    let row = call("reminders.delete", serde_json::json!({"id": id})).await?;
+    Ok(action_with_record(
+        "deleted",
+        Some(id),
+        Some(format!("Deleted id {id}")),
+        row,
+    ))
+}
+
+/// `batch-complete` / `batch-reopen` / `batch-delete`: one CLI call per id,
+/// every outcome recorded, so a caller retries only the failed ids.
+pub async fn reminders_batch(
+    verb: &str,
+    ids: &[String],
+) -> anyhow::Result<super::util::BatchActionResult> {
+    use super::util::{BatchActionResult, BatchItemResult};
+    let cmd = match verb {
+        "complete" => "reminders.complete",
+        "reopen" => "reminders.reopen",
+        "delete" => "reminders.delete",
+        other => anyhow::bail!("unknown batch verb {other:?}"),
+    };
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        results.push(match call(cmd, serde_json::json!({"id": id})).await {
+            Ok(_) => BatchItemResult::success(id.clone()),
+            Err(error) => BatchItemResult::failure(id.clone(), error.to_string()),
+        });
+    }
+    Ok(BatchActionResult::new(&format!("batch-{verb}"), results))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn calendar_create(
+    title: &str,
+    start: &str,
+    end: &str,
+    calendar: Option<&str>,
+    location: Option<&str>,
+    notes: Option<&str>,
+    all_day: bool,
+) -> Result<Json, BridgeError> {
+    let mut args = optional_args(&[
+        ("calendar", calendar.map(Json::from)),
+        ("location", location.map(Json::from)),
+        ("notes", notes.map(Json::from)),
+        ("all_day", all_day.then_some(Json::Bool(true))),
+    ]);
+    args.insert("title".into(), Json::from(title));
+    args.insert("start".into(), Json::from(start));
+    args.insert("end".into(), Json::from(end));
+    let row = call("calendar.create", Json::Object(args)).await?;
+    Ok(action_with_record("created", None, None, row))
+}
+
+pub async fn calendar_update(
+    id: &str,
+    fields: &super::calendar::UpdateFields<'_>,
+) -> anyhow::Result<Json> {
+    let mut args = optional_args(&[
+        ("title", fields.title.map(Json::from)),
+        ("start", fields.start.map(Json::from)),
+        ("end", fields.end.map(Json::from)),
+        ("location", fields.location.map(Json::from)),
+        ("notes", fields.notes.map(Json::from)),
+        ("all_day", fields.all_day.map(Json::from)),
+    ]);
+    if args.is_empty() {
+        anyhow::bail!("Nothing to update");
+    }
+    args.insert("id".into(), Json::from(id));
+    let row = call("calendar.update", Json::Object(args)).await?;
+    Ok(action_with_record(
+        "updated",
+        Some(id),
+        Some(format!("Updated id {id}")),
+        row,
+    ))
+}
+
+pub async fn calendar_delete(id: &str) -> Result<Json, BridgeError> {
+    let row = call("calendar.delete", serde_json::json!({"id": id})).await?;
+    Ok(action_with_record(
+        "deleted",
+        Some(id),
+        Some(format!("Deleted id {id}")),
+        row,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn action_with_record_keeps_the_action_result_contract() {
+        let created =
+            action_with_record("created", None, None, json!({"id": "R-1", "title": "Milk"}));
+        assert_eq!(created["ok"], true);
+        assert_eq!(created["action"], "created");
+        assert_eq!(created["id"], "R-1", "id is lifted from the row");
+        assert_eq!(created["record"]["title"], "Milk");
+        assert!(created.get("message").is_none());
+
+        let deleted = action_with_record(
+            "deleted",
+            Some("R-1"),
+            Some("Deleted id R-1".into()),
+            json!({"deleted": true}),
+        );
+        assert_eq!(deleted["id"], "R-1");
+        assert_eq!(deleted["message"], "Deleted id R-1");
+        assert_eq!(deleted["record"]["deleted"], true);
+
+        let bare = action_with_record("deleted", Some("R-2"), None, Json::Null);
+        assert!(bare.get("record").is_none(), "no record for a null reply");
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cider-bridge-cli-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A stand-in for `cider-bridge`: canned envelopes keyed on the command,
+    /// echoing its JSON argument back for `echo` so the wire shape is
+    /// checked, and a two-line stream for `watch`.
+    fn stub_cli(dir: &Path) -> PathBuf {
+        let script = dir.join(CLI_NAME);
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$1" in
+  reminders.create) echo '{"id":0,"ok":true,"data":{"id":"R-1","title":"Milk","list":"Shopping","completed":false}}' ;;
+  echo) printf '{"id":0,"ok":true,"data":%s}\n' "$2" ;;
+  denied) echo '{"id":0,"ok":false,"error":{"code":"permission_denied","message":"Reminders access is denied"}}'; exit 1 ;;
+  slow) sleep 3; echo '{"id":0,"ok":true,"data":null}' ;;
+  garbage) echo 'not an envelope' ;;
+  silent) echo 'boom' >&2; exit 3 ;;
+  watch)
+    echo '{"id":0,"ok":true,"data":{"source":"reminders","at":"2026-09-02T10:00:00Z","kind":"store_changed"}}'
+    echo 'noise'
+    echo '{"id":0,"ok":true,"data":{"source":"calendar","at":"2026-09-02T10:00:01Z","kind":"store_changed"}}'
+    ;;
+  watch-fail) echo '{"id":0,"ok":false,"error":{"code":"invalid_args","message":"unknown source"}}'; exit 1 ;;
+  *) echo "{\"id\":0,\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"no such command $1\"}}"; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[tokio::test]
+    async fn call_parses_data_and_passes_args_as_one_json_argument() {
+        let dir = temp_dir("call");
+        let cli = stub_cli(&dir);
+
+        let row = call_at(
+            &cli,
+            "reminders.create",
+            json!({"title": "Milk"}),
+            CALL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row["id"], "R-1");
+        assert_eq!(row["list"], "Shopping");
+
+        let args = json!({"id": "R-1", "notes": "two\nlines", "priority": 5, "due": null});
+        let echoed = call_at(&cli, "echo", args.clone(), CALL_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(echoed, args, "args arrive as a single JSON object");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn error_envelopes_map_to_typed_errors() {
+        let dir = temp_dir("errors");
+        let cli = stub_cli(&dir);
+
+        let denied = call_at(&cli, "denied", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            BridgeError::Remote {
+                code: "permission_denied".into(),
+                message: "Reminders access is denied".into()
+            }
+        );
+        let missing = call_at(&cli, "nope", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(missing, BridgeError::Remote { ref code, .. } if code == "not_found"),
+            "{missing:?}"
+        );
+        let garbage = call_at(&cli, "garbage", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(matches!(garbage, BridgeError::Protocol(_)), "{garbage:?}");
+        let silent = call_at(&cli, "silent", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(silent, BridgeError::Protocol(ref d) if d.contains("exit 3") && d.contains("boom")),
+            "{silent:?}"
+        );
+        let absent = call_at(&dir.join("missing"), "ping", json!({}), CALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(matches!(absent, BridgeError::Unreachable(_)), "{absent:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn slow_cli_times_out_and_is_killed() {
+        let dir = temp_dir("timeout");
+        let cli = stub_cli(&dir);
+        let started = std::time::Instant::now();
+        let error = call_at(&cli, "slow", json!({}), Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, BridgeError::Unreachable(ref d) if d.contains("timed out after 1s")),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(2500),
+            "the 3 s stub must not be waited for: {:?}",
+            started.elapsed()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn watch_streams_each_data_object_and_skips_noise() {
+        let dir = temp_dir("watch");
+        let cli = stub_cli(&dir);
+        let mut seen = Vec::new();
+        // The stub ignores the sources; the shape of the argument is what
+        // matters, and `echo` covered that above.
+        let stub = cli.clone();
+        stream_watch_at(&stub, &["reminders", "calendar"], |data| seen.push(data))
+            .await
+            .unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["source"], "reminders");
+        assert_eq!(seen[0]["kind"], "store_changed");
+        assert_eq!(seen[1]["source"], "calendar");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn watch_error_envelope_ends_the_stream_as_that_error() {
+        let dir = temp_dir("watch-fail");
+        let cli = stub_cli(&dir);
+        // A wrapper maps the `watch` the client sends onto the stub's
+        // failing branch.
+        let mut count = 0;
+        let wrapper = dir.join("wrapper.sh");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec \"{}\" watch-fail \"$2\"\n", cli.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = stream_watch_at(&wrapper, &["mail"], |_| count += 1)
+            .await
+            .unwrap_err();
+        assert_eq!(count, 0);
+        assert!(
+            matches!(error, BridgeError::Remote { ref code, .. } if code == "invalid_args"),
+            "{error:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn search_order_is_env_then_app_then_local_bin_then_path() {
+        let root = temp_dir("search");
+        let home = root.join("home");
+        let app_cli = home
+            .join("Applications")
+            .join(APP_NAME)
+            .join("Contents/MacOS")
+            .join(CLI_NAME);
+        let local_cli = home.join(".local/bin").join(CLI_NAME);
+        let path_dir = root.join("path-bin");
+        let path_cli = path_dir.join(CLI_NAME);
+        let env_cli = root.join("elsewhere").join(CLI_NAME);
+        for cli in [&app_cli, &local_cli, &path_cli, &env_cli] {
+            std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            std::fs::write(cli, "#!/bin/sh\n").unwrap();
+        }
+        let path_var = std::env::join_paths([root.join("nowhere"), path_dir.clone()]).unwrap();
+        let candidates =
+            || cli_candidates(&home, Some(env_cli.as_os_str()), Some(path_var.as_os_str()));
+
+        assert_eq!(
+            candidates().unwrap(),
+            vec![
+                env_cli.clone(),
+                app_cli.clone(),
+                local_cli.clone(),
+                root.join("nowhere").join(CLI_NAME),
+                path_cli.clone(),
+            ]
+        );
+        assert_eq!(cli_path_from(candidates()), Some(env_cli.clone()));
+        std::fs::remove_file(&env_cli).unwrap();
+        assert_eq!(cli_path_from(candidates()), Some(app_cli.clone()));
+        std::fs::remove_file(&app_cli).unwrap();
+        assert_eq!(cli_path_from(candidates()), Some(local_cli.clone()));
+        std::fs::remove_file(&local_cli).unwrap();
+        assert_eq!(cli_path_from(candidates()), Some(path_cli.clone()));
+        std::fs::remove_file(&path_cli).unwrap();
+        assert_eq!(cli_path_from(candidates()), None);
+
+        // `off` switches the CLI off even when it is installed.
+        std::fs::write(&app_cli, "#!/bin/sh\n").unwrap();
+        assert_eq!(cli_candidates(&home, Some(OsStr::new("off")), None), None);
+        assert_eq!(cli_candidates(&home, Some(OsStr::new(" OFF ")), None), None);
+        assert_eq!(
+            cli_path_from(cli_candidates(&home, Some(OsStr::new("off")), None)),
+            None
+        );
+        // An empty override is the same as none.
+        assert_eq!(
+            cli_path_from(cli_candidates(&home, Some(OsStr::new("")), None)),
+            Some(app_cli.clone())
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn not_installed_error_says_how_to_build_it() {
+        let message = BridgeError::CliNotInstalled.to_string();
+        assert!(
+            message.contains("cider-bridge is not installed"),
+            "{message}"
+        );
+        assert!(
+            message.contains("cider bridge build --install"),
+            "{message}"
+        );
+    }
+}
