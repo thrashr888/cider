@@ -41,5 +41,6 @@ mod util;
 /// AppleScript/subprocess plumbing that callers have no business reaching.
 pub use util::{ActionResult, BatchActionResult, BatchItemResult};
 pub mod voice_memos;
+pub mod watch;
 pub mod weather;
 pub mod wifi;

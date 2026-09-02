@@ -181,6 +181,21 @@ enum Commands {
     /// Fetch voice memos
     #[command(name = "voice-memos")]
     VoiceMemos,
+    /// Stream changes to local Apple data stores as JSON lines until Ctrl-C
+    #[command(
+        long_about = "Watch the on-disk stores behind Reminders, Calendar, Notes, Home, and \
+                      Shortcuts and print one compact JSON object per line as they change. \
+                      Runs in the foreground until interrupted; there is no daemon. Lines are \
+                      always compact (--pretty is ignored) and --envelope wraps each one."
+    )]
+    Watch {
+        /// Store to watch (repeatable); omit to watch all five
+        #[arg(long, value_name = "SOURCE", value_parser = sources::watch::WatchSource::NAMES)]
+        source: Vec<String>,
+        /// Window, in milliseconds, for merging a burst of file events into one line
+        #[arg(long = "debounce-ms", value_name = "MS", default_value_t = 2000)]
+        debounce_ms: u64,
+    },
     /// Fetch weather data
     Weather,
     /// Wi-Fi status and known networks
@@ -1157,6 +1172,21 @@ fn print_dry_run(
         message: Some(message.into()),
     };
     print_output(&serde_json::to_value(&result)?, human, envelope)
+}
+
+/// `--source` names to watch targets; no names means every store.
+fn watch_sources(names: &[String]) -> anyhow::Result<Vec<sources::watch::WatchSource>> {
+    if names.is_empty() {
+        return Ok(sources::watch::WatchSource::ALL.to_vec());
+    }
+    names.iter().map(|name| name.parse()).collect()
+}
+
+/// One watch event as one compact JSON line, flushed so a reader sees it now.
+fn emit_watch_event(event: &sources::watch::WatchEvent, envelope: bool) -> anyhow::Result<()> {
+    print_output(&serde_json::to_value(event)?, false, envelope)?;
+    io::stdout().flush()?;
+    Ok(())
 }
 
 macro_rules! run_source {
@@ -2533,6 +2563,26 @@ async fn run() -> anyhow::Result<()> {
         Commands::VoiceMemos => {
             run_source!(sources::voice_memos::fetch(), cli.pretty, cli.envelope)
         }
+        Commands::Watch {
+            source,
+            debounce_ms,
+        } => {
+            let targets = watch_sources(&source)?;
+            let envelope = cli.envelope;
+            let debounce = std::time::Duration::from_millis(debounce_ms);
+            sources::watch::watch(&targets, debounce, |event| {
+                // The callback cannot propagate an error; a closed stdout
+                // (`cider watch | head`) is the normal way a stream ends.
+                if let Err(err) = emit_watch_event(&event, envelope) {
+                    if is_broken_pipe(&err) {
+                        std::process::exit(0);
+                    }
+                    eprintln!("cider watch: {err}");
+                    std::process::exit(1);
+                }
+            })
+            .await?;
+        }
         Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty, cli.envelope),
         Commands::Wifi { action } => match action {
             None | Some(WifiAction::Status) => {
@@ -2720,6 +2770,47 @@ mod tests {
         assert!(Cli::try_parse_from(["cider", "calendar", "update", "--id", "abc"]).is_err());
         assert!(Cli::try_parse_from(["cider", "contacts", "update", "--id", "abc"]).is_err());
         assert!(Cli::try_parse_from(["cider", "reminders", "update", "--id", "abc"]).is_err());
+    }
+
+    #[test]
+    fn watch_accepts_known_sources_and_rejects_others() {
+        use sources::watch::WatchSource;
+
+        let cli = Cli::try_parse_from([
+            "cider",
+            "watch",
+            "--source",
+            "reminders",
+            "--source",
+            "notes",
+            "--debounce-ms",
+            "500",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Watch {
+                source,
+                debounce_ms,
+            } => {
+                assert_eq!(
+                    watch_sources(&source).unwrap(),
+                    vec![WatchSource::Reminders, WatchSource::Notes]
+                );
+                assert_eq!(debounce_ms, 500);
+            }
+            _ => panic!("expected watch"),
+        }
+        match Cli::try_parse_from(["cider", "watch"]).unwrap().command {
+            Commands::Watch {
+                source,
+                debounce_ms,
+            } => {
+                assert_eq!(watch_sources(&source).unwrap(), WatchSource::ALL.to_vec());
+                assert_eq!(debounce_ms, 2000);
+            }
+            _ => panic!("expected watch"),
+        }
+        assert!(Cli::try_parse_from(["cider", "watch", "--source", "mail"]).is_err());
     }
 
     #[test]

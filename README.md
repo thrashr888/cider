@@ -121,6 +121,10 @@ cider spotlight --query "quarterly report"
 
 Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home, Maps, News, Photo Booth, Photos, Spotlight, Stickies, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather
 
+### Change Stream
+
+`cider watch [--source reminders|calendar|notes|home|shortcuts]... [--debounce-ms 2000]` watches the on-disk stores behind Reminders, Calendar, Notes, Home, and Shortcuts (FSEvents, no daemon) and prints one compact JSON line per coalesced change — `{"source":"reminders","at":"…","paths":[…]}` — until Ctrl-C. An event says *that* a store changed; re-read it with the matching command to learn what.
+
 ## Output
 
 Default output is compact JSON — pipe to `jq`, feed to scripts, or use with AI agents:

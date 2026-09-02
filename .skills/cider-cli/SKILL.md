@@ -156,6 +156,7 @@ cider screenshots list --limit 20
 cider screenshots capture --path ~/Desktop/capture.png
 cider shortcuts run --name "Daily Briefing"
 cider wifi status
+cider watch --source reminders --source calendar   # JSON line per change, runs until Ctrl-C
 cider system-info show
 cider doctor
 cider auth-status
