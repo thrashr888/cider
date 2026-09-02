@@ -11,3 +11,4 @@
 {"id":"int-a3e070c6","kind":"field_change","created_at":"2026-09-02T07:18:36.534745Z","actor":"Paul Thrasher","issue_id":"cider-brk","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-cd3f0a6d","kind":"field_change","created_at":"2026-09-02T07:18:36.708903Z","actor":"Paul Thrasher","issue_id":"cider-dbl","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-b0eb43cf","kind":"field_change","created_at":"2026-09-02T07:18:36.880056Z","actor":"Paul Thrasher","issue_id":"cider-rwa","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-32216319","kind":"field_change","created_at":"2026-09-02T07:59:12.844898Z","actor":"Paul Thrasher","issue_id":"cider-rd5","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
