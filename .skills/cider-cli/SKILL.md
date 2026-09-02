@@ -178,6 +178,42 @@ cider doctor
 cider auth-status
 ```
 
+### The Bridge (HomeKit, WeatherKit, EventKit Writes, Watch)
+
+`cider` alone covers everything above except `home state|run|set|triggers`
+and `weather`; those, faster Reminders/Calendar writes, and item-level
+`watch` events come from the optional Swift helper (README, "Bridge").
+
+```bash
+# First: what is installed, is the app answering, protocol versions,
+# per-store TCC state with the fix for each. Never launches anything.
+cider bridge status
+cider doctor | jq '.checks[] | select(.name | startswith("bridge"))'
+# Cache-backed home reads always work; --envelope says which backend
+# answered and how stale a cache read is.
+cider --envelope home homes | jq '{source, cache_age_s}'
+cider home homes --live                          # insist on the bridge
+# Stop a running bridge (it also exits itself after ten idle minutes).
+cider bridge quit
+```
+
+Facts to plan around:
+
+- `brew install cider` includes the bridge app and `cider-bridge` CLI for
+  everything **except HomeKit**. HomeKit needs a personal build
+  (`cider bridge build --install`: Xcode, XcodeGen, a paid Apple team, and
+  HomeKit enabled on the App ID). A packaged bridge fails HomeKit commands
+  with code `homekit_unavailable`; do not retry, report it.
+- `bridge_incompatible` means a stale app or CLI answered; the message names
+  the fix (`cider bridge build --install`, or `brew upgrade cider`).
+- Home ids differ between cache (`homeUUID`) and bridge
+  (`HMHome.uniqueIdentifier`); room, accessory, and scene ids match. Select
+  homes by name with `--home`; either id is accepted and mapped when possible.
+- TCC grants belong to the app that launched `cider` (Terminal, the agent
+  runner), not to `cider`. Calendar needs **Full Access** or EventKit hides
+  every event; Reminders and Contacts prompt on first use. `cider bridge
+  status` → `cli_authorization.fixes` lists what to grant where.
+
 ## Safety And Permissions
 
 1. Always confirm with the user before any mutating command, especially `create`, `update`, `delete`, `send`, `add`, `set-name`, `defaults-write`, `screen-sharing enable`, `time-machine start/stop`, and `icloud download/evict` (evict removes the local copy; paths must be inside iCloud Drive).
@@ -188,6 +224,7 @@ cider auth-status
    - Messages, Photos, and Safari history may require Full Disk Access
    - Keychain password reads can trigger macOS security dialogs
    - `screen-sharing enable` and `screen-sharing disable` require `sudo`
+   - The first Reminders, Calendar, or Contacts call through `cider-bridge` prompts the *launching* app for access (Calendar needs Full Access); the first HomeKit call prompts for the bridge app. `cider bridge status` and `cider doctor` show the state without prompting.
 
 4. `mail send` and `messages send` are real side effects, not previews.
 

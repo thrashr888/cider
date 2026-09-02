@@ -127,21 +127,16 @@ cider spotlight --query "quarterly report"
 
 Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), iCloud (`account`, `quota`, `status`, `log`, `list` — placeholder-aware, never downloads), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
 
-### Home
+### With the Bridge
 
-`cider home` reads the Home app's on-disk cache, which is as fresh as the last time the app ran and has no characteristic values. With the **Cider Bridge** — a small Catalyst helper app you build once on your own Mac with `cider bridge build --install` (HomeKit only loads in a signed app, so it cannot be distributed) — the same commands go live, and `home` gains what only HomeKit can do: `home state [--room] [--accessory]` (live values, one row per characteristic), `home run --scene`, `home set --accessory --characteristic --value`, and `home triggers` with `create-timer --name --at --repeat --scene`, `enable`, `disable`, `delete` — timer automations that fire on the home hub with the Mac asleep. Reads use the bridge when it is already answering and the cache otherwise (`--envelope` reports `"source": "bridge"|"cache"`, plus `cache_age_s` for a cache read; cache rows also carry `cache_updated_at`); `--live` requires the bridge, launching it on demand. Home ids differ between the two backends — the cache reports `homeUUID`, the bridge `HMHome.uniqueIdentifier` — while room, accessory, and scene ids match, so select homes by name; `--home` resolves a name first, then an id from either space (a cache id is mapped through the name when the bridge answers, and a bridge id through a running bridge when the cache answers). `cider bridge status|build|install|quit` manages the app, and `cider doctor` reports `bridge_app`, `bridge_socket`, and `bridge_cli`. Protocol and design: [docs/RFC-swift-bridge.md](docs/RFC-swift-bridge.md).
+These need the optional Swift helper described under [Bridge](#bridge); `cider bridge status` says what you have.
 
-### Weather
-
-`cider weather [--forecast] [--days N] [--home <name> | --lat <f> --lon <f>]` is WeatherKit through the same bridge app (launched on demand; the Weather app's own cache is encrypted, so there is nothing on disk to read). Current conditions by default — temperature, apparent temperature, condition, humidity, wind, pressure, UV, visibility — or `--forecast` for daily highs/lows/precipitation plus the next 24 hours. Location is `--lat/--lon`, else `--home <name>`, else the primary home's address from the Home app; the output says which under `location`. Every result carries Apple's required `attribution` block (service name, legal URL, logos): keep it next to the numbers when you show them to a person. WeatherKit needs the capability enabled on the bridge's App ID; without it the error is `weather_unavailable`.
-
-### Faster Writes: the `cider-bridge` CLI
-
-`cider bridge build --install` also installs a small native CLI, `cider-bridge`, that wraps EventKit and Contacts (ad-hoc signed, no paid team needed). When it is present, `reminders create|update|complete|reopen|delete|batch-*` and `calendar create|update|delete` go through it instead of AppleScript/JXA — the same commands, the same `{ok, action, id, message}` result, plus the saved row as `record`; `--envelope` reports `"source": "cli"|"native"` and `--dry-run` says which path would run. Bulk reads (`reminders list`, `calendar list`, `--since`) stay on SQLite, and `contacts` stays native. `CIDER_BRIDGE_CLI=off` forces the native path; `CIDER_BRIDGE_CLI=/path/to/cider-bridge` names a build elsewhere (the default search is inside `~/Applications/Cider Bridge.app`, then `~/.local/bin`, then `$PATH`). `cider bridge status` shows `cli_installed`/`cli_path`.
-
-### Change Stream
-
-`cider watch [--source reminders|calendar|contacts|notes|home|shortcuts]... [--debounce-ms 2000] [--via auto|cli|fsevents]` prints one compact JSON line per change until Ctrl-C (foreground, no daemon). Each line is `{"source":…,"at":…,"kind":…}`. With `cider-bridge` installed, reminders, calendar, and contacts stream EventKit/Contacts change notifications — `"kind":"store_changed"`, item-level, no file noise; everything else (and everything, with `--via fsevents` or without the CLI) is FSEvents on the on-disk stores — `"kind":"files_changed"` with the coalesced `paths`. `--via cli` fails rather than falling back. An event says *that* a store changed; re-read it with the matching command to learn what.
+| Command | What it does |
+|---------|--------------|
+| `home state`, `home run`, `home set`, `home triggers …` | Live HomeKit values, scenes, characteristics, and timer automations (personal build only) |
+| `weather [--forecast] [--days N] [--home <name> \| --lat --lon]` | WeatherKit current conditions or daily forecast, with Apple's required `attribution` |
+| `reminders create\|update\|complete\|reopen\|delete\|batch-*`, `calendar create\|update\|delete` | Same commands, EventKit instead of AppleScript when `cider-bridge` is installed (`--envelope` says `"source": "cli"\|"native"`) |
+| `watch [--source …] [--via auto\|cli\|fsevents]` | One JSON line per store change; EventKit/Contacts notifications with the CLI, FSEvents otherwise |
 
 ## Output
 
@@ -365,15 +360,74 @@ cargo build --release
 
 ## Bridge
 
-HomeKit has no file or script interface and WeatherKit only loads in a
-signed app, so `cider` can talk to an optional Swift helper, **Cider
-Bridge**, over a Unix socket — and to its sibling, the native `cider-bridge`
-CLI, over JSON stdio for EventKit/Contacts writes and change streams. The
-Swift half lives in [`bridge/`](bridge/) (`swift test` there runs its unit
-tests; `bridge/scripts/build.sh --team <id> --install` builds the Mac
-Catalyst app with your own Apple Developer team and installs the CLI beside
-it). The design, protocol, and command table are in
-[docs/RFC-swift-bridge.md](docs/RFC-swift-bridge.md).
+Everything above works with the Rust binary alone. Some Apple data only
+exists behind a framework that loads in a signed app, so `cider` can also
+use an optional Swift helper: **Cider Bridge.app**, a Mac Catalyst app it
+launches on demand and talks to over a Unix socket (it quits after ten idle
+minutes; no daemon), and **`cider-bridge`**, a native CLI it runs per call.
+Sources and protocol: [`bridge/`](bridge/), [docs/RFC-swift-bridge.md](docs/RFC-swift-bridge.md).
+
+**Start here:** `cider bridge status` (what is installed, whether the app is
+answering, protocol versions, per-store authorization) and `cider doctor`
+(the `bridge_*` checks: app, socket, CLI, signing-profile expiry,
+authorization, HomeKit). Neither launches the app or opens a dialog.
+
+### What it adds
+
+| Area | Without the bridge | With the bridge |
+|------|--------------------|-----------------|
+| **Home** | `cider home` reads the Home app's on-disk cache: homes, rooms, accessories, scenes, no live values, as fresh as the last time the Home app ran (`--envelope` reports `"source": "cache"` and `cache_age_s`; rows carry `cache_updated_at`) | The same reads go live (`"source": "bridge"`; `--live` insists on it), plus `home state [--room] [--accessory]`, `home run --scene`, `home set --accessory --characteristic --value`, and `home triggers create-timer\|enable\|disable\|delete` — timer automations that fire on the home hub with the Mac asleep. **Needs a personal build** (below). |
+| **Weather** | Nothing: the Weather app's cache is encrypted | `cider weather [--forecast --days N] [--home <name> \| --lat --lon]`, WeatherKit with Apple's required `attribution` block — keep it next to the numbers you show a person. Location is `--lat/--lon`, else `--home`, else the primary home's address from the Home app. |
+| **Reminders, Calendar writes** | AppleScript/JXA (works, seconds per write) | EventKit through `cider-bridge`: same commands and result shape, milliseconds, the saved row as `record`; `--dry-run` names the path and `--envelope` reports `"source": "cli"\|"native"`. Bulk reads stay on SQLite. `CIDER_BRIDGE_CLI=off` forces the old path. |
+| **`cider watch`** | FSEvents on the on-disk stores (`"kind":"files_changed"`, coalesced `paths`) | Item-level EventKit/Contacts change notifications for reminders, calendar, contacts (`"kind":"store_changed"`); `--via cli` fails rather than falling back. An event says *that* a store changed; re-read it to learn what. |
+
+Home ids differ between the two backends (the cache reports `homeUUID`, the
+bridge `HMHome.uniqueIdentifier`; room, accessory, and scene ids match), so
+select homes by name. `--home` takes a name first, then an id from either
+space, mapping through the name when it can.
+
+### What `brew install cider` includes
+
+The Homebrew formula ships the bridge app and the CLI next to `cider`
+(`libexec/Cider Bridge.app`, `bin/cider-bridge`), Developer ID signed and
+notarized. That covers **everything except HomeKit**: WeatherKit, EventKit
+and Contacts writes, and `watch`. Apple grants the HomeKit entitlement only
+to App Store and development builds, so a packaged bridge reports
+`homekit_entitled: false` and HomeKit commands fail with
+`homekit_unavailable` (cache-backed `home` reads keep working). Cargo
+installs get the Rust binary only.
+
+### Getting HomeKit: a personal build
+
+1. Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`), and a paid Apple Developer team.
+2. In the developer portal, enable **HomeKit** (and **WeatherKit**, if wanted) on the App ID `dev.thrasher.cider.bridge`. Xcode's automatic signing registers your Mac and makes the profile but cannot add HomeKit to a Catalyst App ID; that step is manual, once.
+3. From a cider checkout: `cider bridge build --install --team <TEAM_ID>` (or `CIDER_TEAM_ID` in the environment or `bridge/.env.local`). This builds with XcodeGen + `xcodebuild`, installs `~/Applications/Cider Bridge.app` — which wins over the packaged copy — and puts `cider-bridge` inside it.
+
+The development profile expires a year after it is made and the app then
+silently stops launching; `cider doctor` reports `bridge_profile` as
+`expiring` inside the last thirty days. Rebuild to renew.
+
+### Permissions
+
+macOS asks once per store, and the grant belongs to the app that *launched*
+`cider` (Terminal, iTerm, your agent runner), because that is who TCC
+attributes the request to. `cider bridge status` shows each store's state
+under `cli_authorization` with the fix.
+
+| Store | What happens | Fix when it is not |
+|-------|--------------|--------------------|
+| Reminders | The first write through `cider-bridge` prompts; grant Full Access | System Settings › Privacy & Security › Reminders |
+| Calendar | Needs **Full Access** for the launching app; with less, EventKit hides every event | System Settings › Privacy & Security › Calendars |
+| Contacts | The first `contacts` read through the CLI prompts | System Settings › Privacy & Security › Contacts |
+| HomeKit | The app prompts on its first HomeKit call (personal build only) | System Settings › Privacy & Security › HomeKit |
+
+`cider bridge status|build|install|quit` manages the app;
+`CIDER_BRIDGE_APP=/path/to/Cider Bridge.app` and
+`CIDER_BRIDGE_CLI=/path/to/cider-bridge` point at builds elsewhere. Cider
+checks the bridge's protocol version on every connection and fails with
+`bridge_incompatible` when a stale app or CLI answers, naming the fix
+(`cider bridge build --install`, or `brew upgrade cider` for the packaged
+copy).
 
 ## License
 
