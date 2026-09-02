@@ -407,6 +407,99 @@ pub fn output_renames(name: &str, output: &str) -> bool {
     stem != name.replace(['/', ':'], "-")
 }
 
+/// How long an ssh probe waits for `host:port` to accept a connection.
+const SSH_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Where macOS turns `sshd` on; named in the error so the fix is one step.
+const REMOTE_LOGIN_SETTING: &str = "System Settings › General › Sharing › Remote Login";
+
+/// True when `host` names the Mac this is running on: `localhost`, a
+/// loopback address, or one of `own_names` (see [`own_host_names`]).
+pub fn is_this_mac(host: &str, own_names: &[String]) -> bool {
+    let host = host.trim().trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || own_names
+            .iter()
+            .any(|name| name.trim_end_matches('.').eq_ignore_ascii_case(host))
+}
+
+/// This Mac's own names from `hostname`: the full name (`mac.local`) and
+/// its first label (`mac`). Empty when the command fails.
+pub fn own_host_names() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("hostname").output() else {
+        return Vec::new();
+    };
+    let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if full.is_empty() {
+        return Vec::new();
+    }
+    let short = full.split('.').next().map(str::to_string);
+    std::iter::once(full)
+        .chain(short.filter(|s| !s.is_empty()))
+        .collect::<Vec<_>>()
+}
+
+/// Whether something accepts TCP connections at `host:port` within
+/// [`SSH_PROBE_TIMEOUT`]. A name that does not resolve is "closed".
+pub fn ssh_port_open(host: &str, port: u16) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|addr| TcpStream::connect_timeout(&addr, SSH_PROBE_TIMEOUT).is_ok())
+}
+
+/// Check every `ssh` step before building. Returns the warnings to print
+/// on stderr; fails when a step targets this Mac and nothing listens on
+/// its port — Remote Login is off, and the shortcut would hang silently
+/// in the Shortcuts app — unless `allow_unreachable` is set. A remote host
+/// that does not answer only warns: it may be off or unreachable from
+/// here at build time. `probe(host, port)` is injected so the decision is
+/// testable without a network.
+pub fn check_ssh_steps(
+    spec: &ShortcutSpec,
+    allow_unreachable: bool,
+    own_names: &[String],
+    probe: impl Fn(&str, u16) -> bool,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    for step in &spec.steps {
+        let Step::Ssh {
+            host, user, port, ..
+        } = step
+        else {
+            continue;
+        };
+        let port = port.unwrap_or(22);
+        warnings.push(format!(
+            "ssh step to {user}@{host} uses password authentication; the Shortcuts app will ask for the password on the first run"
+        ));
+        if probe(host, port) {
+            continue;
+        }
+        if is_this_mac(host, own_names) {
+            let problem = format!(
+                "ssh step targets this Mac but Remote Login is off (port {port} closed); enable it in {REMOTE_LOGIN_SETTING}"
+            );
+            if !allow_unreachable {
+                anyhow::bail!("invalid shortcut spec: {problem}, or pass --allow-unreachable-ssh");
+            }
+            warnings.push(format!(
+                "{problem}; generating anyway (--allow-unreachable-ssh)"
+            ));
+        } else {
+            warnings.push(format!(
+                "ssh step to {host}:{port} is not reachable from here right now; the shortcut will hang in the Shortcuts app if it still is not when run"
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
 /// A step with every name turned into the identifier the file needs.
 #[derive(Debug, Clone, PartialEq)]
 enum ResolvedStep {
@@ -605,13 +698,28 @@ fn build_workflow(name: &str, steps: &[ResolvedStep]) -> Value {
 
 /// Write `spec` as a `.shortcut` file at `output`, optionally signed for
 /// anyone via `shortcuts sign`. Scene steps are resolved against the Home
-/// app cache, so those need `cider home` to work first.
-pub async fn gen(spec: &ShortcutSpec, output: &str, sign_it: bool) -> anyhow::Result<ActionResult> {
+/// app cache, so those need `cider home` to work first. An `ssh` step to
+/// this Mac is refused while its port is closed (see [`check_ssh_steps`])
+/// unless `allow_unreachable_ssh` is set.
+pub async fn gen(
+    spec: &ShortcutSpec,
+    output: &str,
+    sign_it: bool,
+    allow_unreachable_ssh: bool,
+) -> anyhow::Result<ActionResult> {
     if output_renames(&spec.name, output) {
         eprintln!(
             "cider shortcuts gen: Shortcuts will name the imported shortcut after the file, not '{}'",
             spec.name
         );
+    }
+    for warning in check_ssh_steps(
+        spec,
+        allow_unreachable_ssh,
+        &own_host_names(),
+        ssh_port_open,
+    )? {
+        eprintln!("cider shortcuts gen: {warning}");
     }
     let needs_homes = spec.steps.iter().any(|s| matches!(s, Step::Scene { .. }));
     let homes = if needs_homes {
@@ -957,6 +1065,117 @@ mod tests {
                 .and_then(Value::as_string),
             Some("1.0")
         );
+    }
+
+    fn ssh_spec(host: &str, port: Option<u16>) -> ShortcutSpec {
+        let port = port.map(|p| format!(", \"port\": {p}")).unwrap_or_default();
+        parse_spec(&format!(
+            r#"{{"name": "n", "steps": [{{"speak": "hi"}}, {{"ssh": {{"host": "{host}", "user": "u", "script": "s"{port}}}}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn own_names() -> Vec<String> {
+        vec!["Studio.local".to_string(), "Studio".to_string()]
+    }
+
+    #[test]
+    fn this_mac_is_localhost_loopback_or_its_own_hostname() {
+        let names = own_names();
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "::1",
+            "studio.local",
+            "Studio",
+            "Studio.local.",
+        ] {
+            assert!(is_this_mac(host, &names), "{host}");
+        }
+        for host in ["mac.tail.ts.net", "studio.example.com", "10.0.0.5", ""] {
+            assert!(!is_this_mac(host, &names), "{host}");
+        }
+    }
+
+    #[test]
+    fn closed_local_ssh_is_refused_as_invalid_input() {
+        for host in ["localhost", "127.0.0.1", "Studio.local"] {
+            let err = check_ssh_steps(&ssh_spec(host, None), false, &own_names(), |_, _| false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("Remote Login is off (port 22 closed)"),
+                "{err}"
+            );
+            assert!(err.contains("Sharing › Remote Login"), "{err}");
+            assert!(err.contains("--allow-unreachable-ssh"), "{err}");
+            // `invalid` is what main.rs classifies as `invalid_input`.
+            assert!(err.starts_with("invalid shortcut spec"), "{err}");
+        }
+    }
+
+    #[test]
+    fn allow_unreachable_turns_the_local_refusal_into_a_warning() {
+        let warnings = check_ssh_steps(&ssh_spec("localhost", None), true, &own_names(), |_, _| {
+            false
+        })
+        .unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("password"), "{warnings:?}");
+        assert!(
+            warnings[1].contains("Remote Login is off")
+                && warnings[1].contains("generating anyway"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn open_port_only_warns_about_the_password_prompt() {
+        let warnings =
+            check_ssh_steps(&ssh_spec("localhost", None), false, &own_names(), |_, _| {
+                true
+            })
+            .unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("u@localhost"), "{warnings:?}");
+        assert!(warnings[0].contains("first run"), "{warnings:?}");
+    }
+
+    #[test]
+    fn closed_remote_host_warns_but_generates() {
+        let warnings = check_ssh_steps(
+            &ssh_spec("mac.tail.ts.net", Some(2222)),
+            false,
+            &own_names(),
+            |_, _| false,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[1].contains("mac.tail.ts.net:2222 is not reachable"),
+            "{warnings:?}"
+        );
+        assert!(!warnings[1].contains("Remote Login"), "{warnings:?}");
+    }
+
+    #[test]
+    fn probe_sees_the_step_port_and_is_skipped_without_ssh_steps() {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let spec = ssh_spec("Studio", Some(2222));
+        check_ssh_steps(&spec, false, &own_names(), |host, port| {
+            probed.borrow_mut().push((host.to_string(), port));
+            true
+        })
+        .unwrap();
+        assert_eq!(probed.borrow().as_slice(), [("Studio".to_string(), 2222)]);
+
+        let spec = parse_spec(r#"{"name": "n", "steps": [{"speak": "hi"}]}"#).unwrap();
+        let warnings = check_ssh_steps(&spec, false, &own_names(), |_, _| {
+            panic!("no ssh step, nothing to probe")
+        })
+        .unwrap();
+        assert!(warnings.is_empty());
     }
 
     #[test]

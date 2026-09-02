@@ -904,6 +904,9 @@ enum ShortcutsAction {
         /// Sign the file for anyone so Shortcuts will import it
         #[arg(long)]
         sign: bool,
+        /// Build even if an ssh step targets this Mac and its port is closed (Remote Login off)
+        #[arg(long)]
+        allow_unreachable_ssh: bool,
     },
     /// Open a .shortcut file in Shortcuts, which prompts to add it
     Install {
@@ -3179,7 +3182,12 @@ async fn run() -> anyhow::Result<()> {
                 let result = sources::shortcuts::export(&name).await?;
                 print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
             }
-            Some(ShortcutsAction::Gen { spec, output, sign }) => {
+            Some(ShortcutsAction::Gen {
+                spec,
+                output,
+                sign,
+                allow_unreachable_ssh,
+            }) => {
                 let json = if spec == "-" {
                     let mut buf = String::new();
                     io::stdin().read_to_string(&mut buf)?;
@@ -3203,7 +3211,9 @@ async fn run() -> anyhow::Result<()> {
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::shortcuts::gen(&spec, &output, sign).await?;
+                    let result =
+                        sources::shortcuts::gen(&spec, &output, sign, allow_unreachable_ssh)
+                            .await?;
                     print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
                 }
             }
@@ -3833,6 +3843,35 @@ mod tests {
                 assert!(action.is_none());
             }
             _ => panic!("expected home"),
+        }
+    }
+
+    #[test]
+    fn shortcuts_gen_accepts_allow_unreachable_ssh() {
+        for (argv, expected) in [
+            (vec!["cider", "shortcuts", "gen", "--spec", "s.json"], false),
+            (
+                vec![
+                    "cider",
+                    "shortcuts",
+                    "gen",
+                    "--spec",
+                    "s.json",
+                    "--allow-unreachable-ssh",
+                ],
+                true,
+            ),
+        ] {
+            match Cli::try_parse_from(argv).unwrap().command {
+                Commands::Shortcuts {
+                    action:
+                        Some(ShortcutsAction::Gen {
+                            allow_unreachable_ssh,
+                            ..
+                        }),
+                } => assert_eq!(allow_unreachable_ssh, expected),
+                _ => panic!("expected shortcuts gen"),
+            }
         }
     }
 

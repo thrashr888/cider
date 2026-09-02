@@ -107,7 +107,7 @@ cider spotlight --query "quarterly report"
 |-----|---------|
 | Music | `list`, `play`, `pause`, `next`, `previous`, `status`, `playlists` |
 | Messages | `list`, `send` |
-| Shortcuts | `list`, `run`, `view`, `export`, `gen`, `install`, `sign` |
+| Shortcuts | `list`, `run`, `view`, `export`, `gen`, `install`, `sign` — an `ssh` step to this Mac needs Remote Login on (System Settings › General › Sharing); `gen` refuses to build one while port 22 is closed unless you pass `--allow-unreachable-ssh` |
 | Screenshots | `list`, `capture` |
 | Time Machine | `status`, `list`, `start`, `stop` |
 | iCloud Drive | `list`, `download`, `evict` (evict removes the local copy; the file stays in iCloud) |
