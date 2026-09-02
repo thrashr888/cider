@@ -100,6 +100,29 @@ jobs:
         run: |
           echo "darwin_arm64=$(sha256sum cider-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "darwin_amd64=$(sha256sum cider-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # The Swift bridge (Cider Bridge.app + cider-bridge, Developer ID,
+      # notarized) cannot be built here: it needs the Developer ID certificate
+      # and the notarytool credentials. bridge/scripts/release.md builds it on
+      # a Mac and uploads it onto the draft release before the tag is created.
+      # If it is there, the formula installs it; if not, the formula omits it.
+      - name: Look for the packaged bridge on the release
+        id: bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          NAME="cider-bridge-${TAG#v}-macos-universal.tar.gz"
+          if gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -qx "$NAME"; then
+            gh release download "$TAG" --repo "$REPO" --pattern "$NAME"
+            echo "url=https://github.com/$REPO/releases/download/$TAG/$NAME" >> "$GITHUB_OUTPUT"
+            echo "sha256=$(sha256sum "$NAME" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+            echo "bridge asset found: $NAME"
+          else
+            echo "url=" >> "$GITHUB_OUTPUT"
+            echo "sha256=" >> "$GITHUB_OUTPUT"
+            echo "no $NAME on the release; the formula will omit the bridge"
+          fi
       - name: Update Homebrew formula
         uses: thrashr888/homebrew-tap@main
         with:
@@ -108,6 +131,12 @@ jobs:
           tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           darwin-arm64-sha256: ${{ steps.sha.outputs.darwin_arm64 }}
           darwin-amd64-sha256: ${{ steps.sha.outputs.darwin_amd64 }}
+          bridge-url: ${{ steps.bridge.outputs.url }}
+          bridge-sha256: ${{ steps.bridge.outputs.sha256 }}
+          # ${BRIDGE_RESOURCE}, ${BRIDGE_INSTALL} and ${BRIDGE_CAVEATS} are
+          # filled by the action when bridge-url/bridge-sha256 are set and
+          # removed otherwise; bridge/scripts/formula-example.rb shows the
+          # filled-in result.
           template: |
             class Cider < Formula
               desc "Manage macOS Apple apps from the command line"
@@ -125,10 +154,13 @@ jobs:
                 end
               end
 
+            ${BRIDGE_RESOURCE}
               def install
                 bin.install "cider"
+            ${BRIDGE_INSTALL}
               end
 
+            ${BRIDGE_CAVEATS}
               test do
                 assert_match "cider", shell_output("#{bin}/cider --help")
               end
