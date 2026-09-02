@@ -51,6 +51,11 @@ enum Commands {
     Bluetooth,
     /// Fetch books from Apple Books
     Books,
+    /// The Cider Bridge helper app that gives `home` live HomeKit access
+    Bridge {
+        #[command(subcommand)]
+        action: Option<BridgeAction>,
+    },
     /// Interact with Calendar events
     Calendar {
         #[command(subcommand)]
@@ -81,8 +86,12 @@ enum Commands {
     },
     /// List installed fonts (Font Book)
     Fonts,
-    /// Homes, rooms, accessories, and scenes from the Home app's cache
+    /// Homes, rooms, accessories, and scenes (Home app cache, or live via Cider Bridge)
     Home {
+        /// Require the Cider Bridge (launching it if needed) instead of the
+        /// Home app cache; fail rather than fall back
+        #[arg(long, global = true)]
+        live: bool,
         #[command(subcommand)]
         action: Option<HomeAction>,
     },
@@ -1038,6 +1047,126 @@ enum HomeAction {
         #[arg(long)]
         home: Option<String>,
     },
+    /// Live characteristic values, one row each (needs Cider Bridge)
+    State {
+        /// Restrict to one home, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+        /// Restrict to one room, by name or UUID
+        #[arg(long)]
+        room: Option<String>,
+        /// Restrict to one accessory, by name or UUID
+        #[arg(long)]
+        accessory: Option<String>,
+    },
+    /// Run a scene (needs Cider Bridge)
+    Run {
+        /// Scene name or UUID
+        #[arg(long)]
+        scene: String,
+        /// Home the scene belongs to, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Set one characteristic of an accessory (needs Cider Bridge)
+    Set {
+        /// Accessory name or UUID
+        #[arg(long)]
+        accessory: String,
+        /// Characteristic name, as shown by `home state`
+        #[arg(long)]
+        characteristic: String,
+        /// New value: JSON if it parses (true, 50, "warm"), else a string
+        #[arg(long)]
+        value: String,
+        /// Service name or UUID, when the accessory has several
+        #[arg(long)]
+        service: Option<String>,
+        /// Home the accessory belongs to, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Automations: list them, or create/enable/disable/delete timer triggers (needs Cider Bridge)
+    Triggers {
+        #[command(subcommand)]
+        action: Option<HomeTriggersAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HomeTriggersAction {
+    /// Every trigger with its schedule, scenes, and last fire (default)
+    List {
+        /// Restrict to one home, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Create a timer trigger that runs scenes on the home hub, Mac asleep or not
+    #[command(name = "create-timer")]
+    CreateTimer {
+        /// Trigger name as it will appear in the Home app
+        #[arg(long)]
+        name: String,
+        /// First fire time, RFC 3339 with offset (2026-09-01T19:30:00-07:00)
+        #[arg(long)]
+        at: String,
+        /// Repeat: daily, weekly, or <minutes>m (e.g. 90m); omit for once
+        #[arg(long)]
+        repeat: Option<String>,
+        /// Scene to run, by name or UUID; repeat for several
+        #[arg(long, required = true)]
+        scene: Vec<String>,
+        /// Home to create it in, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Enable a trigger
+    Enable {
+        /// Trigger name or UUID
+        #[arg(long)]
+        trigger: String,
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Disable a trigger without deleting it
+    Disable {
+        /// Trigger name or UUID
+        #[arg(long)]
+        trigger: String,
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Delete a trigger
+    Delete {
+        /// Trigger name or UUID
+        #[arg(long)]
+        trigger: String,
+        #[arg(long)]
+        home: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BridgeAction {
+    /// Is the app installed, and is it answering? (default; never launches it)
+    Status,
+    /// Build the app from the bridge/ sources with your Apple team
+    Build {
+        /// Apple Developer team id (falls back to $CIDER_TEAM_ID)
+        #[arg(long)]
+        team: Option<String>,
+        /// Copy the result into ~/Applications when the build succeeds
+        #[arg(long)]
+        install: bool,
+    },
+    /// Copy a built app bundle into ~/Applications
+    Install {
+        /// App bundle to install (default: the newest under bridge/.build)
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+    },
+    /// Ask a running bridge to exit
+    Quit,
 }
 
 #[derive(Subcommand)]
@@ -1154,6 +1283,23 @@ fn envelope_value(value: &serde_json::Value) -> serde_json::Value {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     serde_json::json!({"ok": ok, "data": value})
+}
+
+/// `print_output` for reads that have more than one backend: with
+/// `--envelope` the wrapper carries `"source"` so a caller knows whether the
+/// data is live or cached. Without the envelope the output is unchanged.
+fn print_sourced_output(
+    value: &serde_json::Value,
+    human: bool,
+    envelope: bool,
+    source: sources::home_live::Source,
+) -> anyhow::Result<()> {
+    if !envelope {
+        return print_output(value, human, false);
+    }
+    let mut wrapped = envelope_value(value);
+    wrapped["source"] = serde_json::json!(source.as_str());
+    print_output(&wrapped, human, false)
 }
 
 fn print_batch_output(
@@ -1396,10 +1542,14 @@ fn is_mutating_action(action: &str) -> bool {
             | "capture"
             | "enable"
             | "disable"
+            | "set"
             | "set-name"
+            | "create-timer"
             | "defaults-write"
             | "start"
             | "stop"
+            | "build"
+            | "install"
     )
 }
 
@@ -1427,6 +1577,256 @@ fn identifier_contract(source: &str) -> Option<serde_json::Value> {
             "field": "id",
         })),
         _ => None,
+    }
+}
+
+/// `cider home`: reads go to the bridge when it is required (`--live`) or
+/// already answering, else to the Home app cache; everything HomeKit-only
+/// (`state`, `run`, `set`, `triggers`) always goes through the bridge.
+async fn run_home(
+    live: bool,
+    action: Option<HomeAction>,
+    pretty: bool,
+    envelope: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use sources::bridge::Bridge;
+    use sources::home_live::{self as hl, Source};
+
+    let action = action.unwrap_or(HomeAction::List);
+    match &action {
+        HomeAction::List
+        | HomeAction::Homes
+        | HomeAction::Rooms { .. }
+        | HomeAction::Accessories { .. }
+        | HomeAction::Scenes { .. } => {
+            let (value, source) = match hl::bridge_for(live).await?.as_mut() {
+                Some(bridge) => {
+                    let value = match &action {
+                        HomeAction::List => hl::list(bridge).await?,
+                        HomeAction::Homes => hl::homes(bridge).await?,
+                        HomeAction::Rooms { home } => hl::rooms(bridge, home.as_deref()).await?,
+                        HomeAction::Accessories { home, room } => {
+                            hl::accessories(bridge, home.as_deref(), room.as_deref()).await?
+                        }
+                        HomeAction::Scenes { home } => hl::scenes(bridge, home.as_deref()).await?,
+                        _ => unreachable!("read subcommands only"),
+                    };
+                    (value, Source::Bridge)
+                }
+                None => {
+                    let value = match &action {
+                        HomeAction::List => serde_json::to_value(sources::home::list().await?)?,
+                        HomeAction::Homes => serde_json::to_value(sources::home::homes().await?)?,
+                        HomeAction::Rooms { home } => {
+                            serde_json::to_value(sources::home::rooms(home.as_deref()).await?)?
+                        }
+                        HomeAction::Accessories { home, room } => serde_json::to_value(
+                            sources::home::accessories(home.as_deref(), room.as_deref()).await?,
+                        )?,
+                        HomeAction::Scenes { home } => {
+                            serde_json::to_value(sources::home::scenes(home.as_deref()).await?)?
+                        }
+                        _ => unreachable!("read subcommands only"),
+                    };
+                    (value, Source::Cache)
+                }
+            };
+            print_sourced_output(&value, pretty, envelope, source)
+        }
+        HomeAction::State {
+            home,
+            room,
+            accessory,
+        } => {
+            let mut bridge = Bridge::connect().await?;
+            let rows = hl::state(
+                &mut bridge,
+                home.as_deref(),
+                room.as_deref(),
+                accessory.as_deref(),
+            )
+            .await?;
+            print_output(&serde_json::to_value(&rows)?, pretty, envelope)
+        }
+        HomeAction::Run { scene, home } => {
+            if dry_run {
+                return print_dry_run(
+                    "home.run",
+                    format!("Would run scene {scene:?} via Cider Bridge"),
+                    pretty,
+                    envelope,
+                );
+            }
+            let mut bridge = Bridge::connect().await?;
+            let result = hl::run_scene(&mut bridge, home.as_deref(), scene).await?;
+            print_output(&serde_json::to_value(&result)?, pretty, envelope)
+        }
+        HomeAction::Set {
+            accessory,
+            characteristic,
+            value,
+            service,
+            home,
+        } => {
+            let value = hl::parse_value(value);
+            if dry_run {
+                return print_dry_run(
+                    "home.set",
+                    format!(
+                        "Would set {characteristic:?} of {accessory:?} to {value} via Cider Bridge"
+                    ),
+                    pretty,
+                    envelope,
+                );
+            }
+            let mut bridge = Bridge::connect().await?;
+            let result = hl::set(
+                &mut bridge,
+                home.as_deref(),
+                accessory,
+                characteristic,
+                value,
+                service.as_deref(),
+            )
+            .await?;
+            print_output(&result, pretty, envelope)
+        }
+        HomeAction::Triggers { action } => {
+            let action = action
+                .as_ref()
+                .unwrap_or(&HomeTriggersAction::List { home: None });
+            match action {
+                HomeTriggersAction::List { home } => {
+                    let mut bridge = Bridge::connect().await?;
+                    let value = hl::triggers(&mut bridge, home.as_deref()).await?;
+                    print_output(&value, pretty, envelope)
+                }
+                HomeTriggersAction::CreateTimer {
+                    name,
+                    at,
+                    repeat,
+                    scene,
+                    home,
+                } => {
+                    hl::validate_fire_at(at)?;
+                    let recurrence = repeat.as_deref().map(hl::parse_repeat).transpose()?;
+                    if dry_run {
+                        return print_dry_run(
+                            "home.triggers.create-timer",
+                            format!(
+                                "Would create timer trigger {name:?} at {at} ({}) running {} via Cider Bridge",
+                                recurrence
+                                    .as_ref()
+                                    .map(|r| format!("repeat {r}"))
+                                    .unwrap_or_else(|| "once".to_string()),
+                                scene.join(", ")
+                            ),
+                            pretty,
+                            envelope,
+                        );
+                    }
+                    let mut bridge = Bridge::connect().await?;
+                    let row =
+                        hl::create_timer(&mut bridge, home.as_deref(), name, at, recurrence, scene)
+                            .await?;
+                    print_output(&row, pretty, envelope)
+                }
+                HomeTriggersAction::Enable { trigger, home }
+                | HomeTriggersAction::Disable { trigger, home } => {
+                    let enabled = matches!(action, HomeTriggersAction::Enable { .. });
+                    let verb = if enabled { "enable" } else { "disable" };
+                    if dry_run {
+                        return print_dry_run(
+                            &format!("home.triggers.{verb}"),
+                            format!("Would {verb} trigger {trigger:?} via Cider Bridge"),
+                            pretty,
+                            envelope,
+                        );
+                    }
+                    let mut bridge = Bridge::connect().await?;
+                    let row =
+                        hl::set_trigger_enabled(&mut bridge, home.as_deref(), trigger, enabled)
+                            .await?;
+                    print_output(&row, pretty, envelope)
+                }
+                HomeTriggersAction::Delete { trigger, home } => {
+                    if dry_run {
+                        return print_dry_run(
+                            "home.triggers.delete",
+                            format!("Would delete trigger {trigger:?} via Cider Bridge"),
+                            pretty,
+                            envelope,
+                        );
+                    }
+                    let mut bridge = Bridge::connect().await?;
+                    let result = hl::delete_trigger(&mut bridge, home.as_deref(), trigger).await?;
+                    print_output(&serde_json::to_value(&result)?, pretty, envelope)
+                }
+            }
+        }
+    }
+}
+
+async fn run_bridge(
+    action: Option<BridgeAction>,
+    pretty: bool,
+    envelope: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use sources::bridge;
+
+    match action.unwrap_or(BridgeAction::Status) {
+        BridgeAction::Status => {
+            let status = bridge::status().await;
+            print_output(&serde_json::to_value(&status)?, pretty, envelope)
+        }
+        BridgeAction::Build { team, install } => {
+            if dry_run {
+                let script = bridge::build_script_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "bridge/scripts/build.sh (not found)".to_string());
+                return print_dry_run(
+                    "bridge.build",
+                    format!(
+                        "Would run {script}{}{}",
+                        team.as_deref()
+                            .map(|t| format!(" with CIDER_TEAM_ID={t}"))
+                            .unwrap_or_default(),
+                        if install {
+                            " and install into ~/Applications"
+                        } else {
+                            ""
+                        }
+                    ),
+                    pretty,
+                    envelope,
+                );
+            }
+            let result = bridge::build(team.as_deref(), install).await?;
+            print_output(&serde_json::to_value(&result)?, pretty, envelope)
+        }
+        BridgeAction::Install { from } => {
+            if dry_run {
+                let source = from
+                    .clone()
+                    .or_else(bridge::built_app_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(no built app found)".to_string());
+                return print_dry_run(
+                    "bridge.install",
+                    format!("Would copy {source} into ~/Applications"),
+                    pretty,
+                    envelope,
+                );
+            }
+            let result = bridge::install(from.as_deref()).await?;
+            print_output(&serde_json::to_value(&result)?, pretty, envelope)
+        }
+        BridgeAction::Quit => {
+            let result = bridge::quit().await?;
+            print_output(&serde_json::to_value(&result)?, pretty, envelope)
+        }
     }
 }
 
@@ -1734,35 +2134,12 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty, cli.envelope),
-        Commands::Home { action } => match action {
-            None | Some(HomeAction::List) => {
-                run_source!(sources::home::list(), cli.pretty, cli.envelope)
-            }
-            Some(HomeAction::Homes) => {
-                run_source!(sources::home::homes(), cli.pretty, cli.envelope)
-            }
-            Some(HomeAction::Rooms { home }) => {
-                run_source!(
-                    sources::home::rooms(home.as_deref()),
-                    cli.pretty,
-                    cli.envelope
-                )
-            }
-            Some(HomeAction::Accessories { home, room }) => {
-                run_source!(
-                    sources::home::accessories(home.as_deref(), room.as_deref()),
-                    cli.pretty,
-                    cli.envelope
-                )
-            }
-            Some(HomeAction::Scenes { home }) => {
-                run_source!(
-                    sources::home::scenes(home.as_deref()),
-                    cli.pretty,
-                    cli.envelope
-                )
-            }
-        },
+        Commands::Home { live, action } => {
+            run_home(live, action, cli.pretty, cli.envelope, cli.no_op).await?
+        }
+        Commands::Bridge { action } => {
+            run_bridge(action, cli.pretty, cli.envelope, cli.no_op).await?
+        }
         Commands::Keychain { action } => match action {
             None | Some(KeychainAction::List { kind: None }) => {
                 run_source!(sources::keychain::list(None), cli.pretty, cli.envelope)
@@ -2758,7 +3135,10 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
-fn classify_error_code(err: &anyhow::Error) -> &'static str {
+fn classify_error_code(err: &anyhow::Error) -> String {
+    if let Some(bridge) = err.downcast_ref::<sources::bridge::BridgeError>() {
+        return bridge_error_code(bridge);
+    }
     let msg = err.to_string().to_lowercase();
     if msg.contains("not found") {
         "not_found"
@@ -2770,6 +3150,25 @@ fn classify_error_code(err: &anyhow::Error) -> &'static str {
         "timeout"
     } else {
         "operation_failed"
+    }
+    .to_string()
+}
+
+/// Bridge failures keep their own codes; the RFC's remote codes that have a
+/// cider equivalent are normalized to it, the rest are prefixed.
+fn bridge_error_code(error: &sources::bridge::BridgeError) -> String {
+    use sources::bridge::BridgeError;
+    match error {
+        BridgeError::NotInstalled => "bridge_not_installed".to_string(),
+        BridgeError::Unreachable(_) => "bridge_unreachable".to_string(),
+        BridgeError::Protocol(_) => "bridge_protocol_error".to_string(),
+        BridgeError::Remote { code, .. } => match code.as_str() {
+            "not_found" => "not_found".to_string(),
+            "invalid_args" => "invalid_input".to_string(),
+            "homekit_denied" => "permission_denied".to_string(),
+            "timeout" => "timeout".to_string(),
+            other => format!("bridge_{other}"),
+        },
     }
 }
 
@@ -2934,5 +3333,151 @@ mod tests {
         }));
         assert_eq!(wrapped["ok"], false);
         assert_eq!(wrapped["data"]["action"], "batch-delete");
+    }
+
+    #[test]
+    fn home_live_flag_is_accepted_before_or_after_the_subcommand() {
+        for argv in [
+            vec!["cider", "home", "--live", "homes"],
+            vec!["cider", "home", "homes", "--live"],
+        ] {
+            match Cli::try_parse_from(argv).unwrap().command {
+                Commands::Home { live, action } => {
+                    assert!(live);
+                    assert!(matches!(action, Some(HomeAction::Homes)));
+                }
+                _ => panic!("expected home"),
+            }
+        }
+        match Cli::try_parse_from(["cider", "home"]).unwrap().command {
+            Commands::Home { live, action } => {
+                assert!(!live);
+                assert!(action.is_none());
+            }
+            _ => panic!("expected home"),
+        }
+    }
+
+    #[test]
+    fn home_bridge_subcommands_parse() {
+        let cli = Cli::try_parse_from([
+            "cider",
+            "home",
+            "triggers",
+            "create-timer",
+            "--name",
+            "Porch on",
+            "--at",
+            "2026-09-01T19:30:00-07:00",
+            "--repeat",
+            "daily",
+            "--scene",
+            "Porch On",
+            "--scene",
+            "Hall On",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Home {
+                action:
+                    Some(HomeAction::Triggers {
+                        action: Some(HomeTriggersAction::CreateTimer { scene, repeat, .. }),
+                    }),
+                ..
+            } => {
+                assert_eq!(scene, vec!["Porch On", "Hall On"]);
+                assert_eq!(repeat.as_deref(), Some("daily"));
+            }
+            _ => panic!("expected triggers create-timer"),
+        }
+        // A timer needs at least one scene.
+        assert!(Cli::try_parse_from([
+            "cider",
+            "home",
+            "triggers",
+            "create-timer",
+            "--name",
+            "x",
+            "--at",
+            "2026-09-01T19:30:00Z"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "home",
+            "set",
+            "--accessory",
+            "Lamp",
+            "--characteristic",
+            "Power",
+            "--value",
+            "true"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["cider", "home", "run", "--scene", "Good Night"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "home", "state", "--room", "Office"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["cider", "bridge", "build", "--team", "ABC", "--install"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["cider", "bridge"]).is_ok());
+    }
+
+    #[test]
+    fn sourced_envelope_carries_the_backend() {
+        use sources::home_live::Source;
+        let value = serde_json::json!([{"id": "H1"}]);
+        let mut out = Vec::new();
+        let mut wrapped = envelope_value(&value);
+        wrapped["source"] = serde_json::json!(Source::Bridge.as_str());
+        serde_json::to_writer(&mut out, &wrapped).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["source"], "bridge");
+        assert_eq!(parsed["data"], value);
+        assert_eq!(Source::Cache.as_str(), "cache");
+    }
+
+    #[test]
+    fn home_schema_classifies_bridge_actions() {
+        let schema = build_schema(Some("home"));
+        let kinds: std::collections::HashMap<&str, &str> = schema["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| (a["name"].as_str().unwrap(), a["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(kinds["state"], "read");
+        assert_eq!(kinds["run"], "write");
+        assert_eq!(kinds["set"], "write");
+        assert!(schema["supports_dry_run"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn bridge_errors_get_their_own_codes() {
+        use sources::bridge::BridgeError;
+        let not_installed: anyhow::Error = BridgeError::NotInstalled.into();
+        assert_eq!(classify_error_code(&not_installed), "bridge_not_installed");
+        let denied: anyhow::Error = BridgeError::Remote {
+            code: "homekit_denied".into(),
+            message: "no".into(),
+        }
+        .into();
+        assert_eq!(classify_error_code(&denied), "permission_denied");
+        let unavailable: anyhow::Error = BridgeError::Remote {
+            code: "homekit_unavailable".into(),
+            message: "no".into(),
+        }
+        .into();
+        assert_eq!(
+            classify_error_code(&unavailable),
+            "bridge_homekit_unavailable"
+        );
+        // Context added on the way up must not hide the typed error.
+        let wrapped = anyhow::Error::from(BridgeError::Unreachable("x".into())).context("listing");
+        assert_eq!(classify_error_code(&wrapped), "bridge_unreachable");
+        assert_eq!(
+            classify_error_code(&anyhow::anyhow!("thing not found")),
+            "not_found"
+        );
     }
 }

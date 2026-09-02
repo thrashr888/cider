@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+use super::bridge;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
@@ -74,6 +76,8 @@ pub async fn inspect() -> DoctorReport {
         .await,
         check_mail_store(&home).await,
         check_home_cache(&home).await,
+        check_bridge_app(),
+        check_bridge_socket().await,
         check_path(
             "shortcuts_database",
             &home.join("Library/Shortcuts/Shortcuts.sqlite"),
@@ -194,6 +198,72 @@ async fn check_home_cache(home: &Path) -> DoctorCheck {
     }
 }
 
+/// The Cider Bridge app bundle (HomeKit live commands). It is built locally,
+/// never distributed, so absence is `not_configured` rather than `missing`.
+fn check_bridge_app() -> DoctorCheck {
+    let (status, detail) = match bridge::app_path() {
+        Some(path) => (CheckStatus::Ok, format!("{} is installed", path.display())),
+        None => (
+            CheckStatus::NotConfigured,
+            format!(
+                "{} is not installed (looked in ~/Applications, /Applications, ${}); HomeKit \
+                 live commands need it — build it with `cider bridge build --install`",
+                bridge::APP_NAME,
+                bridge::APP_ENV
+            ),
+        ),
+    };
+    DoctorCheck {
+        name: "bridge_app".to_string(),
+        status,
+        required: false,
+        detail,
+    }
+}
+
+/// Whether a bridge is answering right now. Only pings; the app is launched
+/// on demand by `cider home`, never by doctor, so idle is the normal state.
+async fn check_bridge_socket() -> DoctorCheck {
+    let socket = bridge::socket_path();
+    let (status, detail) = match bridge::ping().await {
+        Some(pong) => (
+            CheckStatus::Ok,
+            format!(
+                "{} answers ping (version {}, homekit_authorized {}, {} homes)",
+                socket.display(),
+                pong.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
+                pong.get("homekit_authorized")
+                    .and_then(|v| v.as_bool())
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                pong.get("homes")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+            ),
+        ),
+        None => (
+            CheckStatus::NotConfigured,
+            format!(
+                "{} is not answering; cider launches Cider Bridge on demand, so this is normal \
+                 while it is idle{}",
+                socket.display(),
+                if bridge::is_installed() {
+                    ""
+                } else {
+                    " (and the app is not installed)"
+                }
+            ),
+        ),
+    };
+    DoctorCheck {
+        name: "bridge_socket".to_string(),
+        status,
+        required: false,
+        detail,
+    }
+}
+
 fn check_executable(name: &str, path: &Path, required: bool) -> DoctorCheck {
     let (status, detail) = if path.is_file() {
         (CheckStatus::Ok, format!("{} is available", path.display()))
@@ -293,6 +363,22 @@ mod tests {
         assert_eq!(check.status, CheckStatus::NotConfigured);
         assert!(!check.required);
         assert!(check.detail.contains("open the Home app"));
+    }
+
+    #[tokio::test]
+    async fn bridge_checks_are_optional_and_never_launch_the_app() {
+        // `inspect` only pings the socket; with no bridge running this is a
+        // fast refusal, not a launch. Both checks must be present and optional.
+        let report = inspect().await;
+        for name in ["bridge_app", "bridge_socket"] {
+            let check = report
+                .checks
+                .iter()
+                .find(|check| check.name == name)
+                .unwrap_or_else(|| panic!("{name} check missing"));
+            assert!(!check.required, "{name} must not gate doctor's ok");
+            assert!(check.detail.contains("Cider Bridge"), "{}", check.detail);
+        }
     }
 
     #[tokio::test]

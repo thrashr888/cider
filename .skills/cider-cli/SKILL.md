@@ -155,6 +155,9 @@ cider music play --playlist Favorites
 cider screenshots list --limit 20
 cider screenshots capture --path ~/Desktop/capture.png
 cider shortcuts run --name "Daily Briefing"
+cider home state --room Office                 # live HomeKit values; needs Cider Bridge (`cider bridge status`)
+cider home run --scene "Good Night"
+cider home triggers create-timer --name "Porch on" --at 2026-09-01T19:30:00-07:00 --repeat daily --scene "Porch On"
 cider wifi status
 cider watch --source reminders --source calendar   # JSON line per change, runs until Ctrl-C
 cider system-info show

@@ -121,6 +121,10 @@ cider spotlight --query "quarterly report"
 
 Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos
 
+### Home
+
+`cider home` reads the Home app's on-disk cache, which is as fresh as the last time the app ran and has no characteristic values. With the **Cider Bridge** — a small Catalyst helper app you build once on your own Mac with `cider bridge build --install` (HomeKit only loads in a signed app, so it cannot be distributed) — the same commands go live, and `home` gains what only HomeKit can do: `home state [--room] [--accessory]` (live values, one row per characteristic), `home run --scene`, `home set --accessory --characteristic --value`, and `home triggers` with `create-timer --name --at --repeat --scene`, `enable`, `disable`, `delete` — timer automations that fire on the home hub with the Mac asleep. Reads use the bridge when it is already answering and the cache otherwise (`--envelope` reports `"source": "bridge"|"cache"`); `--live` requires the bridge, launching it on demand. `cider bridge status|build|install|quit` manages the app, and `cider doctor` reports `bridge_app` and `bridge_socket`. Protocol and design: [docs/RFC-swift-bridge.md](docs/RFC-swift-bridge.md).
+
 ### Change Stream
 
 `cider watch [--source reminders|calendar|notes|home|shortcuts]... [--debounce-ms 2000]` watches the on-disk stores behind Reminders, Calendar, Notes, Home, and Shortcuts (FSEvents, no daemon) and prints one compact JSON line per coalesced change — `{"source":"reminders","at":"…","paths":[…]}` — until Ctrl-C. An event says *that* a store changed; re-read it with the matching command to learn what.
