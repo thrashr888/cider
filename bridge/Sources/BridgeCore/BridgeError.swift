@@ -158,7 +158,10 @@ public enum DateCoding {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         f.timeZone = timeZone
-        return f.string(from: date)
+        let text = f.string(from: date)
+        // One wire shape everywhere: a numeric offset even at UTC, where the
+        // formatter would otherwise write "Z" (both are RFC 3339).
+        return text.hasSuffix("Z") ? String(text.dropLast()) + "+00:00" : text
     }
 
     /// Accepts RFC 3339 with or without fractional seconds, and a bare local
