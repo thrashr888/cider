@@ -391,8 +391,20 @@ pub fn parse_spec(json: &str) -> anyhow::Result<ShortcutSpec> {
 }
 
 /// `./<name>.shortcut`, with path separators in the name flattened.
+/// Shortcuts names an imported shortcut after the file, not after
+/// `WFWorkflowName`, so the default file name is the shortcut name itself.
 pub fn default_output(name: &str) -> String {
     format!("./{}.shortcut", name.replace(['/', ':'], "-"))
+}
+
+/// True when importing `output` would give the shortcut a different name
+/// than the spec asked for.
+pub fn output_renames(name: &str, output: &str) -> bool {
+    let stem = std::path::Path::new(output)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    stem != name.replace(['/', ':'], "-")
 }
 
 /// A step with every name turned into the identifier the file needs.
@@ -595,6 +607,12 @@ fn build_workflow(name: &str, steps: &[ResolvedStep]) -> Value {
 /// anyone via `shortcuts sign`. Scene steps are resolved against the Home
 /// app cache, so those need `cider home` to work first.
 pub async fn gen(spec: &ShortcutSpec, output: &str, sign_it: bool) -> anyhow::Result<ActionResult> {
+    if output_renames(&spec.name, output) {
+        eprintln!(
+            "cider shortcuts gen: Shortcuts will name the imported shortcut after the file, not '{}'",
+            spec.name
+        );
+    }
     let needs_homes = spec.steps.iter().any(|s| matches!(s, Step::Scene { .. }));
     let homes = if needs_homes {
         home::list().await?
@@ -645,7 +663,7 @@ pub async fn install(input: &str) -> anyhow::Result<ActionResult> {
     run_command_with_timeout("open", &[input], Duration::from_secs(15)).await?;
     Ok(ActionResult::success_with_message(
         "install",
-        &format!("Opened '{input}' in Shortcuts; confirm the \"Add Shortcut\" prompt there to finish installing"),
+        &format!("Opened '{input}' in Shortcuts; it is added under the file's name (confirm the prompt if one appears)"),
     ))
 }
 
@@ -792,6 +810,22 @@ mod tests {
                 }]
             }]
         }))
+    }
+
+    #[test]
+    fn output_renames_detects_a_mismatched_file_stem() {
+        assert!(!output_renames(
+            "Cider Good Night",
+            "./Cider Good Night.shortcut"
+        ));
+        assert!(!output_renames(
+            "River: Night",
+            "/tmp/River- Night.shortcut"
+        ));
+        assert!(output_renames(
+            "Cider Good Night",
+            "/tmp/cider-good-night.shortcut"
+        ));
     }
 
     #[test]

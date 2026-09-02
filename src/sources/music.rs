@@ -70,9 +70,8 @@ if (count === 0) { ""; } else {
 "#;
 
     let output = run_jxa_with_timeout(script, std::time::Duration::from_secs(120)).await?;
-    if output.is_empty() {
-        anyhow::bail!("Music library is empty or Music.app is not configured");
-    }
+    // Music answered and has no local tracks (a streaming-only library):
+    // that is an honest empty list, not a failure.
     Ok(parse_output(&output))
 }
 

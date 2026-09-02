@@ -86,8 +86,6 @@ enum Commands {
         #[command(subcommand)]
         action: Option<HomeAction>,
     },
-    /// Fetch journal entries
-    Journal,
     /// Manage Keychain passwords
     Keychain {
         #[command(subcommand)]
@@ -98,8 +96,6 @@ enum Commands {
         #[command(subcommand)]
         action: Option<MailAction>,
     },
-    /// Fetch bookmarked places from Maps
-    Maps,
     /// Interact with Messages (iMessage/SMS)
     Messages {
         #[command(subcommand)]
@@ -110,8 +106,6 @@ enum Commands {
         #[command(subcommand)]
         action: Option<MusicAction>,
     },
-    /// Fetch saved articles from Apple News
-    News,
     /// List saved passwords (metadata only, no secrets)
     Passwords {
         #[command(subcommand)]
@@ -153,8 +147,6 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ShortcutsAction>,
     },
-    /// Fetch sticky notes from Stickies
-    Stickies,
     /// Search files with Spotlight
     Spotlight {
         /// Search query
@@ -199,8 +191,6 @@ enum Commands {
         #[arg(long = "debounce-ms", value_name = "MS", default_value_t = 2000)]
         debounce_ms: u64,
     },
-    /// Fetch weather data
-    Weather,
     /// Wi-Fi status and known networks
     #[command(name = "wifi")]
     Wifi {
@@ -1773,7 +1763,6 @@ async fn run() -> anyhow::Result<()> {
                 )
             }
         },
-        Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty, cli.envelope),
         Commands::Keychain { action } => match action {
             None | Some(KeychainAction::List { kind: None }) => {
                 run_source!(sources::keychain::list(None), cli.pretty, cli.envelope)
@@ -1980,7 +1969,6 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         },
-        Commands::Maps => run_source!(sources::maps::fetch(), cli.pretty, cli.envelope),
         Commands::Messages { action } => match action {
             None => {
                 run_source!(sources::messages::list(30, None), cli.pretty, cli.envelope)
@@ -2075,7 +2063,6 @@ async fn run() -> anyhow::Result<()> {
                 run_source!(sources::music::playlists(), cli.pretty, cli.envelope)
             }
         },
-        Commands::News => run_source!(sources::news::fetch(), cli.pretty, cli.envelope),
         Commands::Passwords { action } => match action {
             None => {
                 run_source!(sources::passwords::list(None), cli.pretty, cli.envelope)
@@ -2602,7 +2589,6 @@ async fn run() -> anyhow::Result<()> {
                 cli.envelope
             )
         }
-        Commands::Stickies => run_source!(sources::stickies::fetch(), cli.pretty, cli.envelope),
         Commands::Stocks { action } => match action {
             None | Some(StocksAction::List) => {
                 run_source!(sources::stocks::fetch(), cli.pretty, cli.envelope)
@@ -2712,7 +2698,6 @@ async fn run() -> anyhow::Result<()> {
             })
             .await?;
         }
-        Commands::Weather => run_source!(sources::weather::fetch(), cli.pretty, cli.envelope),
         Commands::Wifi { action } => match action {
             None | Some(WifiAction::Status) => {
                 run_source!(sources::wifi::status(), cli.pretty, cli.envelope)
@@ -2848,10 +2833,9 @@ mod tests {
             .count();
         assert_eq!(schema["schema_version"], 1);
         assert_eq!(schema["commands"].as_array().unwrap().len(), expected);
-        assert!(
-            expected >= 40,
-            "new commands must not disappear from schema"
-        );
+        // Floor is well below the real count so removing a dead source is
+        // never blocked here, while a broken schema walk still fails loudly.
+        assert!(expected >= 30, "commands must not disappear from schema");
     }
 
     #[test]

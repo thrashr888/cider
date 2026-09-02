@@ -119,7 +119,7 @@ cider spotlight --query "quarterly report"
 
 ### Read-Only
 
-Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), Maps, News, Photo Booth, Photos, Spotlight, Stickies, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather
+Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos
 
 ### Change Stream
 
