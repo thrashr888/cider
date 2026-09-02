@@ -1,0 +1,46 @@
+# XcodeGen spec for the Cider Bridge Mac Catalyst app (docs/RFC-swift-bridge.md).
+# `xcodegen generate` writes CiderBridge.xcodeproj (git-ignored); scripts/build.sh
+# wraps it with the team id. HomeKit only exists on iOS-type App IDs, so the
+# bundle id is fixed and the `maccatalyst.` derivation is off.
+name: CiderBridge
+options:
+  bundleIdPrefix: dev.thrasher
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  BridgeCore:
+    path: .
+targets:
+  CiderBridge:
+    type: application
+    platform: iOS
+    supportedDestinations: [iOS, macCatalyst]
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources/CiderBridgeApp
+    dependencies:
+      - package: BridgeCore
+        product: BridgeCore
+    settings:
+      base:
+        # Referenced as a setting, not XcodeGen's `entitlements:` key, which
+        # would regenerate the committed file.
+        CODE_SIGN_ENTITLEMENTS: Resources/CiderBridge.entitlements
+        PRODUCT_NAME: Cider Bridge
+        PRODUCT_BUNDLE_IDENTIFIER: dev.thrasher.cider.bridge
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: $(CIDER_TEAM_ID)
+        CIDER_TEAM_ID: ""
+        SUPPORTS_MACCATALYST: YES
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        TARGETED_DEVICE_FAMILY: "2,6"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_PREVIEWS: NO
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1

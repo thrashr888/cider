@@ -21,8 +21,9 @@ public final class LineSocketServer: @unchecked Sendable {
 
     /// The RFC path: `$HOME/Library/Application Support/cider/bridge.sock`.
     public static var defaultPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/cider/bridge.sock").path
+        // NSHomeDirectory() rather than homeDirectoryForCurrentUser: the latter
+        // is unavailable on Mac Catalyst, and the app is not sandboxed.
+        (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/cider/bridge.sock")
     }
 
     public let path: String
