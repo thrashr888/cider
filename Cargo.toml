@@ -1,6 +1,6 @@
 [package]
 name = "cider-cli"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Manage macOS Apple apps from the command line — Reminders, Calendar, Contacts, Notes, Mail, Music, Keychain, Safari, and 30+ more"
 license = "MIT"
@@ -32,6 +32,7 @@ cli = ["dep:clap"]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"], optional = true }
+log = "0.4"
 notify = "6"
 plist = "1"
 serde = { version = "1", features = ["derive"] }
