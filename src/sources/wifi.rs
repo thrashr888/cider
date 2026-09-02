@@ -16,11 +16,35 @@ pub struct WifiStatus {
     pub security: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
+    /// IPv4 address on the Wi-Fi interface. Unlike the SSID, which macOS
+    /// redacts without Location permission, this is always readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    /// Default router for the interface; a stable fingerprint of which
+    /// network (and so which house) the Mac is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct KnownNetwork {
     pub ssid: String,
+}
+
+async fn ipconfig(args: &[&str]) -> Option<String> {
+    run_command_with_timeout("ipconfig", args, std::time::Duration::from_secs(5))
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// IPv4 address and default router for an interface. Both come from the
+/// DHCP lease, so neither needs the Location permission that gates the SSID.
+async fn addresses(iface: &str) -> (Option<String>, Option<String>) {
+    let ip = ipconfig(&["getifaddr", iface]).await;
+    let router = ipconfig(&["getoption", iface, "router"]).await;
+    (ip, router)
 }
 
 /// Show current Wi-Fi connection status.
@@ -43,6 +67,8 @@ pub async fn status() -> anyhow::Result<Vec<WifiStatus>> {
             None
         })
         .unwrap_or_else(|| "en0".to_string());
+
+    let (ip_address, router) = addresses(&iface).await;
 
     // Use system_profiler for Wi-Fi info (works on all macOS versions)
     let output =
@@ -83,6 +109,8 @@ pub async fn status() -> anyhow::Result<Vec<WifiStatus>> {
                                 channel,
                                 security,
                                 interface: Some(iface.clone()),
+                                ip_address,
+                                router,
                             }]);
                         }
                     }
@@ -91,10 +119,9 @@ pub async fn status() -> anyhow::Result<Vec<WifiStatus>> {
         }
     }
 
-    // Fallback: try ipconfig for basic connectivity
-    let connected = run_command_with_timeout("ipconfig", &["getifaddr", &iface], timeout)
-        .await
-        .is_ok();
+    // Fallback: an address on the interface means we are connected even
+    // when system_profiler will not name the network.
+    let connected = ip_address.is_some();
 
     Ok(vec![WifiStatus {
         connected,
@@ -104,6 +131,8 @@ pub async fn status() -> anyhow::Result<Vec<WifiStatus>> {
         channel: None,
         security: None,
         interface: Some(iface),
+        ip_address,
+        router,
     }])
 }
 
