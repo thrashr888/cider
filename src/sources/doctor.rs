@@ -110,6 +110,7 @@ pub async fn inspect() -> DoctorReport {
         required: false,
         detail: "Not probed because an AppleEvent can open a macOS permission dialog; write commands report permission failures directly".to_string(),
     });
+    checks.push(permissions_check_from(&super::permissions::report().await));
 
     let ok = checks.iter().all(|check| {
         !check.required
@@ -124,6 +125,58 @@ pub async fn inspect() -> DoctorReport {
         platform: std::env::consts::OS.to_string(),
         prompt_free: true,
         checks,
+    }
+}
+
+/// The `permissions` summary check: one line over `cider permissions`.
+/// `permission_denied` names what is denied (and what was never asked),
+/// `not_configured` names what was never asked, `ok` otherwise; every
+/// verdict points at `cider permissions` for the panes and the fixes. Pure.
+pub fn permissions_check_from(report: &super::permissions::PermissionsReport) -> DoctorCheck {
+    use super::permissions::PermissionStatus;
+    let named = |wanted: PermissionStatus| -> Vec<String> {
+        report
+            .requirements
+            .iter()
+            .filter(|r| r.status == wanted)
+            .map(|r| r.permission.label())
+            .collect()
+    };
+    let mut denied = named(PermissionStatus::Denied);
+    denied.extend(named(PermissionStatus::AddOnly));
+    let not_determined = named(PermissionStatus::NotDetermined);
+    let subject = report
+        .responsible_process
+        .as_deref()
+        .unwrap_or("the app that launched cider");
+    let (status, detail) = if !denied.is_empty() {
+        let mut detail = format!("denied to {subject}: {}", denied.join(", "));
+        if !not_determined.is_empty() {
+            detail.push_str(&format!("; not yet asked: {}", not_determined.join(", ")));
+        }
+        (CheckStatus::PermissionDenied, detail)
+    } else if !not_determined.is_empty() {
+        (
+            CheckStatus::NotConfigured,
+            format!("not yet asked for {subject}: {}", not_determined.join(", ")),
+        )
+    } else {
+        (
+            CheckStatus::Ok,
+            format!(
+                "nothing denied to {subject} ({} ok, {} not probed)",
+                report.summary.ok, report.summary.not_probed
+            ),
+        )
+    };
+    DoctorCheck {
+        name: "permissions".to_string(),
+        status,
+        required: false,
+        detail: format!(
+            "{detail}; `cider permissions` lists every permission with the System Settings \
+             pane and who to grant it to"
+        ),
     }
 }
 

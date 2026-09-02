@@ -52,8 +52,30 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
 fn render_table<W: Write>(w: &mut W, items: &[serde_json::Value]) -> anyhow::Result<()> {
     // Collect column names from first item, limited to MAX_COLS
     let first = items[0].as_object().unwrap();
-    let columns: Vec<&String> = first.keys().take(MAX_COLS).collect();
+    let columns: Vec<&str> = first.keys().map(String::as_str).take(MAX_COLS).collect();
+    render_table_columns(w, items, &columns)
+}
 
+/// A table of `items` (objects) with exactly these columns, in this order.
+/// `render` derives columns from the first item, which serde_json keeps
+/// sorted; a caller with a meaningful order names it here.
+pub fn render_table_with_columns<W: Write>(
+    mut w: W,
+    items: &[serde_json::Value],
+    columns: &[&str],
+) -> anyhow::Result<()> {
+    if items.is_empty() {
+        writeln!(w, "{DIM}(no results){RESET}")?;
+        return Ok(());
+    }
+    render_table_columns(&mut w, items, columns)
+}
+
+fn render_table_columns<W: Write>(
+    w: &mut W,
+    items: &[serde_json::Value],
+    columns: &[&str],
+) -> anyhow::Result<()> {
     // Calculate column widths
     let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
     for item in items {
@@ -295,6 +317,30 @@ mod tests {
         assert!(output.contains("NAME"));
         assert!(output.contains("Alice"));
         assert!(output.contains("2 items"));
+    }
+
+    #[test]
+    fn test_render_table_with_columns_keeps_the_given_order() {
+        let value = serde_json::json!([
+            {"detail": "d1", "permission": "calendars", "status": "ok"},
+            {"detail": "d2", "permission": "contacts", "status": "denied"},
+        ]);
+        let mut buf = Vec::new();
+        render_table_with_columns(
+            &mut buf,
+            value.as_array().unwrap(),
+            &["permission", "status"],
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let header = output.lines().next().unwrap();
+        assert!(header.find("PERMISSION").unwrap() < header.find("STATUS").unwrap());
+        assert!(!output.contains("DETAIL"));
+        assert!(output.contains("denied"));
+
+        let mut buf = Vec::new();
+        render_table_with_columns(&mut buf, &[], &["permission"]).unwrap();
+        assert!(String::from_utf8(buf).unwrap().contains("no results"));
     }
 
     #[test]

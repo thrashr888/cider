@@ -127,6 +127,23 @@ enum Commands {
         #[command(subcommand)]
         action: Option<PasswordsAction>,
     },
+    /// Every macOS permission cider can need, its state, and how to grant it
+    #[command(
+        long_about = "Every macOS permission cider can need — Full Disk Access, Calendars, \
+                      Reminders, Contacts, Automation per target app, HomeKit, Location — with \
+                      its state for the app that launched cider, the System Settings pane, and \
+                      the Info.plist keys a host app must declare. Prompt-free: it opens files \
+                      for reading, asks an installed cider-bridge for its status, and pings a \
+                      bridge that is already running; it never sends an AppleEvent or launches \
+                      anything. macOS attributes the grants to the app that launched cider \
+                      (Terminal, iTerm, an agent runner, a host app), so that is where to grant \
+                      them."
+    )]
+    Permissions {
+        /// Only what one source needs (calendar, messages, shortcuts, …)
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Interact with Apple Notes
     Notes {
         #[command(subcommand)]
@@ -2315,6 +2332,32 @@ async fn run() -> anyhow::Result<()> {
             let report = sources::doctor::inspect().await;
             print_output(&serde_json::to_value(&report)?, cli.pretty, cli.envelope)?;
         }
+        Commands::Permissions { source } => {
+            let report = sources::permissions::report().await;
+            let report = match source.as_deref() {
+                Some(source) => report.for_source(source),
+                None => report,
+            };
+            if cli.pretty {
+                // A table of the requirements, headed by who the grants
+                // belong to; the JSON shape keeps the full detail.
+                let mut out = io::stdout().lock();
+                writeln!(
+                    out,
+                    "responsible process: {} (grants belong to it)",
+                    report.responsible_process.as_deref().unwrap_or("unknown")
+                )?;
+                let rows = serde_json::to_value(report.rows())?;
+                pretty::render_table_with_columns(
+                    &mut out,
+                    rows.as_array().map(Vec::as_slice).unwrap_or_default(),
+                    &["permission", "status", "granted_to", "needed_by", "detail"],
+                )?;
+                out.flush()?;
+            } else {
+                print_output(&serde_json::to_value(&report)?, false, cli.envelope)?;
+            }
+        }
         Commands::FaceTime { action } => match action {
             None => {
                 run_source!(sources::facetime::list(50), cli.pretty, cli.envelope)
@@ -3585,6 +3628,27 @@ mod tests {
                 "{bad}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn permissions_parses_bare_and_with_source_and_is_a_read_command() {
+        assert!(Cli::try_parse_from(["cider", "permissions"]).is_ok());
+        let parsed = Cli::try_parse_from(["cider", "permissions", "--source", "calendar"])
+            .expect("--source parses");
+        assert!(matches!(
+            parsed.command,
+            Commands::Permissions { source: Some(ref s) } if s == "calendar"
+        ));
+        assert!(Cli::try_parse_from(["cider", "permissions", "list"]).is_err());
+        let schema = build_schema(Some("permissions"));
+        assert_eq!(schema["name"], "permissions");
+        assert_eq!(schema["supports_dry_run"], false);
+        assert!(schema["actions"].as_array().unwrap().is_empty());
+        assert!(schema["arguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["long"] == "--source"));
     }
 
     #[test]

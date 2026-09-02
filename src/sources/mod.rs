@@ -23,6 +23,7 @@ pub mod messages;
 pub mod music;
 pub mod notes;
 pub mod passwords;
+pub mod permissions;
 pub mod photo_booth;
 pub mod photos;
 pub mod reading_list;

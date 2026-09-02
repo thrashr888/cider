@@ -245,12 +245,16 @@ cider schema
 cider schema --source calendar
 ```
 
-`cider auth-status` reports prompt-free read access and write Automation state
-for Calendar, Contacts, Reminders, and Mail. `cider doctor` checks required
-macOS tools and the Calendar, Contacts, Reminders, and newest Mail data stores.
-It deliberately does not send an AppleEvent: even a permission probe can open
-a macOS dialog, so Automation authorization is reported as `not_probed` and
-real writes surface any denial.
+`cider permissions` lists every macOS permission cider can need with its
+state for the app that launched it, the System Settings pane, and the
+Info.plist keys a host app must declare (see [Permissions](#permissions)).
+`cider doctor` checks required macOS tools, the Calendar, Contacts,
+Reminders, and newest Mail data stores, the bridge, and summarizes the
+permissions in one `permissions` check. `cider auth-status` is the older
+per-store view of the same read/write state. None of them sends an
+AppleEvent: even a permission probe can open a macOS dialog, so Automation
+authorization is reported as `not_probed` and real writes surface any
+denial.
 
 ## How It Works
 
@@ -290,12 +294,17 @@ uses.
 
 The library shells out to macOS's own tools (`osascript`, `sqlite3`), so it
 needs nothing on PATH — but it inherits your process's TCC permissions, and
-sees the same Full Disk Access denials the CLI reports.
+sees the same Full Disk Access denials the CLI reports. Your app is the
+responsible process, so it must carry the usage strings listed under
+[Permissions](#embedding-cider-in-an-app-alchemy-tauri-any-host);
+`cider::permissions::report().await` and `cider::doctor::inspect().await`
+return what `cider permissions` and `cider doctor` print.
 
 ## Requirements
 
 - macOS
-- Some commands need **Full Disk Access** (Messages, Photos, Safari History)
+- The permissions in [Permissions](#permissions), granted to the app that
+  launches cider; `cider permissions` shows which are missing
 - `screen-sharing enable/disable` requires `sudo`
 - `mail send` and `messages send` will actually send — not a drill
 
@@ -358,6 +367,73 @@ cargo build --release
 # Binary at target/release/cider
 ```
 
+## Permissions
+
+macOS attributes a command-line tool's privacy access to its **responsible
+process**: the app that launched it — Terminal, iTerm, an agent runner, or
+the app that links the crate — so every grant below belongs to that app, not
+to `cider`. A prompt appears only if that app's Info.plist declares the
+matching usage string, and an app that never asked never appears in System
+Settings › Privacy & Security, so nobody can pre-grant it.
+
+Run `cider permissions` first (every permission, its state for your launcher,
+the exact pane, and who to grant it to; `--source calendar` narrows it to one
+command, `--pretty` tabulates), then `cider doctor` (tools, stores, the
+bridge, and a one-line `permissions` summary). Both are prompt-free: they
+open files for reading, ask an installed `cider-bridge` for its status, and
+ping a bridge that is already running — never an AppleEvent, never a launch.
+
+| Permission | Needed by | Granted to | How |
+|------------|-----------|------------|-----|
+| **Full Disk Access** | `messages`, `mail`, `safari`, `reading-list`, `photos`, `books`, `voice-memos`, `facetime`, `icloud account`, `stocks`, `shortcuts`, `home` (cache), `watch`, and the SQLite reads behind `calendar`, `reminders`, `contacts` | launching app | Privacy & Security › Full Disk Access: add the app by hand, then relaunch it. No prompt, no Info.plist key; `sudo` does not bypass it |
+| **Calendars** | `calendar` through `cider-bridge` (EventKit) | launching app | Privacy & Security › Calendars → **Full Access**, not Add Only (Add Only hides every event). Current macOS shows no Calendar prompt to a command-line requester: the first call registers the app in the pane, and you set it by hand |
+| **Reminders** | `reminders` through `cider-bridge` | launching app | The first call prompts; grant Full Access. Afterwards: Privacy & Security › Reminders |
+| **Contacts** | `contacts` through `cider-bridge` | launching app | Privacy & Security › Contacts. Like Calendar, no prompt for a command-line requester: set it by hand after the first call |
+| **Automation** (one pair per target app) | `notes`, `music`, `mail send/read/unread/trash/get`, `messages send`, `safari tabs`, `shortcuts run/view`, and the AppleScript/JXA fallbacks for `calendar`, `reminders`, `contacts` when the bridge is absent | launching app → target app | The first AppleEvent prompts, per pair; afterwards Privacy & Security › Automation. Always `not_probed`: the probe would itself be an AppleEvent |
+| **HomeKit** | `home state/run/set/triggers`, `home --live` | Cider Bridge.app | The bridge app prompts on its first HomeKit call; Privacy & Security › HomeKit → Cider Bridge. Personal build only |
+| **Location** | nothing yet (reserved for a `location` command) | launching app | Privacy & Security › Location Services |
+
+WeatherKit (`weather`) needs no user permission.
+
+Full Disk Access is the one to grant first. It covers every store cider
+reads straight from disk: `~/Library/Messages/chat.db`,
+`~/Library/Mail/V*/MailData/Envelope Index`, `~/Library/Safari/History.db`
+and `Bookmarks.plist`, the Photos library database, Books, Voice Memos, the
+call history, `~/Library/Accounts/Accounts4.sqlite`, the Stocks and Home
+containers, `~/Library/Shortcuts`, and the Calendar, Reminders, and Contacts
+databases. `cider permissions` checks it by opening the Messages and Safari
+stores for reading, which never prompts — and it has to open them: a
+protected file's metadata reads fine even when opening it fails with EPERM.
+
+### Embedding cider in an app (Alchemy, Tauri, any host)
+
+When another app links the crate or runs the binary, *that app* is the
+responsible process. It must ship the usage strings, or macOS refuses to
+prompt and the access is silently denied forever — and, having never asked,
+the app never appears in System Settings for the user to fix. Copy these
+into the host's Info.plist (`cider::HOST_INFO_PLIST_KEYS` in the library):
+
+```xml
+<key>NSCalendarsFullAccessUsageDescription</key>
+<string>Reads and updates your calendar events.</string>
+<key>NSRemindersFullAccessUsageDescription</key>
+<string>Reads and updates your reminders.</string>
+<key>NSContactsUsageDescription</key>
+<string>Looks up and updates your contacts.</string>
+<key>NSAppleEventsUsageDescription</key>
+<string>Controls Notes, Mail, Music, Messages, Safari, and Shortcuts on your behalf.</string>
+<!-- optional today: reserved for a future `location` command -->
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Uses your location.</string>
+```
+
+Full Disk Access and HomeKit need no key: the user adds the host app under
+Full Disk Access by hand, and HomeKit belongs to Cider Bridge.app, which
+declares its own. From Rust, `cider::permissions::report().await` returns
+the same report the CLI prints — show `how_to_grant` for anything `denied`,
+`add_only`, or `not_determined` — and `cider::doctor::inspect().await` is
+`cider doctor`.
+
 ## Bridge
 
 Everything above works with the Rust binary alone. Some Apple data only
@@ -407,19 +483,13 @@ The development profile expires a year after it is made and the app then
 silently stops launching; `cider doctor` reports `bridge_profile` as
 `expiring` inside the last thirty days. Rebuild to renew.
 
-### Permissions
+### Permissions and configuration
 
-macOS asks once per store, and the grant belongs to the app that *launched*
-`cider` (Terminal, iTerm, your agent runner), because that is who TCC
-attributes the request to. `cider bridge status` shows each store's state
-under `cli_authorization` with the fix.
-
-| Store | What happens | Fix when it is not |
-|-------|--------------|--------------------|
-| Reminders | The first write through `cider-bridge` prompts; grant Full Access | System Settings › Privacy & Security › Reminders |
-| Calendar | Needs **Full Access** for the launching app; with less, EventKit hides every event | System Settings › Privacy & Security › Calendars |
-| Contacts | The first `contacts` read through the CLI prompts | System Settings › Privacy & Security › Contacts |
-| HomeKit | The app prompts on its first HomeKit call (personal build only) | System Settings › Privacy & Security › HomeKit |
+The bridge's grants follow the rules in [Permissions](#permissions):
+Calendars, Reminders, and Contacts belong to the app that launched `cider`
+(`cider permissions`, or `cider bridge status` → `cli_authorization`, shows
+each store's state with the fix), and HomeKit belongs to Cider Bridge.app
+itself.
 
 `cider bridge status|build|install|quit` manages the app;
 `CIDER_BRIDGE_APP=/path/to/Cider Bridge.app` and

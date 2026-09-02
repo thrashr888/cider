@@ -174,7 +174,10 @@ cider weather --lat 37.75 --lon -122.49         # output includes the required `
 cider watch --source reminders --source calendar   # JSON line per change, runs until Ctrl-C
 cider watch --source contacts --via fsevents       # force FSEvents instead of cider-bridge store_changed events
 cider system-info show
-cider doctor
+cider permissions                               # every macOS permission cider can need, its state, the pane, who to grant it to
+cider permissions --source calendar             # only what one command needs
+cider permissions --pretty                      # table, headed by the app the grants belong to
+cider doctor                                    # tools, stores, bridge, and a one-line `permissions` check
 cider auth-status
 ```
 
@@ -211,8 +214,10 @@ Facts to plan around:
   homes by name with `--home`; either id is accepted and mapped when possible.
 - TCC grants belong to the app that launched `cider` (Terminal, the agent
   runner), not to `cider`. Calendar needs **Full Access** or EventKit hides
-  every event; Reminders and Contacts prompt on first use. `cider bridge
-  status` → `cli_authorization.fixes` lists what to grant where.
+  every event; Reminders prompts on first use, Calendar and Contacts do not
+  prompt a command-line requester and are set by hand. `cider permissions`
+  (or `cider bridge status` → `cli_authorization.fixes`) lists what to
+  grant where.
 
 ## Safety And Permissions
 
@@ -220,17 +225,19 @@ Facts to plan around:
 
 2. Prefer `--dry-run` before real mutations whenever `cider schema --source <name>` reports `supports_dry_run: true`.
 
-3. Some commands need macOS permissions or prompts:
-   - Messages, Photos, and Safari history may require Full Disk Access
+3. Some commands need macOS permissions or prompts. Run `cider permissions` before diagnosing a permission failure: it lists every permission, its state, the System Settings pane, and who to grant it to. The rule: macOS attributes cider's access to the app that *launched* it (Terminal, iTerm, the agent runner, a host app), so grants go to that app, never to `cider`, and a host app must declare the Info.plist usage strings (`host_app_requirements` in the report) or it is silently denied.
+   - Full Disk Access gates every store read from disk: Messages, Mail, Safari, Photos, Books, Voice Memos, FaceTime, iCloud account, Stocks, Shortcuts, the Home cache, and the SQLite reads behind Calendar, Reminders, Contacts. Added by hand under Privacy & Security › Full Disk Access; there is no prompt.
+   - Calendar needs **Full Access**, not Add Only (Add Only hides every event); current macOS shows no Calendar or Contacts prompt to a command-line requester, so those are set by hand after the first call registers the app. Reminders prompts on first use.
+   - Automation (Notes, Music, Mail, Messages, Safari tabs, Shortcuts, and the JXA fallbacks) is granted per (launching app → target app) pair on the first AppleEvent and is always `not_probed`.
+   - HomeKit belongs to Cider Bridge.app itself (personal build only); WeatherKit needs nothing.
    - Keychain password reads can trigger macOS security dialogs
    - `screen-sharing enable` and `screen-sharing disable` require `sudo`
-   - The first Reminders, Calendar, or Contacts call through `cider-bridge` prompts the *launching* app for access (Calendar needs Full Access); the first HomeKit call prompts for the bridge app. `cider bridge status` and `cider doctor` show the state without prompting.
 
 4. `mail send` and `messages send` are real side effects, not previews.
 
 5. Prefer `id` values advertised by `cider schema`. Calendar, Contacts, Mail, Messages, Notes, and Reminders expose stable targets. Calendar's legacy title/date delete must be treated as a compatibility fallback; it refuses ambiguous matches.
 
-6. `cider doctor` and `cider auth-status` are prompt-free. An Automation status of `not_probed` is intentional, because probing can itself open a macOS permission dialog.
+6. `cider permissions`, `cider doctor`, and `cider auth-status` are prompt-free. An Automation status of `not_probed` is intentional, because probing can itself open a macOS permission dialog.
 
 ## Best Practices
 
