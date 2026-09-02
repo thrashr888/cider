@@ -347,7 +347,6 @@ pub async fn stream_watch_at(
     Err(BridgeError::Unreachable(format!(
         "{CLI_NAME} watch ended early ({status}); it should stream until cider stops it"
     )))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +774,11 @@ esac
         stream_watch_at(&stub, &["reminders", "calendar"], |data| seen.push(data))
             .await
             .unwrap_err();
-        assert_eq!(seen.len(), 2, "both lines are delivered before the early end");
+        assert_eq!(
+            seen.len(),
+            2,
+            "both lines are delivered before the early end"
+        );
         assert_eq!(seen[0]["source"], "reminders");
         assert_eq!(seen[0]["kind"], "store_changed");
         assert_eq!(seen[1]["source"], "calendar");
