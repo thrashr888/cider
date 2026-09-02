@@ -307,16 +307,20 @@ pub async fn stream_watch_at(
 ) -> Result<(), BridgeError> {
     let args = serde_json::json!({ "sources": sources });
     let mut command = Command::new(cli);
+    // The CLI streams until its stdin closes, so hold a pipe open for the
+    // life of the stream; dropping this future closes it (and kills the
+    // child), which is how the caller stops watching.
     command
         .arg("watch")
         .arg(args.to_string())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
         BridgeError::Unreachable(format!("could not run {}: {error}", cli.display()))
     })?;
+    let _stdin_kept_open = child.stdin.take();
     let stdout = child.stdout.take().ok_or_else(|| {
         BridgeError::Unreachable(format!("{CLI_NAME} watch stdout was not captured"))
     })?;
@@ -333,16 +337,16 @@ pub async fn stream_watch_at(
             Err(error) => return Err(error),
         }
     }
+    // Reaching here means the CLI ended on its own: a watch is meant to run
+    // until the caller drops it, so even a clean exit is a failure worth
+    // surfacing rather than a silent end of the stream.
     let status = child
         .wait()
         .await
         .map_err(|error| BridgeError::Unreachable(format!("{CLI_NAME} watch failed: {error}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(BridgeError::Unreachable(format!(
-            "{CLI_NAME} watch exited with {status}"
-        )))
+    Err(BridgeError::Unreachable(format!(
+        "{CLI_NAME} watch ended early ({status}); it should stream until cider stops it"
+    )))
     }
 }
 
@@ -770,8 +774,8 @@ esac
         let stub = cli.clone();
         stream_watch_at(&stub, &["reminders", "calendar"], |data| seen.push(data))
             .await
-            .unwrap();
-        assert_eq!(seen.len(), 2);
+            .unwrap_err();
+        assert_eq!(seen.len(), 2, "both lines are delivered before the early end");
         assert_eq!(seen[0]["source"], "reminders");
         assert_eq!(seen[0]["kind"], "store_changed");
         assert_eq!(seen[1]["source"], "calendar");
