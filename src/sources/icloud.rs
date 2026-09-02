@@ -1,6 +1,7 @@
 //! iCloud: the signed-in account, Drive quota, sync status and logs from
-//! `brctl`, and a placeholder-aware listing of iCloud Drive that never
-//! triggers a download.
+//! `brctl`, and an eviction-aware listing of iCloud Drive that never
+//! triggers a download (evicted files are `dataless` in `st_flags` on
+//! current macOS, `.name.icloud` placeholders on older releases).
 //!
 //! `brctl` is Apple's CloudDocs control tool at `/usr/bin/brctl`. Its help
 //! documents `status`, `log`, `quota`, `accounts`, `monitor`, `dump`, and
@@ -585,7 +586,7 @@ pub fn list_dir(dir: &Path, recursive: bool) -> anyhow::Result<Vec<DriveEntry>> 
                 path: path.to_string_lossy().into_owned(),
                 is_dir,
                 size: meta.is_file().then_some(meta.len()),
-                state: DriveState::Local,
+                state: state_from_flags(meta_flags(&meta)),
             });
             if is_dir && recursive {
                 pending.push(path);
@@ -593,6 +594,26 @@ pub fn list_dir(dir: &Path, recursive: bool) -> anyhow::Result<Vec<DriveEntry>> 
         }
     }
     Ok(out)
+}
+
+/// `SF_DATALESS` in `st_flags`: the file's bytes live only in iCloud.
+/// Current macOS evicts by setting this flag and keeping the name and size
+/// (no `.name.icloud` placeholder); reading the file would trigger a
+/// download, `stat` does not.
+const SF_DATALESS: u32 = 0x4000_0000;
+
+fn meta_flags(meta: &std::fs::Metadata) -> u32 {
+    use std::os::macos::fs::MetadataExt;
+    meta.st_flags()
+}
+
+/// Evicted (dataless) files are `cloud`; everything else is `local`.
+pub fn state_from_flags(flags: u32) -> DriveState {
+    if flags & SF_DATALESS != 0 {
+        DriveState::Cloud
+    } else {
+        DriveState::Local
+    }
 }
 
 /// The cloud size a placeholder records (`NSURLFileSizeKey`), when readable.
@@ -639,6 +660,14 @@ pub async fn evict(path: &str) -> anyhow::Result<ActionResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dataless_flag_means_cloud() {
+        assert_eq!(state_from_flags(0), DriveState::Local);
+        assert_eq!(state_from_flags(SF_DATALESS), DriveState::Cloud);
+        // compressed + dataless, as seen on a real evicted file
+        assert_eq!(state_from_flags(0x20 | SF_DATALESS), DriveState::Cloud);
+    }
 
     #[test]
     fn enabled_join_columns_are_discovered_from_pragma() {
