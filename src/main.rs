@@ -269,8 +269,8 @@ enum CalendarAction {
         /// Filter by calendar name
         #[arg(long)]
         calendar: Option<String>,
-        /// Only records modified at or after this RFC 3339 timestamp
-        /// (e.g. 2026-09-01T00:00:00Z)
+        /// Only records modified at or after this instant: RFC 3339
+        /// (2026-09-01T00:00:00Z) or a date (2026-09-01, local midnight)
         #[arg(long)]
         since: Option<String>,
     },
@@ -502,8 +502,8 @@ enum NotesAction {
         /// Skip note bodies — fast bulk listing of the whole library
         #[arg(long)]
         brief: bool,
-        /// Only records modified at or after this RFC 3339 timestamp
-        /// (e.g. 2026-09-01T00:00:00Z)
+        /// Only records modified at or after this instant: RFC 3339
+        /// (2026-09-01T00:00:00Z) or a date (2026-09-01, local midnight)
         #[arg(long)]
         since: Option<String>,
     },
@@ -563,8 +563,8 @@ enum RemindersAction {
         /// Include completed reminders
         #[arg(long)]
         include_completed: bool,
-        /// Only records modified at or after this RFC 3339 timestamp
-        /// (e.g. 2026-09-01T00:00:00Z)
+        /// Only records modified at or after this instant: RFC 3339
+        /// (2026-09-01T00:00:00Z) or a date (2026-09-01, local midnight)
         #[arg(long)]
         since: Option<String>,
     },
@@ -802,8 +802,9 @@ enum MessagesAction {
         /// Limit the number of results returned
         #[arg(long)]
         limit: Option<usize>,
-        /// Only messages sent at or after this RFC 3339 timestamp
-        /// (e.g. 2026-09-01T00:00:00Z); replaces the --days window
+        /// Only messages sent at or after this instant: RFC 3339
+        /// (2026-09-01T00:00:00Z) or a date (2026-09-01, local midnight);
+        /// replaces the --days window
         #[arg(long)]
         since: Option<String>,
     },
@@ -1438,18 +1439,33 @@ fn print_batch_output(
     Ok(())
 }
 
-/// `--since` takes RFC 3339 only: the sources compare it against store
-/// timestamps, so it has to name an unambiguous instant (with an offset).
+/// `--since` is RFC 3339 (an unambiguous instant, with offset) or a bare
+/// `YYYY-MM-DD`, which means local midnight at the start of that day — the
+/// sources compare it against store timestamps, so it must become an
+/// instant either way.
 fn parse_since(value: Option<&str>) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    match chrono::DateTime::parse_from_rfc3339(value.trim()) {
-        Ok(dt) => Ok(Some(dt.with_timezone(&chrono::Utc))),
-        Err(_) => {
-            anyhow::bail!("--since must be RFC 3339, e.g. 2026-09-01T00:00:00Z (got {value:?})")
-        }
+    let value = value.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(dt.with_timezone(&chrono::Utc)));
     }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let midnight = date
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is a valid time")
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .ok_or_else(|| {
+                anyhow::anyhow!("--since {value:?}: that day has no local midnight (DST gap)")
+            })?;
+        return Ok(Some(midnight.with_timezone(&chrono::Utc)));
+    }
+    anyhow::bail!(
+        "invalid --since {value:?}: expected RFC 3339 (2026-09-01T00:00:00Z) or a date \
+         (2026-09-01, local midnight)"
+    )
 }
 
 fn paginate_vec<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
@@ -3517,17 +3533,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_since_rejects_non_rfc3339() {
+    fn parse_since_accepts_bare_dates_as_local_midnight() {
+        use chrono::TimeZone;
+        let parsed = parse_since(Some("2026-09-01")).unwrap().unwrap();
+        let expected = chrono::Local
+            .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(parsed, expected);
+        // Read back in local time it is midnight, whatever the zone.
+        let local = parsed.with_timezone(&chrono::Local);
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-09-01 00:00:00"
+        );
+        assert_eq!(parse_since(Some(" 2026-09-01 ")).unwrap().unwrap(), parsed);
+        assert!(parse_since(Some("2026-02-30")).is_err(), "not a real day");
+    }
+
+    #[test]
+    fn parse_since_rejects_other_forms_and_names_both() {
         for bad in [
-            "2026-09-01",
             "yesterday",
             "2026-09-01 00:00:00",
+            "09/01/2026",
             "",
             "1756684800",
         ] {
-            let error = parse_since(Some(bad)).expect_err(bad).to_string();
+            let error: anyhow::Error = parse_since(Some(bad)).expect_err(bad);
+            assert_eq!(classify_error_code(&error), "invalid_input", "{bad}");
+            let error = error.to_string();
+            assert!(error.starts_with("invalid --since"), "{bad}: {error}");
+            assert!(error.contains("2026-09-01T00:00:00Z"), "{bad}: {error}");
             assert!(
-                error.starts_with("--since must be RFC 3339, e.g. 2026-09-01T00:00:00Z"),
+                error.contains("(2026-09-01, local midnight)"),
                 "{bad}: {error}"
             );
         }

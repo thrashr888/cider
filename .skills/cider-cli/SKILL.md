@@ -112,9 +112,11 @@ cider reminders create --title "Buy milk" --list Shopping
 ```bash
 cider reminders list --list Shopping --limit 20
 cider reminders list --search invoice --include-completed
-# What changed since a sync point (RFC 3339); calendar, notes, and messages
-# list take --since too, and calendar events now carry modified_at.
+# What changed since a sync point: RFC 3339, or a bare date for local
+# midnight; calendar, notes, and messages list take --since too, and
+# calendar events carry modified_at.
 cider reminders list --since 2026-09-01T00:00:00Z
+cider reminders list --since 2026-09-01
 cider reminders create --title "Buy milk" --list Shopping --due "2026-03-14T18:00:00Z"
 # Complete/delete by --id from `list` — titles repeat, ids don't. A --title
 # call acts on the first open match and reports when there were others.
