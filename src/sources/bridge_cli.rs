@@ -333,7 +333,7 @@ pub async fn stream_watch_at(
         }
         match parse_reply(CLI_REQUEST_ID, &line) {
             Ok(data) => on_line(data),
-            Err(BridgeError::Protocol(detail)) => eprintln!("cider watch: {CLI_NAME}: {detail}"),
+            Err(BridgeError::Protocol(detail)) => log::warn!("cider watch: {CLI_NAME}: {detail}"),
             Err(error) => return Err(error),
         }
     }

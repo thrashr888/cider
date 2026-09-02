@@ -113,7 +113,7 @@ fn parse_json_rows(output: &str) -> Vec<Message> {
     let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("Skipping unparseable messages output: {e}");
+            log::warn!("Skipping unparseable messages output: {e}");
             return Vec::new();
         }
     };

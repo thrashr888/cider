@@ -141,7 +141,7 @@ LIMIT 500;
         .await
         {
             Ok(stdout) => all.extend(parse_json_rows(&stdout)),
-            Err(e) => eprintln!("Skipping reminders DB {db_path}: {e}"),
+            Err(e) => log::warn!("Skipping reminders DB {db_path}: {e}"),
         }
     }
 
@@ -646,7 +646,7 @@ fn parse_json_rows(output: &str) -> Vec<Reminder> {
     let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("Skipping unparseable reminders output: {e}");
+            log::warn!("Skipping unparseable reminders output: {e}");
             return Vec::new();
         }
     };

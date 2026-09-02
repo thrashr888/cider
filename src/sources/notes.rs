@@ -357,7 +357,7 @@ fn parse_json_output(output: &str) -> Vec<Note> {
     let items: Vec<serde_json::Value> = match serde_json::from_str(output) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Failed to parse notes JSON: {e}, falling back to line parser");
+            log::warn!("Failed to parse notes JSON: {e}, falling back to line parser");
             return parse_tab_output(output);
         }
     };

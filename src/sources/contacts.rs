@@ -561,7 +561,7 @@ fn parse_json_rows(output: &str) -> Vec<Contact> {
         Ok(rows) => rows,
         Err(_) if output.trim().is_empty() => return Vec::new(),
         Err(error) => {
-            eprintln!("Skipping unparseable contacts output: {error}");
+            log::warn!("Skipping unparseable contacts output: {error}");
             return Vec::new();
         }
     };

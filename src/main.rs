@@ -3565,8 +3565,46 @@ fn bridge_error_code(error: &sources::bridge::BridgeError) -> String {
     }
 }
 
+/// The stderr sink for the library's `log` records.
+///
+/// `src/sources/` is linked by other programs (Alchemy embeds it in a Tauri
+/// app), so nothing under it may write to stderr directly: a closed stderr
+/// makes `eprintln!` panic, and that has aborted a host app in the field.
+/// The library records diagnostics through the `log` facade instead, which is
+/// inert until someone installs a logger. The binary is that someone, and it
+/// prints the bare message so `cider watch` reads exactly as it always has.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        // Deliberately ignoring the error: a broken stderr is the exact
+        // failure this whole indirection exists to survive.
+        let _ = writeln!(io::stderr(), "{}", record.args());
+    }
+
+    fn flush(&self) {
+        let _ = io::stderr().flush();
+    }
+}
+
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+fn install_logger() {
+    if log::set_logger(&STDERR_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    install_logger();
     match run().await {
         Ok(()) => Ok(()),
         Err(err) if is_broken_pipe(&err) => Ok(()),

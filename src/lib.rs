@@ -49,3 +49,66 @@ pub use sources::permissions::{
 
 #[cfg(feature = "cli")]
 pub mod pretty;
+
+#[cfg(test)]
+mod no_stdio_in_library {
+    use std::path::Path;
+
+    /// Library code must never touch stdout or stderr. Alchemy links this
+    /// crate into a Tauri app where stderr can be closed, and `eprintln!` on a
+    /// closed stderr panics — it has aborted that app in the field. Diagnostics
+    /// go through the `log` facade instead, which is a no-op until a consumer
+    /// installs a logger; the `cider` binary installs one and keeps the same
+    /// stderr output users have always seen. `src/main.rs` and anything behind
+    /// the `cli` feature may still print.
+    #[test]
+    fn no_print_macros_outside_the_cli() {
+        // Assembled rather than written out, so this test does not trip over
+        // its own source when it scans `lib.rs`.
+        let macros: Vec<String> = ["println", "eprintln", "print", "eprint"]
+            .iter()
+            .map(|name| format!("{name}!"))
+            .collect();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.join("lib.rs")];
+        let mut dirs = vec![root.join("sources")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("sources directory is readable") {
+                let path = entry.expect("readable directory entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+
+        let mut offenders = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("source file is readable");
+            for (number, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                // Doc comments and ordinary comments show callers what to do
+                // with the data; they are prose, not prints.
+                if code.starts_with("//") {
+                    continue;
+                }
+                if macros.iter().any(|macro_name| code.contains(macro_name)) {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        file.file_name().unwrap().to_string_lossy(),
+                        number + 1,
+                        code.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "library code must log, not print — use log::warn!/info!/debug! instead:\n{}",
+            offenders.join("\n")
+        );
+    }
+}

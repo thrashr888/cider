@@ -324,7 +324,7 @@ pub async fn watch_via(
             return Ok(());
         }
         let names: Vec<&str> = cli_sources.iter().map(|s| s.name()).collect();
-        eprintln!(
+        log::info!(
             "cider watch: streaming {} via {}",
             names.join(", "),
             bridge_cli::CLI_NAME
@@ -383,7 +383,7 @@ pub async fn watch(
             if path.is_dir() {
                 roots.push((source, path));
             } else {
-                eprintln!(
+                log::warn!(
                     "cider watch: skipping {source}: {} does not exist",
                     path.display()
                 );
@@ -410,7 +410,7 @@ pub async fn watch(
                 }
             }
             Ok(_) => {}
-            Err(err) => eprintln!("cider watch: {err}"),
+            Err(err) => log::warn!("cider watch: {err}"),
         }
     })
     .context("failed to start the filesystem watcher")?;
@@ -419,7 +419,7 @@ pub async fn watch(
             .watch(root, RecursiveMode::Recursive)
             .with_context(|| format!("failed to watch {source} store {}", root.display()))?;
     }
-    eprintln!(
+    log::info!(
         "cider watch: watching {} (Ctrl-C to stop)",
         seen.iter()
             .filter(|source| roots.iter().any(|(s, _)| s == *source))

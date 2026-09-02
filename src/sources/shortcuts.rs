@@ -708,7 +708,7 @@ pub async fn gen(
     allow_unreachable_ssh: bool,
 ) -> anyhow::Result<ActionResult> {
     if output_renames(&spec.name, output) {
-        eprintln!(
+        log::warn!(
             "cider shortcuts gen: Shortcuts will name the imported shortcut after the file, not '{}'",
             spec.name
         );
@@ -719,7 +719,7 @@ pub async fn gen(
         &own_host_names(),
         ssh_port_open,
     )? {
-        eprintln!("cider shortcuts gen: {warning}");
+        log::warn!("cider shortcuts gen: {warning}");
     }
     let needs_homes = spec.steps.iter().any(|s| matches!(s, Step::Scene { .. }));
     let homes = if needs_homes {

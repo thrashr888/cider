@@ -87,7 +87,7 @@ async fn fetch_in_window(
     if tokio::fs::metadata(&group_db).await.is_ok() {
         match fetch_from_group_db(&group_db, days_back, days_ahead, since).await {
             Ok(events) => return Ok(events),
-            Err(error) => eprintln!("Calendar database read failed; trying fallback: {error}"),
+            Err(error) => log::warn!("Calendar database read failed; trying fallback: {error}"),
         }
     }
 
@@ -96,7 +96,7 @@ async fn fetch_in_window(
     if tokio::fs::metadata(&cache_db).await.is_ok() {
         match fetch_from_cache_db(&cache_db, days_back, days_ahead).await {
             Ok(events) => return Ok(events),
-            Err(error) => eprintln!("Legacy Calendar database read failed; trying JXA: {error}"),
+            Err(error) => log::warn!("Legacy Calendar database read failed; trying JXA: {error}"),
         }
     }
 
@@ -254,7 +254,7 @@ pub async fn get(id: &str) -> anyhow::Result<CalendarEvent> {
         match fetch_one_from_group_db(&group_db, id).await {
             Ok(Some(event)) => return Ok(event),
             Ok(None) => {}
-            Err(error) => eprintln!("Calendar database lookup failed; trying JXA: {error}"),
+            Err(error) => log::warn!("Calendar database lookup failed; trying JXA: {error}"),
         }
     }
     let script = build_find_by_id_script(id, "return JSON.stringify(eventRecord(ev, cal.name()));");
@@ -654,7 +654,7 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
     let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("Skipping unparseable calendar output: {e}");
+            log::warn!("Skipping unparseable calendar output: {e}");
             return Vec::new();
         }
     };

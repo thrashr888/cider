@@ -103,7 +103,7 @@ fn parse_json_rows(output: &str) -> Vec<Book> {
     let rows: Vec<serde_json::Value> = match serde_json::from_str(output) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("Skipping unparseable books output: {e}");
+            log::warn!("Skipping unparseable books output: {e}");
             return Vec::new();
         }
     };
