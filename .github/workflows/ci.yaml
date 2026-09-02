@@ -31,3 +31,41 @@ jobs:
         run: cargo test
       - name: Build
         run: cargo build --release
+
+  # The Swift bridge: the package (BridgeCore + cider-bridge CLI) with its
+  # tests, then the Catalyst app unsigned. No team, no entitlements, no live
+  # stores — signing and HomeKit are a personal-build concern (bridge/scripts).
+  bridge:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      # The package is swift-tools 6.0 and the app targets the iOS 17 /
+      # macOS 14 SDKs; any Xcode >= 16 builds it. Pick the newest one on the
+      # runner so a beta-era API (developed against Xcode 27) is not missed
+      # by an older default. Override with DEVELOPER_DIR if a pin is needed.
+      - name: Select the newest Xcode on the runner
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          echo "using $XCODE"
+          "$XCODE/Contents/Developer/usr/bin/xcodebuild" -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Swift build
+        run: swift build
+      - name: Swift test
+        run: swift test
+      - name: Catalyst app (unsigned)
+        run: |
+          xcodegen generate
+          xcodebuild \
+            -project CiderBridge.xcodeproj \
+            -scheme CiderBridge \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            -derivedDataPath .build/DerivedData \
+            build | tail -40
+          test "${PIPESTATUS[0]}" -eq 0
