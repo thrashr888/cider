@@ -219,8 +219,10 @@ fn check_bridge_app() -> DoctorCheck {
         None => (
             CheckStatus::NotConfigured,
             format!(
-                "{} is not installed (looked in ~/Applications, /Applications, ${}); HomeKit \
-                 live commands need it — build it with `cider bridge build --install`",
+                "{} is not installed (looked at ${}, ~/Applications, /Applications, and the \
+                 Homebrew libexec); `brew install cider` includes a bridge for WeatherKit and \
+                 EventKit/Contacts, and HomeKit live commands need a personal build — `cider \
+                 bridge build --install`",
                 bridge::APP_NAME,
                 bridge::APP_ENV
             ),
@@ -310,9 +312,10 @@ fn check_bridge_cli() -> DoctorCheck {
             None => (
                 CheckStatus::NotConfigured,
                 format!(
-                    "{} is not installed (looked at ${}, {}/Contents/MacOS, ~/.local/bin, and \
-                     $PATH); writes fall back to AppleScript/JXA — build it with `cider bridge \
-                     build --install`",
+                    "{} is not installed (looked at ${}, ~/Applications/{}/Contents/MacOS, next \
+                     to the cider binary, ~/.local/bin, and $PATH); writes fall back to \
+                     AppleScript/JXA — `brew install cider` includes it, or build it with \
+                     `cider bridge build --install`",
                     bridge_cli::CLI_NAME,
                     bridge_cli::CLI_ENV,
                     bridge::APP_NAME

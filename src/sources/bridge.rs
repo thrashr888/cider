@@ -64,7 +64,8 @@ const MAX_BUILD_DEPTH: usize = 8;
 /// Why a bridge call did not produce data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
-    /// No `Cider Bridge.app` in `~/Applications`, `/Applications`, or `$CIDER_BRIDGE_APP`.
+    /// No `Cider Bridge.app` at `$CIDER_BRIDGE_APP`, in `~/Applications` or
+    /// `/Applications`, or in the Homebrew formula's `libexec` (see [`app_path`]).
     NotInstalled,
     /// The socket did not connect, did not answer in time, or closed on us.
     Unreachable(String),
@@ -80,6 +81,9 @@ pub enum BridgeError {
     /// The bridge speaks a protocol version whose major differs from
     /// [`BRIDGE_PROTOCOL_VERSION`], or answered a command it does not know.
     Incompatible { have: String, want: String },
+    /// The bridge that answered has no HomeKit entitlement (a packaged
+    /// build); see [`HOMEKIT_UNAVAILABLE_MESSAGE`].
+    HomeKitUnavailable,
 }
 
 impl fmt::Display for BridgeError {
@@ -87,10 +91,12 @@ impl fmt::Display for BridgeError {
         match self {
             BridgeError::NotInstalled => write!(
                 f,
-                "{APP_NAME} is not installed (looked in ~/Applications, /Applications, and \
-                 ${APP_ENV}); build it from a cider checkout with `cider bridge build --install` \
-                 — see docs/RFC-swift-bridge.md"
+                "{APP_NAME} is not installed (looked at ${APP_ENV}, ~/Applications, \
+                 /Applications, and the Homebrew libexec); `brew install cider` includes a \
+                 bridge for everything but HomeKit, or build one from a cider checkout with \
+                 `cider bridge build --install` — see docs/RFC-swift-bridge.md"
             ),
+            BridgeError::HomeKitUnavailable => f.write_str(HOMEKIT_UNAVAILABLE_MESSAGE),
             BridgeError::Unreachable(detail) => write!(f, "Cider Bridge is unreachable: {detail}"),
             BridgeError::Remote { code, message } => write!(f, "Cider Bridge {code}: {message}"),
             BridgeError::Protocol(detail) => {
@@ -181,13 +187,15 @@ pub fn socket_path() -> PathBuf {
     home_dir().join("Library/Application Support/cider/bridge.sock")
 }
 
-/// The app bundle, searching `~/Applications`, `/Applications`, then
-/// `$CIDER_BRIDGE_APP`.
+/// The app bundle: `$CIDER_BRIDGE_APP`, then `~/Applications` (a personal
+/// build, which wins because it may carry HomeKit), then `/Applications`,
+/// then the Homebrew-packaged copy under the formula's `libexec`.
 pub fn app_path() -> Option<PathBuf> {
     app_path_from(app_candidates(
         &home_dir(),
         Path::new("/Applications"),
         std::env::var_os(APP_ENV).map(PathBuf::from),
+        &brew_libexec_dirs(std::env::current_exe().ok().as_deref()),
     ))
 }
 
@@ -197,13 +205,67 @@ pub fn app_candidates(
     home: &Path,
     system_apps: &Path,
     env_override: Option<PathBuf>,
+    brew_libexec: &[PathBuf],
 ) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        home.join("Applications").join(APP_NAME),
-        system_apps.join(APP_NAME),
-    ];
+    let mut candidates = Vec::new();
     candidates.extend(env_override);
+    candidates.push(home.join("Applications").join(APP_NAME));
+    candidates.push(system_apps.join(APP_NAME));
+    candidates.extend(brew_libexec.iter().map(|dir| dir.join(APP_NAME)));
     candidates
+}
+
+/// Homebrew prefixes on Apple silicon and Intel Macs.
+const BREW_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
+
+/// Where a Homebrew-installed cider keeps its packaged bridge: `libexec`
+/// of the formula this binary belongs to, derived from the binary's own
+/// path when it lives in a Cellar (`<prefix>/Cellar/<formula>/<version>/bin/cider`
+/// → that keg's `libexec` and `<prefix>/opt/<formula>/libexec`), plus the
+/// `opt/cider/libexec` of both standard prefixes in case cider was
+/// installed some other way. Pure; deduplicated, order kept.
+pub fn brew_libexec_dirs(current_exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(exe) = current_exe {
+        for prefix in BREW_PREFIXES {
+            let cellar = Path::new(prefix).join("Cellar");
+            let Ok(rest) = exe.strip_prefix(&cellar) else {
+                continue;
+            };
+            let mut parts = rest.components();
+            let (Some(formula), Some(version)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            dirs.push(cellar.join(formula).join(version).join("libexec"));
+            dirs.push(Path::new(prefix).join("opt").join(formula).join("libexec"));
+        }
+    }
+    dirs.extend(
+        BREW_PREFIXES
+            .iter()
+            .map(|prefix| Path::new(prefix).join("opt/cider/libexec")),
+    );
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    dirs
+}
+
+/// Where a Homebrew-installed cider keeps its packaged `cider-bridge` CLI:
+/// next to this binary, plus `opt/cider/bin` of both standard prefixes.
+pub fn brew_bin_dirs(current_exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = current_exe
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+    dirs.extend(
+        BREW_PREFIXES
+            .iter()
+            .map(|prefix| Path::new(prefix).join("opt/cider/bin")),
+    );
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    dirs
 }
 
 /// The first candidate that is an app bundle (a directory) on disk.
@@ -232,6 +294,8 @@ pub struct Bridge {
     next_id: u64,
     /// What the bridge said in `ping.data.version`.
     version: String,
+    /// `ping.data.homekit_entitled`; `None` when the bridge predates it.
+    homekit_entitled: Option<bool>,
 }
 
 impl fmt::Debug for Bridge {
@@ -239,6 +303,7 @@ impl fmt::Debug for Bridge {
         f.debug_struct("Bridge")
             .field("next_id", &self.next_id)
             .field("version", &self.version)
+            .field("homekit_entitled", &self.homekit_entitled)
             .finish()
     }
 }
@@ -265,6 +330,22 @@ impl Bridge {
     /// The version the bridge reported when this connection was opened.
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// `ping.data.homekit_entitled`: `Some(false)` for a packaged build,
+    /// `None` for a bridge too old to say.
+    pub fn homekit_entitled(&self) -> Option<bool> {
+        self.homekit_entitled
+    }
+
+    /// Fail before the first `home.*` call when this bridge cannot do
+    /// HomeKit at all. A bridge that does not report the flag is given the
+    /// benefit of the doubt; its own `homekit_unavailable` reply follows.
+    pub fn require_homekit(&self) -> Result<(), BridgeError> {
+        match self.homekit_entitled {
+            Some(false) => Err(BridgeError::HomeKitUnavailable),
+            _ => Ok(()),
+        }
     }
 
     /// The handshake: keep the connection only if its `ping` reply names a
@@ -299,9 +380,11 @@ impl Bridge {
             writer,
             next_id: 0,
             version: String::from("unknown"),
+            homekit_entitled: None,
         };
         let pong = bridge.call_with_timeout("ping", json!({}), timeout).await?;
         bridge.version = ping_version(&pong);
+        bridge.homekit_entitled = pong.get("homekit_entitled").and_then(Json::as_bool);
         Ok((bridge, pong))
     }
 
@@ -988,33 +1071,130 @@ mod tests {
     }
 
     #[test]
-    fn app_path_prefers_home_then_system_then_env_override() {
+    fn app_path_prefers_env_then_home_then_system_then_brew() {
         let root = temp_dir("apps");
         let home = root.join("home");
         let system = root.join("system");
+        let libexec = root.join("brew/opt/cider/libexec");
         let env_app = root.join("elsewhere").join(APP_NAME);
         let home_app = home.join("Applications").join(APP_NAME);
         let system_app = system.join(APP_NAME);
-        for app in [&home_app, &system_app, &env_app] {
+        let brew_app = libexec.join(APP_NAME);
+        for app in [&home_app, &system_app, &env_app, &brew_app] {
             std::fs::create_dir_all(app).unwrap();
         }
-        let candidates = || app_candidates(&home, &system, Some(env_app.clone()));
+        let brew = vec![libexec.clone()];
+        let candidates = || app_candidates(&home, &system, Some(env_app.clone()), &brew);
 
         assert_eq!(
             candidates(),
-            vec![home_app.clone(), system_app.clone(), env_app.clone()]
+            vec![
+                env_app.clone(),
+                home_app.clone(),
+                system_app.clone(),
+                brew_app.clone()
+            ]
         );
-        assert_eq!(app_path_from(candidates()), Some(home_app.clone()));
+        assert_eq!(app_path_from(candidates()), Some(env_app.clone()));
+        std::fs::remove_dir_all(&env_app).unwrap();
+        assert_eq!(
+            app_path_from(candidates()),
+            Some(home_app.clone()),
+            "a personal build beats the packaged one: it may have HomeKit"
+        );
         std::fs::remove_dir_all(&home_app).unwrap();
         assert_eq!(app_path_from(candidates()), Some(system_app.clone()));
         std::fs::remove_dir_all(&system_app).unwrap();
-        assert_eq!(app_path_from(candidates()), Some(env_app.clone()));
-        std::fs::remove_dir_all(&env_app).unwrap();
+        assert_eq!(app_path_from(candidates()), Some(brew_app.clone()));
+        std::fs::remove_dir_all(&brew_app).unwrap();
         assert_eq!(app_path_from(candidates()), None);
-        // No override: the list is just the two folders.
-        assert_eq!(app_candidates(&home, &system, None).len(), 2);
+        // No override, no brew: the list is just the two folders.
+        assert_eq!(app_candidates(&home, &system, None, &[]).len(), 2);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn brew_dirs_derive_from_a_cellar_binary_and_always_try_both_prefixes() {
+        let exe = Path::new("/opt/homebrew/Cellar/cider/0.6.0/bin/cider");
+        let dirs = brew_libexec_dirs(Some(exe));
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/opt/homebrew/Cellar/cider/0.6.0/libexec"),
+                PathBuf::from("/opt/homebrew/opt/cider/libexec"),
+                PathBuf::from("/usr/local/opt/cider/libexec"),
+            ]
+        );
+        // A differently named formula still finds its own keg.
+        let dirs = brew_libexec_dirs(Some(Path::new("/usr/local/Cellar/cider-cli/1.0/bin/cider")));
+        assert_eq!(
+            dirs[0],
+            PathBuf::from("/usr/local/Cellar/cider-cli/1.0/libexec")
+        );
+        assert_eq!(dirs[1], PathBuf::from("/usr/local/opt/cider-cli/libexec"));
+        assert_eq!(dirs.len(), 4);
+        // Outside any Cellar (cargo install, a checkout): the literals only.
+        let literal = brew_libexec_dirs(Some(Path::new("/Users/me/.cargo/bin/cider")));
+        assert_eq!(literal.len(), 2);
+        assert_eq!(brew_libexec_dirs(None), literal);
+
+        let bins = brew_bin_dirs(Some(exe));
+        assert_eq!(
+            bins[0],
+            PathBuf::from("/opt/homebrew/Cellar/cider/0.6.0/bin")
+        );
+        assert!(bins.contains(&PathBuf::from("/opt/homebrew/opt/cider/bin")));
+        assert!(bins.contains(&PathBuf::from("/usr/local/opt/cider/bin")));
+        assert_eq!(brew_bin_dirs(None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn packaged_bridge_without_homekit_is_reported_before_any_home_call() {
+        let path = temp_socket();
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Json = serde_json::from_str(&line).unwrap();
+                let reply = json!({"id": request["id"], "ok": true, "data": {
+                    "version": "0.1.0", "homekit_entitled": false,
+                    "homekit_authorized": false, "homes": 0
+                }});
+                writer
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let bridge = connect_with(&path, None).await.unwrap();
+        assert_eq!(bridge.homekit_entitled(), Some(false));
+        let error = bridge.require_homekit().unwrap_err();
+        assert_eq!(error, BridgeError::HomeKitUnavailable);
+        let message = error.to_string();
+        assert!(message.contains("no HomeKit entitlement"), "{message}");
+        assert!(
+            message.contains("cider bridge build --install"),
+            "{message}"
+        );
+        assert!(message.contains("Apple Developer team"), "{message}");
+
+        drop(bridge);
+        server.abort();
+        std::fs::remove_file(&path).ok();
+
+        // The stub servers above omit the flag: an older bridge passes.
+        let path = temp_socket();
+        let server = versioned_stub(&path, "0.1.0").await;
+        let bridge = connect_with(&path, None).await.unwrap();
+        assert_eq!(bridge.homekit_entitled(), None);
+        assert!(bridge.require_homekit().is_ok());
+        drop(bridge);
+        server.abort();
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

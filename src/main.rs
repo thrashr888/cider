@@ -1732,7 +1732,6 @@ async fn run_home(
     envelope: bool,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    use sources::bridge::Bridge;
     use sources::home_live::{self as hl, Source};
 
     let action = action.unwrap_or(HomeAction::List);
@@ -1788,7 +1787,7 @@ async fn run_home(
             room,
             accessory,
         } => {
-            let mut bridge = Bridge::connect().await?;
+            let mut bridge = hl::connect().await?;
             let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let rows = hl::state(
                 &mut bridge,
@@ -1808,7 +1807,7 @@ async fn run_home(
                     envelope,
                 );
             }
-            let mut bridge = Bridge::connect().await?;
+            let mut bridge = hl::connect().await?;
             let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let result = hl::run_scene(&mut bridge, home.as_deref(), scene).await?;
             print_output(&serde_json::to_value(&result)?, pretty, envelope)
@@ -1831,7 +1830,7 @@ async fn run_home(
                     envelope,
                 );
             }
-            let mut bridge = Bridge::connect().await?;
+            let mut bridge = hl::connect().await?;
             let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
             let result = hl::set(
                 &mut bridge,
@@ -1850,7 +1849,7 @@ async fn run_home(
                 .unwrap_or(&HomeTriggersAction::List { home: None });
             match action {
                 HomeTriggersAction::List { home } => {
-                    let mut bridge = Bridge::connect().await?;
+                    let mut bridge = hl::connect().await?;
                     let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let value = hl::triggers(&mut bridge, home.as_deref()).await?;
                     print_output(&value, pretty, envelope)
@@ -1879,7 +1878,7 @@ async fn run_home(
                             envelope,
                         );
                     }
-                    let mut bridge = Bridge::connect().await?;
+                    let mut bridge = hl::connect().await?;
                     let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let row =
                         hl::create_timer(&mut bridge, home.as_deref(), name, at, recurrence, scene)
@@ -1898,7 +1897,7 @@ async fn run_home(
                             envelope,
                         );
                     }
-                    let mut bridge = Bridge::connect().await?;
+                    let mut bridge = hl::connect().await?;
                     let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let row =
                         hl::set_trigger_enabled(&mut bridge, home.as_deref(), trigger, enabled)
@@ -1914,7 +1913,7 @@ async fn run_home(
                             envelope,
                         );
                     }
-                    let mut bridge = Bridge::connect().await?;
+                    let mut bridge = hl::connect().await?;
                     let home = hl::resolve_home(&mut bridge, home.as_deref()).await?;
                     let result = hl::delete_trigger(&mut bridge, home.as_deref(), trigger).await?;
                     print_output(&serde_json::to_value(&result)?, pretty, envelope)
@@ -3500,12 +3499,14 @@ fn bridge_error_code(error: &sources::bridge::BridgeError) -> String {
         BridgeError::Unreachable(_) => "bridge_unreachable".to_string(),
         BridgeError::Protocol(_) => "bridge_protocol_error".to_string(),
         BridgeError::Incompatible { .. } => "bridge_incompatible".to_string(),
+        BridgeError::HomeKitUnavailable => "homekit_unavailable".to_string(),
         BridgeError::Remote { code, .. } => match code.as_str() {
             "not_found" => "not_found".to_string(),
             "invalid_args" => "invalid_input".to_string(),
             "homekit_denied" | "permission_denied" => "permission_denied".to_string(),
             "timeout" => "timeout".to_string(),
             "weather_unavailable" => "weather_unavailable".to_string(),
+            "homekit_unavailable" => "homekit_unavailable".to_string(),
             other => format!("bridge_{other}"),
         },
     }
@@ -3901,10 +3902,10 @@ mod tests {
             message: "no".into(),
         }
         .into();
-        assert_eq!(
-            classify_error_code(&unavailable),
-            "bridge_homekit_unavailable"
-        );
+        assert_eq!(classify_error_code(&unavailable), "homekit_unavailable");
+        let packaged: anyhow::Error = BridgeError::HomeKitUnavailable.into();
+        assert_eq!(classify_error_code(&packaged), "homekit_unavailable");
+        assert!(packaged.to_string().contains("no HomeKit entitlement"));
         // Context added on the way up must not hide the typed error.
         let wrapped = anyhow::Error::from(BridgeError::Unreachable("x".into())).context("listing");
         assert_eq!(classify_error_code(&wrapped), "bridge_unreachable");

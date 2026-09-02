@@ -30,17 +30,28 @@ impl Source {
     }
 }
 
+/// A bridge for a HomeKit command: [`Bridge::connect`] (launching the app
+/// if needed) plus the check that it can do HomeKit at all, so a packaged
+/// bridge fails with `homekit_unavailable` before any `home.*` call.
+pub async fn connect() -> Result<Bridge, BridgeError> {
+    let bridge = Bridge::connect().await?;
+    bridge.require_homekit()?;
+    Ok(bridge)
+}
+
 /// The bridge for a read subcommand: mandatory with `--live` (launching the
-/// app if needed), otherwise only if it is installed and already answering.
+/// app if needed), otherwise only if it is installed, already answering,
+/// and able to do HomeKit — a packaged bridge that happens to be running
+/// (for weather, say) leaves cache reads on the cache.
 pub async fn bridge_for(live: bool) -> Result<Option<Bridge>, BridgeError> {
     if live {
-        return Bridge::connect().await.map(Some);
+        return connect().await.map(Some);
     }
     if !bridge::is_installed() {
         return Ok(None);
     }
     match Bridge::connect_running().await {
-        Ok(bridge) => Ok(Some(bridge)),
+        Ok(bridge) => Ok(bridge.require_homekit().ok().map(|()| bridge)),
         // A running but stale bridge is an error to fix, not a reason to
         // quietly answer from the cache.
         Err(error @ BridgeError::Incompatible { .. }) => Err(error),

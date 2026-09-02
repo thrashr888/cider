@@ -10,9 +10,10 @@
 //! one envelope per store change until killed.
 //!
 //! The executable is found via `$CIDER_BRIDGE_CLI`, then inside the
-//! installed `Cider Bridge.app`, then `~/.local/bin`, then `$PATH`.
-//! `CIDER_BRIDGE_CLI=off` disables it, which forces every write back onto
-//! the AppleScript/JXA path.
+//! personal `~/Applications/Cider Bridge.app`, then next to the `cider`
+//! binary (where Homebrew puts the packaged copy, `opt/cider/bin`), then
+//! `~/.local/bin`, then `$PATH`. `CIDER_BRIDGE_CLI=off` disables it, which
+//! forces every write back onto the AppleScript/JXA path.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ fn home_dir() -> PathBuf {
 pub fn cli_candidates(
     home: &Path,
     env_override: Option<&OsStr>,
+    brew_bin: &[PathBuf],
     path_var: Option<&OsStr>,
 ) -> Option<Vec<PathBuf>> {
     let mut candidates = Vec::new();
@@ -69,6 +71,7 @@ pub fn cli_candidates(
             .join("Contents/MacOS")
             .join(CLI_NAME),
     );
+    candidates.extend(brew_bin.iter().map(|dir| dir.join(CLI_NAME)));
     candidates.push(home.join(".local/bin").join(CLI_NAME));
     if let Some(path_var) = path_var {
         candidates.extend(std::env::split_paths(path_var).map(|dir| dir.join(CLI_NAME)));
@@ -88,6 +91,7 @@ pub fn cli_path() -> Option<PathBuf> {
     cli_path_from(cli_candidates(
         &home_dir(),
         env_override.as_deref(),
+        &super::bridge::brew_bin_dirs(std::env::current_exe().ok().as_deref()),
         path_var.as_deref(),
     ))
 }
@@ -901,15 +905,27 @@ esac
             std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
             std::fs::write(cli, "#!/bin/sh\n").unwrap();
         }
+        let brew_dir = root.join("brew/opt/cider/bin");
+        let brew_cli = brew_dir.join(CLI_NAME);
+        std::fs::create_dir_all(&brew_dir).unwrap();
+        std::fs::write(&brew_cli, "#!/bin/sh\n").unwrap();
+        let brew = vec![brew_dir.clone()];
         let path_var = std::env::join_paths([root.join("nowhere"), path_dir.clone()]).unwrap();
-        let candidates =
-            || cli_candidates(&home, Some(env_cli.as_os_str()), Some(path_var.as_os_str()));
+        let candidates = || {
+            cli_candidates(
+                &home,
+                Some(env_cli.as_os_str()),
+                &brew,
+                Some(path_var.as_os_str()),
+            )
+        };
 
         assert_eq!(
             candidates().unwrap(),
             vec![
                 env_cli.clone(),
                 app_cli.clone(),
+                brew_cli.clone(),
                 local_cli.clone(),
                 root.join("nowhere").join(CLI_NAME),
                 path_cli.clone(),
@@ -919,6 +935,12 @@ esac
         std::fs::remove_file(&env_cli).unwrap();
         assert_eq!(cli_path_from(candidates()), Some(app_cli.clone()));
         std::fs::remove_file(&app_cli).unwrap();
+        assert_eq!(
+            cli_path_from(candidates()),
+            Some(brew_cli.clone()),
+            "the packaged CLI next to the cider binary comes before ~/.local/bin"
+        );
+        std::fs::remove_file(&brew_cli).unwrap();
         assert_eq!(cli_path_from(candidates()), Some(local_cli.clone()));
         std::fs::remove_file(&local_cli).unwrap();
         assert_eq!(cli_path_from(candidates()), Some(path_cli.clone()));
@@ -927,15 +949,21 @@ esac
 
         // `off` switches the CLI off even when it is installed.
         std::fs::write(&app_cli, "#!/bin/sh\n").unwrap();
-        assert_eq!(cli_candidates(&home, Some(OsStr::new("off")), None), None);
-        assert_eq!(cli_candidates(&home, Some(OsStr::new(" OFF ")), None), None);
         assert_eq!(
-            cli_path_from(cli_candidates(&home, Some(OsStr::new("off")), None)),
+            cli_candidates(&home, Some(OsStr::new("off")), &[], None),
+            None
+        );
+        assert_eq!(
+            cli_candidates(&home, Some(OsStr::new(" OFF ")), &[], None),
+            None
+        );
+        assert_eq!(
+            cli_path_from(cli_candidates(&home, Some(OsStr::new("off")), &[], None)),
             None
         );
         // An empty override is the same as none.
         assert_eq!(
-            cli_path_from(cli_candidates(&home, Some(OsStr::new("")), None)),
+            cli_path_from(cli_candidates(&home, Some(OsStr::new("")), &[], None)),
             Some(app_cli.clone())
         );
 
