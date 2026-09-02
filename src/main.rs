@@ -81,8 +81,11 @@ enum Commands {
     },
     /// List installed fonts (Font Book)
     Fonts,
-    /// List HomeKit accessories (Home)
-    Home,
+    /// Homes, rooms, accessories, and scenes from the Home app's cache
+    Home {
+        #[command(subcommand)]
+        action: Option<HomeAction>,
+    },
     /// Fetch journal entries
     Journal,
     /// Manage Keychain passwords
@@ -995,6 +998,35 @@ enum FaceTimeAction {
 }
 
 #[derive(Subcommand)]
+enum HomeAction {
+    /// Every home with its rooms, accessories, and scenes nested (default)
+    List,
+    /// One row per home with counts
+    Homes,
+    /// Rooms, one row each with the home they belong to
+    Rooms {
+        /// Restrict to one home, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Accessories with their room, category, and services
+    Accessories {
+        /// Restrict to one home, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+        /// Restrict to one room, by name or UUID
+        #[arg(long)]
+        room: Option<String>,
+    },
+    /// Scenes (HomeKit action sets), user-made and built-in
+    Scenes {
+        /// Restrict to one home, by name or UUID
+        #[arg(long)]
+        home: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum PasswordsAction {
     /// List saved passwords (default, metadata only)
     List {
@@ -1688,7 +1720,35 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Fonts => run_source!(sources::fonts::fetch(), cli.pretty, cli.envelope),
-        Commands::Home => run_source!(sources::home::fetch(), cli.pretty, cli.envelope),
+        Commands::Home { action } => match action {
+            None | Some(HomeAction::List) => {
+                run_source!(sources::home::list(), cli.pretty, cli.envelope)
+            }
+            Some(HomeAction::Homes) => {
+                run_source!(sources::home::homes(), cli.pretty, cli.envelope)
+            }
+            Some(HomeAction::Rooms { home }) => {
+                run_source!(
+                    sources::home::rooms(home.as_deref()),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(HomeAction::Accessories { home, room }) => {
+                run_source!(
+                    sources::home::accessories(home.as_deref(), room.as_deref()),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(HomeAction::Scenes { home }) => {
+                run_source!(
+                    sources::home::scenes(home.as_deref()),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+        },
         Commands::Journal => run_source!(sources::journal::fetch(), cli.pretty, cli.envelope),
         Commands::Keychain { action } => match action {
             None | Some(KeychainAction::List { kind: None }) => {
