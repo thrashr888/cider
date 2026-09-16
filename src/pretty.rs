@@ -15,6 +15,49 @@ const RESET: &str = "\x1b[0m";
 const MAX_COL_WIDTH: usize = 50;
 const MAX_COLS: usize = 8;
 
+#[cfg(test)]
+mod knowledge_tests {
+    #[test]
+    fn knowledge_table_keeps_columns_for_values_absent_from_first_event() {
+        let events: Vec<crate::sources::knowledge::KnowledgeEvent> =
+            serde_json::from_value(serde_json::json!([
+                {"id": "a", "stream": "/app/usage", "value_string": "com.example.app"},
+                {"id": "b", "stream": "/display/isBacklit", "value_integer": 1}
+            ]))
+            .unwrap();
+        let mut output = Vec::new();
+        super::render_knowledge(&mut output, &events).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("VALUE INTEGER"));
+        assert!(output.contains("com.example.app"));
+        assert!(output.contains("/display/isBacklit"));
+        assert!(output.contains("2 items"));
+    }
+}
+
+/// Show the stream and scalar values even when the first event has null fields.
+pub fn render_knowledge<W: Write>(
+    w: W,
+    events: &[crate::sources::knowledge::KnowledgeEvent],
+) -> anyhow::Result<()> {
+    let items = events
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    render_table_with_columns(
+        w,
+        &items,
+        &[
+            "start_date",
+            "stream",
+            "duration_seconds",
+            "value_string",
+            "value_integer",
+            "value_double",
+        ],
+    )
+}
+
 pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<()> {
     match value {
         serde_json::Value::Array(arr) if arr.is_empty() => {

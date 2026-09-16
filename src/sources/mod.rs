@@ -18,6 +18,7 @@ pub mod home_live;
 pub mod icloud;
 pub mod keychain;
 pub mod keyed_archive;
+pub mod knowledge;
 pub mod mail;
 pub mod messages;
 pub mod music;

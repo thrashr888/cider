@@ -50,6 +50,7 @@ const READ_VERBS: &[&str] = &[
     "state",
     "triggers",
     "quota",
+    "streams",
 ];
 
 /// Flags that consume the next token as a value. Any other flag is taken
@@ -78,6 +79,8 @@ fn explicit_cases() -> Vec<Vec<&'static str>> {
         vec!["reminders", "list", "--since", "2000-01-01T00:00:00Z"],
         vec!["calendar", "list", "--since", "2000-01-01T00:00:00Z"],
         vec!["icloud", "list"],
+        vec!["knowledge", "streams"],
+        vec!["knowledge", "list", "--since", "2000-01-01T00:00:00Z"],
     ]
 }
 
@@ -89,6 +92,7 @@ const STORE_BACKED: &[(&str, &[&str])] = &[
     ("mail_database", &["mail"]),
     ("home_cache", &["home"]),
     ("shortcuts_database", &["shortcuts"]),
+    ("knowledge_database", &["knowledge"]),
     ("icloud_drive", &["icloud", "list"]),
 ];
 

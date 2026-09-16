@@ -403,6 +403,7 @@ pub fn parse_ps_line(line: &str) -> Option<(u32, String)> {
 /// Every one is under ~/Library, which Full Disk Access gates.
 pub const FULL_DISK_ACCESS_STORES: &[(&str, &str)] = &[
     ("messages", "Library/Messages/chat.db"),
+    ("knowledge", super::knowledge::DATABASE_RELATIVE_PATH),
     ("mail", "Library/Mail/V*/MailData/Envelope Index"),
     ("safari", "Library/Safari/History.db"),
     ("safari", "Library/Safari/Bookmarks.plist"),

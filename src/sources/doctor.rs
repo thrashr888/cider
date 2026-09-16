@@ -78,6 +78,12 @@ pub async fn inspect() -> DoctorReport {
         )
         .await,
         check_mail_store(&home).await,
+        check_readable_file(
+            "knowledge_database",
+            &home.join(super::knowledge::DATABASE_RELATIVE_PATH),
+            false,
+        )
+        .await,
         check_home_cache(&home).await,
         check_bridge_app(),
         check_bridge_socket().await,
@@ -662,6 +668,32 @@ fn check_executable(name: &str, path: &Path, required: bool) -> DoctorCheck {
             CheckStatus::Missing,
             format!("{} was not found", path.display()),
         )
+    };
+    DoctorCheck {
+        name: name.to_string(),
+        status,
+        required,
+        detail,
+    }
+}
+
+async fn check_readable_file(name: &str, path: &Path, required: bool) -> DoctorCheck {
+    let (status, detail) = match tokio::fs::File::open(path).await {
+        Ok(_) => (
+            CheckStatus::Ok,
+            format!("{} opened for reading", path.display()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
+            CheckStatus::PermissionDenied,
+            format!(
+                "{} is not readable: {error}; grant Full Disk Access to the launching app",
+                path.display()
+            ),
+        ),
+        Err(error) => (
+            CheckStatus::NotConfigured,
+            format!("{} could not be opened: {error}", path.display()),
+        ),
     };
     DoctorCheck {
         name: name.to_string(),

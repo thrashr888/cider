@@ -125,7 +125,44 @@ cider spotlight --query "quarterly report"
 
 ### Read-Only
 
-Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), iCloud (`account`, `quota`, `status`, `log`, `list` — placeholder-aware, never downloads), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
+Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), iCloud (`account`, `quota`, `status`, `log`, `list` — placeholder-aware, never downloads), Knowledge (`list`, `streams` — local activity history), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
+
+### Knowledge activity history
+
+Read the local Core Duet store at
+`~/Library/Application Support/Knowledge/knowledgeC.db`:
+
+```bash
+cider knowledge                              # newest 100 events
+cider knowledge streams --pretty             # available streams, counts, time ranges
+cider knowledge list --stream /app/usage --limit 20 --pretty
+cider knowledge list --stream /display/isBacklit --since 2026-09-01 --until 2026-09-02
+cider knowledge list --limit 100 --offset 100 # next page
+cider knowledge list --since 2026-09-01T12:00:00Z --envelope
+```
+
+`events` is an alias for `list`. Stream matching is exact. Time filters apply
+to event **start times**, with an inclusive `--since` and exclusive `--until`;
+they accept RFC 3339 timestamps or dates interpreted as local midnight.
+Results sort newest first, with a row-ID tie-breaker. Pagination is applied
+after filtering; new events can shift offsets between calls.
+
+Events include `id`, `stream`, UTC `start_date`, `end_date`, `creation_date`,
+`duration_seconds`, and the raw `value_string`, `value_integer`, `value_double`,
+and `value_type_code` fields when present. IDs use the stored UUID, falling
+back to `local:<rowid>` scoped to the current database. Durations are omitted
+for missing or reversed intervals. Numeric value fields can contain internal
+hashes rather than measurements; Cider preserves them without interpreting
+Apple's private type codes. Binary and structured metadata are not decoded.
+
+Available streams and retention depend on macOS and the device. This is the
+history currently retained in Knowledge, not a complete Screen Time report.
+Reads use SQLite read-only mode, including the live WAL. Missing, inaccessible,
+or incompatible databases fail explicitly; an empty store returns `[]`.
+Full Disk Access may be needed for the launching app; check
+`cider permissions --source knowledge` and `cider doctor` (`knowledge_database`).
+Library consumers can use `sources::knowledge::{list, streams, ListOptions}`
+without the `cli` feature.
 
 ### With the Bridge
 
@@ -385,7 +422,7 @@ ping a bridge that is already running — never an AppleEvent, never a launch.
 
 | Permission | Needed by | Granted to | How |
 |------------|-----------|------------|-----|
-| **Full Disk Access** | `messages`, `mail`, `safari`, `reading-list`, `photos`, `books`, `voice-memos`, `facetime`, `icloud account`, `stocks`, `shortcuts`, `home` (cache), `watch`, and the SQLite reads behind `calendar`, `reminders`, `contacts` | launching app | Privacy & Security › Full Disk Access: add the app by hand, then relaunch it. No prompt, no Info.plist key; `sudo` does not bypass it |
+| **Full Disk Access** | `messages`, `mail`, `safari`, `reading-list`, `photos`, `books`, `voice-memos`, `facetime`, `icloud account`, `stocks`, `shortcuts`, `knowledge`, `home` (cache), `watch`, and the SQLite reads behind `calendar`, `reminders`, `contacts` | launching app | Privacy & Security › Full Disk Access: add the app by hand, then relaunch it. No prompt, no Info.plist key; `sudo` does not bypass it |
 | **Calendars** | `calendar` through `cider-bridge` (EventKit) | launching app | Privacy & Security › Calendars → **Full Access**, not Add Only (Add Only hides every event). Current macOS shows no Calendar prompt to a command-line requester: the first call registers the app in the pane, and you set it by hand |
 | **Reminders** | `reminders` through `cider-bridge` | launching app | The first call prompts; grant Full Access. Afterwards: Privacy & Security › Reminders |
 | **Contacts** | `contacts` through `cider-bridge` | launching app | Privacy & Security › Contacts. Like Calendar, no prompt for a command-line requester: set it by hand after the first call |
@@ -400,7 +437,7 @@ reads straight from disk: `~/Library/Messages/chat.db`,
 `~/Library/Mail/V*/MailData/Envelope Index`, `~/Library/Safari/History.db`
 and `Bookmarks.plist`, the Photos library database, Books, Voice Memos, the
 call history, `~/Library/Accounts/Accounts4.sqlite`, the Stocks and Home
-containers, `~/Library/Shortcuts`, and the Calendar, Reminders, and Contacts
+containers, `~/Library/Shortcuts`, `~/Library/Application Support/Knowledge/knowledgeC.db`, and the Calendar, Reminders, and Contacts
 databases. `cider permissions` checks it by opening the Messages and Safari
 stores for reading, which never prompts — and it has to open them: a
 protected file's metadata reads fine even when opening it fails with EPERM.

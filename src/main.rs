@@ -107,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         action: Option<KeychainAction>,
     },
+    /// Read local activity events from Knowledge (knowledgeC.db)
+    Knowledge {
+        #[command(subcommand)]
+        action: Option<KnowledgeAction>,
+    },
     /// Interact with Apple Mail
     Mail {
         #[command(subcommand)]
@@ -1493,6 +1498,29 @@ fn parse_since(value: Option<&str>) -> anyhow::Result<Option<chrono::DateTime<ch
     )
 }
 
+#[derive(Subcommand)]
+enum KnowledgeAction {
+    /// List recent activity events, newest first (default: 100)
+    #[command(visible_alias = "events")]
+    List {
+        /// Exact stream name, such as /app/usage or /display/isBacklit
+        #[arg(long)]
+        stream: Option<String>,
+        /// Start time at or after this RFC 3339 timestamp or local date
+        #[arg(long)]
+        since: Option<String>,
+        /// Start time before this RFC 3339 timestamp or local date
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
+    /// List available streams with event counts and time ranges
+    Streams,
+}
+
 fn paginate_vec<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
     let offset = offset.unwrap_or(0);
     let iter = items.into_iter().skip(offset);
@@ -1717,6 +1745,13 @@ fn is_mutating_action(action: &str) -> bool {
 
 fn identifier_contract(source: &str) -> Option<serde_json::Value> {
     match source {
+        "knowledge" => Some(serde_json::json!({
+            "stable": true,
+            "field": "id",
+            "format": "core_data_uuid",
+            "fallback_format": "local:<rowid>",
+            "fallback_scope": "current database",
+        })),
         "calendar" => Some(serde_json::json!({
             "stable": true,
             "field": "id",
@@ -2840,6 +2875,37 @@ async fn run() -> anyhow::Result<()> {
             run_source!(sources::photo_booth::fetch(), cli.pretty, cli.envelope)
         }
         Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty, cli.envelope),
+        Commands::Knowledge { action } => match action {
+            Some(KnowledgeAction::Streams) => {
+                run_source!(sources::knowledge::streams(), cli.pretty, cli.envelope);
+            }
+            action => {
+                let options = match action {
+                    Some(KnowledgeAction::List {
+                        stream,
+                        since,
+                        until,
+                        limit,
+                        offset,
+                    }) => sources::knowledge::ListOptions {
+                        stream,
+                        since: parse_since(since.as_deref())?,
+                        until: parse_since(until.as_deref()).map_err(|error| {
+                            anyhow::anyhow!("{}", error.to_string().replace("--since", "--until"))
+                        })?,
+                        limit,
+                        offset,
+                    },
+                    _ => sources::knowledge::ListOptions::default(),
+                };
+                let records = sources::knowledge::list(&options).await?;
+                if cli.pretty && !cli.envelope {
+                    pretty::render_knowledge(io::stdout().lock(), &records)?;
+                } else {
+                    print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
+                }
+            }
+        },
         Commands::Safari { action } => match action {
             None | Some(SafariAction::Bookmarks) => {
                 run_source!(sources::safari::bookmarks(), cli.pretty, cli.envelope)
@@ -3625,6 +3691,51 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knowledge_cli_and_schema_describe_read_only_filters_and_ids() {
+        assert!(Cli::try_parse_from(["cider", "knowledge"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "knowledge", "streams"]).is_ok());
+        let parsed = Cli::try_parse_from([
+            "cider",
+            "knowledge",
+            "events",
+            "--stream",
+            "/app/usage",
+            "--since",
+            "2026-09-01",
+            "--until",
+            "2026-09-02",
+            "--limit",
+            "10",
+            "--offset",
+            "20",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Knowledge {
+                action: Some(KnowledgeAction::List {
+                    limit: 10,
+                    offset: 20,
+                    ..
+                })
+            }
+        ));
+        assert!(Cli::try_parse_from(["cider", "knowledge", "list", "--limit", "-1"]).is_err());
+        let schema = build_schema(Some("knowledge"));
+        assert_eq!(schema["supports_dry_run"], false);
+        assert_eq!(schema["stable_ids"], true);
+        assert_eq!(schema["identifiers"]["fallback_format"], "local:<rowid>");
+        let args = schema["list_args"].as_array().unwrap();
+        for flag in ["stream", "since", "until", "limit", "offset"] {
+            assert!(args.contains(&serde_json::json!(flag)));
+        }
+        for action in schema["actions"].as_array().unwrap() {
+            assert_eq!(action["kind"], "read");
+            assert_eq!(action["supports_dry_run"], false);
+        }
+    }
 
     #[test]
     fn parse_since_accepts_rfc3339_and_normalizes_to_utc() {
