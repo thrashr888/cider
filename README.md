@@ -239,6 +239,87 @@ module's `ListOptions`); Biome exposes its own `ListOptions` and `Namespace`.
 SEGB format references and protobuf field names are attributed in
 `src/sources/biome/FORMAT_LICENSE`.
 
+### What can you learn from local history?
+
+These examples use `jq` with Cider's default JSON output. Each query examines
+at most the requested number of retained records; counts describe that sample,
+not all activity. Add `--since` and `--until` before the pipe to narrow a time
+window. Availability depends on what macOS has retained.
+
+**Notifications: which apps send the most notifications?**
+
+Rank apps within the latest 1,000 retained notifications to find candidates
+for quieter notification settings. A stored notification does not prove you
+saw or read it.
+
+```bash
+cider notifications list --limit 1000 | jq '
+  group_by(.app)
+  | map({app: (.[0].app // "unknown"), notifications: length})
+  | sort_by(.notifications) | reverse
+'
+```
+
+**Downloads: which app recorded a download, and where did it come from?**
+
+Inspect recent download events to identify the recording app and time, plus
+the source URL and referring page when present. Some stores retain no URLs;
+`null` means the origin is unavailable. The record can survive after the file
+is moved or deleted, so it does not establish that the file is still on disk.
+
+```bash
+cider downloads list --limit 20 | jq '
+  [.[] | {timestamp, app: (.app // .agent_name),
+          url, origin_url, origin_title}]
+'
+```
+
+**Interactions: who appears in recent communication records, and in which app?**
+
+Show the participants and app for each recorded interaction. This can help
+retrace a conversation across apps, but participants may include your own
+identity, and records do not include message bodies. Names fall back to
+identifiers or local contact IDs when unavailable.
+
+```bash
+cider interactions list --limit 20 | jq '
+  def person: if . == null then null
+              else (.display_name // .identifier // .id) end;
+  [.[] | {start_date, app,
+          sender: (.sender | person),
+          recipients: [.recipients[] | person]}]
+'
+```
+
+**Biome: which apps did you switch into, and when?**
+
+Build a chronological view of focus-entry events from the latest 100
+`App.InFocus` records. Only records with valid checksums and a decoded app
+identifier are included. These are app switches, not measurements of attention
+or time spent.
+
+```bash
+cider biome list --stream App.InFocus --limit 100 | jq '
+  [.[] | select(.crc_valid and .status_code == 1 and .app != null)
+   | {timestamp, app}]
+  | sort_by(.timestamp)
+'
+```
+
+**Knowledge: what app-usage intervals were recorded?**
+
+Inspect recorded start/end times and durations to reconstruct an activity
+window. Intervals can overlap, and filtering by start time does not trim an
+interval at the window boundary, so summing durations is not a reliable total
+of screen time.
+
+```bash
+cider knowledge list --stream /app/usage --limit 20 | jq '
+  [.[] | {app: .value_string, start: .start_date,
+          end: .end_date, seconds: .duration_seconds}]
+'
+```
+
 ### With the Bridge
 
 These need the optional Swift helper described under [Bridge](#bridge); `cider bridge status` says what you have.
