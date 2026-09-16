@@ -25,8 +25,10 @@ required-features = ["cli"]
 # install cider-cli` and `cargo build` still produce the binary; a library
 # consumer turns it off (`default-features = false`) and compiles neither an
 # argument parser nor a table renderer it will never call.
-default = ["cli"]
+default = ["cli", "mcp"]
 cli = ["dep:clap"]
+# Optional transport adapter; library consumers can omit the MCP SDK entirely.
+mcp = ["dep:rmcp", "dep:schemars"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +38,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 notify = "6"
 plist = "1"
+rmcp = { version = "3.4", default-features = false, features = ["server", "transport-io"], optional = true }
+schemars = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

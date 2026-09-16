@@ -41,6 +41,10 @@
 
 pub mod sources;
 
+/// Read-only Model Context Protocol adapter (optional `mcp` feature).
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 pub use sources::doctor::{self, inspect, DoctorReport};
 pub use sources::permissions::{
     self, report, GrantedTo, Permission, PermissionStatus, PermissionsReport, Requirement,

@@ -19,6 +19,8 @@ Manage your Mac from the command line. Reminders, Calendar, Contacts, Notes, Mai
 - **Full-fidelity PIM data.** Contacts return labeled multi-value fields and
   richer profile data; Calendar, Mail, and Reminders expose deeper read and
   mutation APIs without truncating content.
+- **Local MCP server.** `cider mcp` exposes selected read-only sources as typed
+  tools, using the same library as the CLI. See [MCP setup](#mcp-server).
 - **Prompt-free diagnostics.** `cider doctor` and `cider auth-status` inspect
   tools, data stores, and access state without triggering macOS permission
   dialogs.
@@ -330,6 +332,114 @@ These need the optional Swift helper described under [Bridge](#bridge); `cider b
 | `weather [--forecast] [--days N] [--home <name> \| --lat --lon]` | WeatherKit current conditions or daily forecast, with Apple's required `attribution` |
 | `reminders create\|update\|complete\|reopen\|delete\|batch-*`, `calendar create\|update\|delete` | Same commands, EventKit instead of AppleScript when `cider-bridge` is installed (`--envelope` says `"source": "cli"\|"native"`) |
 | `watch [--source …] [--via auto\|cli\|fsevents]` | One JSON line per store change; EventKit/Contacts notifications with the CLI, FSEvents otherwise |
+
+## MCP server
+
+Run Cider as a local [Model Context Protocol](https://modelcontextprotocol.io/)
+server so an assistant can discover and call its read-only tools:
+
+```bash
+cider mcp
+# Expose only the sources this client needs:
+cider mcp --sources knowledge,notifications,downloads,interactions,biome
+```
+
+The client launches this command and communicates over stdio. No port,
+background service, or separate runtime is needed. In a terminal it waits for
+MCP messages; normal tool output arrives in the client. The server exits when
+the client closes stdin. `--pretty`, `--envelope`, and `--dry-run` are rejected
+because stdout is reserved for MCP protocol messages.
+
+For clients that use an `mcpServers` configuration, add:
+
+```json
+{
+  "mcpServers": {
+    "cider": {
+      "command": "/opt/homebrew/bin/cider",
+      "args": ["mcp", "--sources", "knowledge,notifications,downloads,interactions,biome"]
+    }
+  }
+}
+```
+
+Replace `command` with the absolute path printed by `command -v cider`.
+For a development build, use the absolute path to `target/release/cider`
+after running `cargo build --release`. Restart or reconnect the client after
+changing its configuration. This setup example exposes only the five history
+sources; add `calendar`, `reminders`, or `doctor` to enable those tools.
+
+### Available MCP tools
+
+With no `--sources` option, all eight sources below are enabled. An explicit
+list replaces that default. Unknown source names fail at startup, and disabled
+tools are excluded from discovery and cannot be invoked by name. This first
+version exposes the following subset of Cider; it has no write tools or generic
+shell/CLI execution tool.
+
+| Source | Tools | Useful question |
+|--------|-------|-----------------|
+| `knowledge` | `knowledge_list`, `knowledge_streams` | What app-usage intervals were recorded yesterday? |
+| `notifications` | `notifications_list` | Which apps dominate my retained notifications? |
+| `downloads` | `downloads_list` | Which app recorded these download events? |
+| `interactions` | `interactions_list` | Who appears in recent communication metadata? |
+| `biome` | `biome_list`, `biome_streams` | Which apps did I switch into? |
+| `calendar` | `calendar_list`, `calendar_calendars` | What events are coming up? |
+| `reminders` | `reminders_list`, `reminders_lists` | What incomplete reminders are on my Shopping list? |
+| `doctor` | `doctor` | Which local stores are available, and what access is missing? |
+
+Arguments are typed and discoverable through MCP `tools/list`. For example,
+a client can call `knowledge_list` with:
+
+```json
+{
+  "stream": "/app/usage",
+  "since": "2026-09-14",
+  "until": "2026-09-15",
+  "limit": 20
+}
+```
+
+Tool results contain `structuredContent` with `{"ok": true, "data": ...}`
+and a text content block containing the same JSON for client compatibility.
+Records preserve the CLI's field names and values. Source failures, invalid
+arguments, and size/time limits return `isError: true` with
+`{"ok": false, "error": {"code": "...", "message": "..."}}`; an unknown or
+disabled tool produces a protocol error. Neither requires restarting the server.
+
+All list/stream-discovery tools default to 100 records and accept `limit`
+(0–1000) and `offset`; their sum must not exceed 10000. Increase `offset` by
+the number returned to continue, and stop at an empty page. Results reflect
+live stores, so intervening changes can shift pages. Calendar events sort by
+start date then ID, reminders by ID, and calendar/reminder list names
+alphabetically. Other sources keep their CLI ordering. Calendar and Reminders
+paginate after their source query; limiting output does not limit the underlying
+store scan. `doctor` returns a report and takes no arguments.
+
+History `since`/`until` filters are inclusive/exclusive and accept RFC 3339 or
+local-midnight dates. Calendar and Reminders use `since` for **modification
+time**, matching the CLI. Calendar defaults to 7 days back and 30 days ahead;
+each bound is capped at 365 days. Each successful JSON payload is limited to
+1 MiB (it is duplicated in structured and text content), with a 60-second
+per-call deadline and at most four active reads. Oversized results fail
+explicitly; narrow filters, lower `limit`, or omit Biome `raw` to retry.
+
+### Permissions and builds
+
+The app launching Cider needs the same macOS permissions as CLI usage; a
+terminal's Full Disk Access grant does not necessarily apply to an MCP client.
+Use `cider permissions --source <source>` for guidance. Discovery does not
+read personal stores or open prompts. Calendar reads may fall back to app
+automation; calendar-name and reminder-list discovery use app automation.
+Those calls may request authorization. Enabling `doctor`
+exposes store/access diagnostics for all sources, even those not enabled as
+MCP tools. Returned content is local user data, not instructions, and the
+client/model receives the data its enabled tools return.
+
+MCP uses the official Rust SDK and is included in default builds. Building
+with MCP requires Rust 1.88 or newer. Library consumers using
+`default-features = false` do not pull in MCP or Clap. To build the CLI without
+MCP, use `cargo build --release --no-default-features --features cli`.
 
 ## Output
 

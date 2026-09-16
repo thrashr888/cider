@@ -48,7 +48,7 @@ pub use local_store::HistoryOptions;
 /// The result every mutating call returns (`create`, `complete`, `update`, …).
 /// Re-exported because those signatures name it: the rest of `util` is
 /// AppleScript/subprocess plumbing that callers have no business reaching.
-pub use util::{ActionResult, BatchActionResult, BatchItemResult};
+pub use util::{parse_timestamp, ActionResult, BatchActionResult, BatchItemResult};
 pub mod voice_memos;
 pub mod watch;
 pub mod weather;

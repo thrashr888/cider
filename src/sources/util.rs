@@ -373,6 +373,29 @@ pub fn escape_applescript(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+/// Parse RFC 3339 or a local calendar date (midnight), shared by CLI and MCP.
+pub fn parse_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
+    let value = value.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(dt.with_timezone(&chrono::Utc));
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let midnight = date
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is a valid time")
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .ok_or_else(|| {
+                anyhow::anyhow!("timestamp {value:?}: that day has no local midnight (DST gap)")
+            })?;
+        return Ok(midnight.with_timezone(&chrono::Utc));
+    }
+    anyhow::bail!(
+        "invalid timestamp {value:?}: expected RFC 3339 (2026-09-01T00:00:00Z) or a date \
+         (2026-09-01, local midnight)"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

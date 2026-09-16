@@ -38,6 +38,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Serve read-only tools over Model Context Protocol (stdio)
+    #[cfg(feature = "mcp")]
+    Mcp {
+        /// Comma-separated sources exposed to the MCP client
+        #[arg(long, value_delimiter = ',', default_value = cider::mcp::DEFAULT_SOURCES,
+              value_parser = clap::builder::PossibleValuesParser::new(cider::mcp::SOURCE_NAMES))]
+        sources: Vec<String>,
+    },
     /// Show CPU, memory, and top processes (Activity Monitor)
     #[command(name = "activity-monitor")]
     ActivityMonitor,
@@ -1494,28 +1502,13 @@ fn print_batch_output(
 /// sources compare it against store timestamps, so it must become an
 /// instant either way.
 fn parse_since(value: Option<&str>) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Ok(Some(dt.with_timezone(&chrono::Utc)));
-    }
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        let midnight = date
-            .and_hms_opt(0, 0, 0)
-            .expect("00:00:00 is a valid time")
-            .and_local_timezone(chrono::Local)
-            .earliest()
-            .ok_or_else(|| {
-                anyhow::anyhow!("--since {value:?}: that day has no local midnight (DST gap)")
-            })?;
-        return Ok(Some(midnight.with_timezone(&chrono::Utc)));
-    }
-    anyhow::bail!(
-        "invalid --since {value:?}: expected RFC 3339 (2026-09-01T00:00:00Z) or a date \
-         (2026-09-01, local midnight)"
-    )
+    value
+        .map(sources::parse_timestamp)
+        .transpose()
+        .map_err(|error| {
+            // Preserve the CLI's existing flag-specific error wording.
+            anyhow::anyhow!(error.to_string().replacen("timestamp", "--since", 1))
+        })
 }
 
 #[derive(clap::Args)]
@@ -1765,6 +1758,12 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
         }
         if name == "mail" {
             schema["friendly_mailboxes"] = serde_json::json!(true);
+        }
+        if name == "mcp" {
+            schema["transport"] = serde_json::json!("stdio");
+            schema["capabilities"] = serde_json::json!(["mcp", "read_only_tools"]);
+            schema["unsupported_global_flags"] =
+                serde_json::json!(["--pretty", "--envelope", "--dry-run"]);
         }
         if name == "schema" {
             schema["capabilities"] = serde_json::json!(["schema"]);
@@ -2153,6 +2152,14 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(feature = "mcp")]
+        Commands::Mcp { sources } => {
+            anyhow::ensure!(
+                !cli.pretty && !cli.envelope && !cli.no_op,
+                "invalid options: mcp uses protocol output; --pretty, --envelope and --dry-run are not supported"
+            );
+            cider::mcp::serve_stdio(&sources).await?;
+        }
         Commands::ActivityMonitor => {
             run_source!(sources::activity_monitor::fetch(), cli.pretty, cli.envelope)
         }
@@ -3836,6 +3843,27 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_source_selection_and_schema_are_discoverable() {
+        let cli = Cli::try_parse_from(["cider", "mcp", "--sources", "knowledge,biome"]).unwrap();
+        match cli.command {
+            Commands::Mcp { sources } => assert_eq!(sources, ["knowledge", "biome"]),
+            _ => unreachable!(),
+        }
+        for source in ["keychain", "unknown", ""] {
+            assert!(Cli::try_parse_from(["cider", "mcp", "--sources", source]).is_err());
+        }
+        assert!(Cli::try_parse_from(["cider", "mcp"]).is_ok());
+        let schema = build_schema(Some("mcp"));
+        assert_eq!(schema["supports_dry_run"], false);
+        assert!(schema["arguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == "sources"));
+    }
 
     #[test]
     fn local_history_commands_and_schemas_match_the_readers() {
