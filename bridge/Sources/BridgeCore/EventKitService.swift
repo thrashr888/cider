@@ -520,14 +520,17 @@ public enum PermissionHelp {
 
 /// Registers every `calendar.*` and `reminders.*` command against `service`.
 /// Shared by the CLI (with `EKEventKitService`) and the tests (with a fake).
-public func registerEventKitCommands(_ router: CommandRouter, service: some EventKitService) async {
+public func registerEventKitCommands(
+    _ router: CommandRouter, service: some EventKitService,
+    now: @escaping @Sendable () -> Date = { Date() }
+) async {
     await router.register("calendar.calendars") { _ in
         try JSONValue(encoding: try await service.calendars())
     }
 
     await router.register("calendar.list") { raw in
         let args = Args(raw)
-        let window = try CalendarWindow.parse(args)
+        let window = try CalendarWindow.parse(args, now: now())
         let since = try args.date("since")
         let rows = try await service.events(from: window.from, to: window.to, calendar: try args.string("calendar"))
         return try JSONValue(encoding: SinceFilter.apply(rows, since: since, modifiedAt: \.modifiedAt))

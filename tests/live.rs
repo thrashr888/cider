@@ -64,6 +64,10 @@ const SKIP: &[(&str, &str)] = &[
     ("weather", "launches Cider Bridge and needs WeatherKit"),
     ("schema", "not a data source"),
     (
+        "mcp",
+        "stdio protocol server; covered by MCP integration tests",
+    ),
+    (
         "spotlight",
         "requires --query; covered by an explicit case below",
     ),

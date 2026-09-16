@@ -79,13 +79,22 @@ final class CLITests: XCTestCase {
 
     func testCoalescerFoldsBurstsPerSource() async throws {
         let box = EventBox()
-        let coalescer = WatchCoalescer(window: .milliseconds(60)) { event in Task { await box.append(event) } }
+        let firstBurst = expectation(description: "first burst emitted")
+        firstBurst.expectedFulfillmentCount = 2
+        let laterBurst = expectation(description: "later burst emitted")
+        let coalescer = WatchCoalescer(window: .milliseconds(500)) { event in
+            Task {
+                await box.append(event)
+                if await box.events.count <= 2 { firstBurst.fulfill() }
+                else { laterBurst.fulfill() }
+            }
+        }
         let first = Date()
         for _ in 0..<5 { await coalescer.note(.calendar, at: first) }
         await coalescer.note(.contacts)
         await coalescer.note(.calendar, at: first.addingTimeInterval(1))
 
-        try await Task.sleep(for: .milliseconds(150))
+        await fulfillment(of: [firstBurst], timeout: 5)
         var events = await box.events
         XCTAssertEqual(events.map(\.source).sorted { $0.rawValue < $1.rawValue }, [.calendar, .contacts])
         // The burst is stamped with its first notification.
@@ -94,7 +103,7 @@ final class CLITests: XCTestCase {
 
         // A later change, after the window closed, is a new event.
         await coalescer.note(.calendar)
-        try await Task.sleep(for: .milliseconds(150))
+        await fulfillment(of: [laterBurst], timeout: 5)
         events = await box.events
         XCTAssertEqual(events.filter { $0.source == .calendar }.count, 2)
         XCTAssertEqual(events.filter { $0.source == .contacts }.count, 1)

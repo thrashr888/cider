@@ -57,6 +57,9 @@ final class LineSocketServerTests: XCTestCase {
         let rejected = try LineSocketClient(path: path)
         rejected.send(#"{"id": 1, "cmd": "ping"}"#)
         XCTAssertThrowsError(try rejected.readLine())
+        // Exercise EPIPE deterministically, after the peer's EOF is observed.
+        rejected.send("after-close")
+        rejected.sendRaw([0x0A])
 
         // The server is still serving: a later peer gets the same policy answer,
         // and stop/start with the default policy admits us again.

@@ -27,6 +27,14 @@ final class LineSocketClient {
             close(fd)
             throw LineSocketServer.SocketError.posix("connect", code)
         }
+        // A rejected peer may close before the test writes its request. Match
+        // the server's socket option so EPIPE cannot terminate the test runner.
+        var one: Int32 = 1
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            let code = errno
+            close(fd)
+            throw LineSocketServer.SocketError.posix("setsockopt", code)
+        }
         var timeout = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }

@@ -14,7 +14,7 @@ final class EventKitCommandsTests: XCTestCase {
             calendars: Fixtures.calendars, events: Fixtures.events, lists: Fixtures.lists, reminders: Fixtures.reminders)
         contacts = FakeContactsService(rows: Fixtures.contacts)
         router = CommandRouter(version: "test")
-        await registerEventKitCommands(router, service: eventKit)
+        await registerEventKitCommands(router, service: eventKit, now: { Fixtures.now })
         await registerContactsCommands(router, service: contacts)
     }
 
@@ -232,12 +232,12 @@ final class EventKitCommandsTests: XCTestCase {
     }
 
     func testCalendarListUsesDefaultWindowAndSince() async throws {
-        let before = Date()
+        let before = Fixtures.now
         let all = try await data([CalendarEventRow].self, "calendar.list")
         XCTAssertEqual(all.map(\.id), ["ev-standup", "ev-bday"])  // ev-old is before −7d, ev-far after +30d
         let query = await eventKit.eventQueries.last!
-        XCTAssertEqual(query.from.timeIntervalSince1970, before.addingTimeInterval(-7 * 86_400).timeIntervalSince1970, accuracy: 5)
-        XCTAssertEqual(query.to.timeIntervalSince1970, before.addingTimeInterval(30 * 86_400).timeIntervalSince1970, accuracy: 5)
+        XCTAssertEqual(query.from.timeIntervalSince1970, before.addingTimeInterval(-7 * 86_400).timeIntervalSince1970)
+        XCTAssertEqual(query.to.timeIntervalSince1970, before.addingTimeInterval(30 * 86_400).timeIntervalSince1970)
         XCTAssertNil(query.calendar)
 
         let since = try await data([CalendarEventRow].self, "calendar.list", ["since": "2026-09-01T00:00:00-07:00"])
