@@ -56,7 +56,7 @@ const READ_VERBS: &[&str] = &[
 /// Flags that consume the next token as a value. Any other flag is taken
 /// as bare, so the token after it is still checked as a verb: an unknown
 /// value-taking flag fails loudly instead of letting a verb slip past.
-const VALUE_FLAGS: &[&str] = &["--days", "--minutes", "--query", "--since"];
+const VALUE_FLAGS: &[&str] = &["--days", "--minutes", "--query", "--since", "--stream"];
 
 /// Commands the generic walk must not run as-is, and why.
 const SKIP: &[(&str, &str)] = &[
@@ -79,6 +79,11 @@ fn explicit_cases() -> Vec<Vec<&'static str>> {
         vec!["reminders", "list", "--since", "2000-01-01T00:00:00Z"],
         vec!["calendar", "list", "--since", "2000-01-01T00:00:00Z"],
         vec!["icloud", "list"],
+        vec!["notifications", "list"],
+        vec!["downloads", "list"],
+        vec!["interactions", "list"],
+        vec!["biome", "streams"],
+        vec!["biome", "list", "--stream", "App.InFocus"],
         vec!["knowledge", "streams"],
         vec!["knowledge", "list", "--since", "2000-01-01T00:00:00Z"],
     ]
@@ -93,6 +98,10 @@ const STORE_BACKED: &[(&str, &[&str])] = &[
     ("home_cache", &["home"]),
     ("shortcuts_database", &["shortcuts"]),
     ("knowledge_database", &["knowledge"]),
+    ("notifications_database", &["notifications"]),
+    ("downloads_database", &["downloads"]),
+    ("interactions_database", &["interactions"]),
+    ("biome_streams", &["biome", "streams"]),
     ("icloud_drive", &["icloud", "list"]),
 ];
 

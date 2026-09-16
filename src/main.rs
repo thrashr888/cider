@@ -48,6 +48,11 @@ enum Commands {
     AuthStatus,
     /// List Automator workflows
     Automator,
+    /// Read retained Biome activity streams
+    Biome {
+        #[command(subcommand)]
+        action: Option<BiomeAction>,
+    },
     /// List paired Bluetooth devices
     Bluetooth,
     /// Fetch books from Apple Books
@@ -84,6 +89,21 @@ enum Commands {
     FaceTime {
         #[command(subcommand)]
         action: Option<FaceTimeAction>,
+    },
+    /// Read download origins retained in the quarantine database
+    Downloads {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+    },
+    /// Read Core Duet communication interaction metadata
+    Interactions {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+    },
+    /// Read retained Notification Center notifications
+    Notifications {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
     },
     /// List installed fonts (Font Book)
     Fonts,
@@ -1498,6 +1518,89 @@ fn parse_since(value: Option<&str>) -> anyhow::Result<Option<chrono::DateTime<ch
     )
 }
 
+#[derive(clap::Args)]
+struct TimePageArgs {
+    /// Timestamp at or after this RFC 3339 timestamp or local date
+    #[arg(long)]
+    since: Option<String>,
+    /// Timestamp before this RFC 3339 timestamp or local date
+    #[arg(long)]
+    until: Option<String>,
+    /// Maximum records (0-10000)
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Skip this many matching records
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+impl TimePageArgs {
+    fn into_options(self, app: Option<String>) -> anyhow::Result<sources::HistoryOptions> {
+        Ok(sources::HistoryOptions {
+            app,
+            since: parse_since(self.since.as_deref())?,
+            until: parse_since(self.until.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", e.to_string().replace("--since", "--until")))?,
+            limit: self.limit,
+            offset: self.offset,
+        })
+    }
+}
+#[derive(clap::Args)]
+struct HistoryArgs {
+    /// Exact application bundle identifier
+    #[arg(long)]
+    app: Option<String>,
+    #[command(flatten)]
+    page: TimePageArgs,
+}
+#[derive(Subcommand)]
+enum HistoryAction {
+    /// List retained records, newest first (default: 100)
+    List(HistoryArgs),
+}
+fn history_options(action: Option<HistoryAction>) -> anyhow::Result<sources::HistoryOptions> {
+    match action {
+        Some(HistoryAction::List(args)) => args.page.into_options(args.app),
+        None => Ok(sources::HistoryOptions::default()),
+    }
+}
+#[derive(Subcommand)]
+enum BiomeAction {
+    /// List available local streams and segment sizes (default)
+    Streams,
+    /// Read retained SEGB events from one stream, newest first
+    #[command(visible_alias = "events")]
+    List {
+        /// Exact stream name, for example App.InFocus or ScreenTime.AppUsage
+        #[arg(long)]
+        stream: String,
+        #[arg(long, default_value="restricted", value_parser=["restricted","public"])]
+        namespace: String,
+        #[command(flatten)]
+        page: TimePageArgs,
+        /// Include original payload bytes as hexadecimal
+        #[arg(long)]
+        raw: bool,
+    },
+}
+fn print_history_output<T: serde::Serialize>(
+    source: &str,
+    records: &[T],
+    human: bool,
+    envelope: bool,
+) -> anyhow::Result<()> {
+    let value = serde_json::to_value(records)?;
+    if human && !envelope {
+        pretty::render_history(
+            io::stdout().lock(),
+            source,
+            value.as_array().expect("serialized slice"),
+        )
+    } else {
+        print_output(&value, human, envelope)
+    }
+}
+
 #[derive(Subcommand)]
 enum KnowledgeAction {
     /// List recent activity events, newest first (default: 100)
@@ -1745,6 +1848,12 @@ fn is_mutating_action(action: &str) -> bool {
 
 fn identifier_contract(source: &str) -> Option<serde_json::Value> {
     match source {
+        "notifications" | "downloads" | "interactions" => Some(serde_json::json!({
+            "stable":true, "field":"id", "format":"stored_uuid", "fallback_format":"local:<rowid>", "fallback_scope":"current database",
+        })),
+        "biome" => Some(serde_json::json!({
+            "stable":true,"field":"id","format":"<namespace>:<stream>:<segment>:<offset>","scope":"retained local segment",
+        })),
         "knowledge" => Some(serde_json::json!({
             "stable": true,
             "field": "id",
@@ -2875,6 +2984,42 @@ async fn run() -> anyhow::Result<()> {
             run_source!(sources::photo_booth::fetch(), cli.pretty, cli.envelope)
         }
         Commands::Photos => run_source!(sources::photos::fetch(), cli.pretty, cli.envelope),
+        Commands::Notifications { action } => {
+            let records = sources::notifications::list(&history_options(action)?).await?;
+            print_history_output("notifications", &records, cli.pretty, cli.envelope)?;
+        }
+        Commands::Downloads { action } => {
+            let records = sources::downloads::list(&history_options(action)?).await?;
+            print_history_output("downloads", &records, cli.pretty, cli.envelope)?;
+        }
+        Commands::Interactions { action } => {
+            let records = sources::interactions::list(&history_options(action)?).await?;
+            print_history_output("interactions", &records, cli.pretty, cli.envelope)?;
+        }
+        Commands::Biome { action } => match action {
+            None | Some(BiomeAction::Streams) => {
+                run_source!(sources::biome::streams(), cli.pretty, cli.envelope);
+            }
+            Some(BiomeAction::List {
+                stream,
+                namespace,
+                page,
+                raw,
+            }) => {
+                let page = page.into_options(None)?;
+                let options = sources::biome::ListOptions {
+                    stream,
+                    namespace: namespace.parse()?,
+                    since: page.since,
+                    until: page.until,
+                    limit: page.limit,
+                    offset: page.offset,
+                    raw,
+                };
+                let records = sources::biome::list(&options).await?;
+                print_history_output("biome", &records, cli.pretty, cli.envelope)?;
+            }
+        },
         Commands::Knowledge { action } => match action {
             Some(KnowledgeAction::Streams) => {
                 run_source!(sources::knowledge::streams(), cli.pretty, cli.envelope);
@@ -3691,6 +3836,80 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_history_commands_and_schemas_match_the_readers() {
+        for source in ["notifications", "downloads", "interactions"] {
+            assert!(Cli::try_parse_from(["cider", source]).is_ok());
+            let cli = Cli::try_parse_from([
+                "cider",
+                source,
+                "list",
+                "--app",
+                "com.test",
+                "--since",
+                "2026-09-01",
+                "--until",
+                "2026-09-02",
+                "--limit",
+                "5",
+                "--offset",
+                "10",
+            ])
+            .unwrap();
+            let action = match cli.command {
+                Commands::Notifications { action }
+                | Commands::Downloads { action }
+                | Commands::Interactions { action } => action,
+                _ => panic!("wrong source"),
+            };
+            let options = history_options(action).unwrap();
+            assert_eq!(options.app.as_deref(), Some("com.test"));
+            assert_eq!(options.limit, 5);
+            assert_eq!(options.offset, 10);
+            let schema = build_schema(Some(source));
+            assert_eq!(schema["supports_dry_run"], false);
+            assert_eq!(schema["stable_ids"], true);
+            for flag in ["app", "since", "until", "limit", "offset"] {
+                assert!(schema["list_args"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(flag)));
+            }
+        }
+        assert!(Cli::try_parse_from(["cider", "biome"]).is_ok());
+        assert!(Cli::try_parse_from(["cider", "biome", "list"]).is_err());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "biome",
+            "events",
+            "--stream",
+            "App.InFocus",
+            "--namespace",
+            "public",
+            "--raw"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "biome",
+            "list",
+            "--stream",
+            "x",
+            "--namespace",
+            "elsewhere"
+        ])
+        .is_err());
+        let schema = build_schema(Some("biome"));
+        assert_eq!(schema["supports_dry_run"], false);
+        assert_eq!(
+            schema["identifiers"]["format"],
+            "<namespace>:<stream>:<segment>:<offset>"
+        );
+        for action in schema["actions"].as_array().unwrap() {
+            assert_eq!(action["kind"], "read");
+        }
+    }
 
     #[test]
     fn knowledge_cli_and_schema_describe_read_only_filters_and_ids() {

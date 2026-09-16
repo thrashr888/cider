@@ -30,6 +30,7 @@ cli = ["dep:clap"]
 
 [dependencies]
 anyhow = "1"
+crc32fast = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"

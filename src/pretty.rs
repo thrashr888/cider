@@ -16,6 +16,24 @@ const MAX_COL_WIDTH: usize = 50;
 const MAX_COLS: usize = 8;
 
 #[cfg(test)]
+mod history_tests {
+    #[test]
+    fn renders_all_sources_and_keeps_json_control_characters_unchanged() {
+        let value = serde_json::json!({"app":"com.test","title":"a\nb\u{001b}","body":"hello","timestamp":"now","payload":{"format":"opaque","reason":"bad"}});
+        let before = value.clone();
+        for source in ["notifications", "downloads", "interactions", "biome"] {
+            let mut out = Vec::new();
+            super::render_history(&mut out, source, std::slice::from_ref(&value)).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("com.test"));
+            assert!(text.contains("1 items"));
+            assert!(!text.contains("a\nb"));
+        }
+        assert_eq!(value, before);
+    }
+}
+
+#[cfg(test)]
 mod knowledge_tests {
     #[test]
     fn knowledge_table_keeps_columns_for_values_absent_from_first_event() {
@@ -56,6 +74,52 @@ pub fn render_knowledge<W: Write>(
             "value_double",
         ],
     )
+}
+
+/// Stable column selection for heterogeneous retained-history records.
+pub fn render_history<W: Write>(
+    w: W,
+    source: &str,
+    items: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    let columns: &[&str] = match source {
+        "notifications" => &["delivered_at", "app", "title", "body", "decode_error"],
+        "downloads" => &["timestamp", "app", "url", "origin_url"],
+        "interactions" => &[
+            "start_date",
+            "app",
+            "sender",
+            "recipients",
+            "direction_code",
+        ],
+        "biome" => &[
+            "timestamp",
+            "stream",
+            "app",
+            "status_code",
+            "crc_valid",
+            "payload",
+        ],
+        _ => anyhow::bail!("Unknown history presentation: {source}"),
+    };
+    // Stored notification text can contain line breaks or terminal control codes.
+    // Normalize only this presentation copy; machine-readable JSON is untouched.
+    fn clean(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => {
+                *s = s
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect()
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(clean),
+            serde_json::Value::Object(o) => o.values_mut().for_each(clean),
+            _ => {}
+        }
+    }
+    let mut display = items.to_vec();
+    display.iter_mut().for_each(clean);
+    render_table_with_columns(w, &display, columns)
 }
 
 pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<()> {

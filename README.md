@@ -127,6 +127,9 @@ cider spotlight --query "quarterly report"
 
 Activity Monitor, Apps, Automator, Bluetooth, Books, Clock, Console, Disks, Fonts, Home (`list`, `homes`, `rooms`, `accessories`, `scenes`), iCloud (`account`, `quota`, `status`, `log`, `list` — placeholder-aware, never downloads), Knowledge (`list`, `streams` — local activity history), Photo Booth, Photos, Spotlight, Stocks (`list`, `watchlists`, `quote`), Voice Memos, Weather (`current`, `--forecast`; needs Cider Bridge)
 
+Notifications (`list`), Downloads (`list`), Interactions (`list`), and Biome
+(`streams`, `list`) also expose retained local history.
+
 ### Knowledge activity history
 
 Read the local Core Duet store at
@@ -163,6 +166,78 @@ Full Disk Access may be needed for the launching app; check
 `cider permissions --source knowledge` and `cider doctor` (`knowledge_database`).
 Library consumers can use `sources::knowledge::{list, streams, ListOptions}`
 without the `cli` feature.
+
+### Notifications, download origins, interactions, and Biome
+
+```bash
+cider notifications list --limit 20 --pretty
+cider notifications list --app com.apple.MobileSMS --since 2026-09-01
+cider downloads list --app com.apple.Safari --limit 20 --pretty
+cider interactions list --since 2026-09-01 --until 2026-09-02 --envelope
+cider biome streams --pretty
+cider biome list --stream App.InFocus --limit 20 --pretty
+cider biome list --stream ScreenTime.AppUsage --since 2026-09-01
+cider biome list --stream Device.Wireless.WiFi --limit 5 --raw
+```
+
+All four sources are read-only. The first three default to `list`, returning
+100 records newest first. `--app` matches an exact bundle identifier.
+`--since` is inclusive and `--until` exclusive; both accept RFC 3339 or a
+local calendar date. They filter notification delivery times, quarantine
+event times, or interaction start times. `--limit` (0–10000) and `--offset`
+apply after filtering, with deterministic tie-breaking. New records or
+retention changes can shift pages between calls.
+
+| Source | Store and output |
+|--------|------------------|
+| `notifications` | `~/Library/Group Containers/group.com.apple.usernoted/db2/db`, falling back to the older `DARWIN_USER_DIR/com.apple.notificationcenter/db2/db`. Returns app, delivery/request times, presented state, title, subtitle, body, and identifier. Binary plists are decoded in Rust. Localized non-string text is retained in `localized_content`; malformed payloads keep their metadata and carry `decode_error`. |
+| `downloads` | `~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2`. Returns the downloading app/agent, event time, data URL, origin URL/title, sender metadata, and raw quarantine type code. This is retained quarantine history, not a Downloads folder listing or a complete record of transfers. It never opens URLs or changes quarantine attributes. |
+| `interactions` | `/private/var/db/CoreDuet/People/interactionC.db`. Returns app, start/end times, sender and recipient metadata, account, content URL, and raw direction/mechanism codes. Missing contact records retain their local IDs. These are donated interaction records, not message bodies or a complete communication history. |
+| `biome` | `~/Library/Biome/streams/{restricted,public}/<stream>/local/`. Defaults to `streams`, listing segment counts and bytes, including empty streams. `list` (alias `events`) requires `--stream`; `--namespace public` selects the other namespace. Only local segments are read; remote-device directories and tombstone files are excluded. |
+
+SQLite stores are opened with `-readonly` and include their live WAL.
+Notifications, downloads, and interactions use stored UUIDs for event IDs,
+falling back to `local:<rowid>` scoped to that database. Participant IDs
+are always local row IDs. Missing/inaccessible stores and incompatible SQL
+schemas fail explicitly; successfully queried empty stores return `[]`.
+
+Biome supports SEGB v1 and v2 framing, skips deleted/unwritten entries,
+checks CRC32, and orders matching events by record timestamp and ID across
+segments before pagination. IDs are `<namespace>:<stream>:<segment>:<offset>`
+and remain meaningful while the segment is retained. `timestamp` and optional
+`end_timestamp` come from the segment record, not inferred payload fields.
+Common protobuf fields are named for `App.InFocus`, `App.WebUsage`,
+`ScreenTime.AppUsage`, `Device.Wireless.WiFi`, `Device.Wireless.Bluetooth`,
+`Notification.Usage`, and `SystemSettings.SearchTerms`. App focus and Screen
+Time status codes retain 0/1 (out of/in focus); Wi-Fi and Bluetooth retain
+0/1 (disconnected/connected).
+
+`payload.format` is `protobuf`, `plist`, or `opaque`. Protobuf fields retain
+their field numbers, repeated occurrences, wire types, and values; unknown
+fixed-width fields remain hex, and length-delimited fields expose readable
+UTF-8 or hex without guessing embedded schemas. The `text` representation
+means readable UTF-8, not a verified protobuf string type. Binary plists, including those embedded in protobuf fields, use
+Cider's existing plist/archive decoder. Corrupt, oversized, or unsupported
+payloads have an explicit `opaque` reason; CRC failures also set
+`crc_valid: false`. `--raw` includes the original payload as `raw_hex`.
+This does not promise semantic decoding of every private Apple stream.
+
+Biome limits one segment to 64 MiB, a scan to 512 MiB and 20 seconds, retained
+page payloads to 32 MiB, decoded payloads to 1 MiB, and `limit + offset` to
+10000. Narrow time filters or reduce the page size if its retained-page
+budget is exceeded. A live scan is not an atomic snapshot across segments;
+framing errors fail with the segment path rather than silently dropping data.
+
+Use `cider permissions --source <source>` for Full Disk Access guidance and
+`cider doctor` for `notifications_database`, `downloads_database`,
+`interactions_database`, and `biome_streams` checks. Availability and retention
+vary by macOS version. Library consumers have the same API through
+`sources::{notifications,downloads,interactions,biome}` without the `cli`
+feature. The SQLite readers accept `HistoryOptions` (also exported as each
+module's `ListOptions`); Biome exposes its own `ListOptions` and `Namespace`.
+
+SEGB format references and protobuf field names are attributed in
+`src/sources/biome/FORMAT_LICENSE`.
 
 ### With the Bridge
 
@@ -422,7 +497,7 @@ ping a bridge that is already running — never an AppleEvent, never a launch.
 
 | Permission | Needed by | Granted to | How |
 |------------|-----------|------------|-----|
-| **Full Disk Access** | `messages`, `mail`, `safari`, `reading-list`, `photos`, `books`, `voice-memos`, `facetime`, `icloud account`, `stocks`, `shortcuts`, `knowledge`, `home` (cache), `watch`, and the SQLite reads behind `calendar`, `reminders`, `contacts` | launching app | Privacy & Security › Full Disk Access: add the app by hand, then relaunch it. No prompt, no Info.plist key; `sudo` does not bypass it |
+| **Full Disk Access** | `messages`, `mail`, `safari`, `reading-list`, `photos`, `books`, `voice-memos`, `facetime`, `icloud account`, `stocks`, `shortcuts`, `knowledge`, `notifications`, `downloads`, `interactions`, `biome`, `home` (cache), `watch`, and the SQLite reads behind `calendar`, `reminders`, `contacts` | launching app | Privacy & Security › Full Disk Access: add the app by hand, then relaunch it. No prompt, no Info.plist key; `sudo` does not bypass it |
 | **Calendars** | `calendar` through `cider-bridge` (EventKit) | launching app | Privacy & Security › Calendars → **Full Access**, not Add Only (Add Only hides every event). Current macOS shows no Calendar prompt to a command-line requester: the first call registers the app in the pane, and you set it by hand |
 | **Reminders** | `reminders` through `cider-bridge` | launching app | The first call prompts; grant Full Access. Afterwards: Privacy & Security › Reminders |
 | **Contacts** | `contacts` through `cider-bridge` | launching app | Privacy & Security › Contacts. Like Calendar, no prompt for a command-line requester: set it by hand after the first call |

@@ -84,6 +84,20 @@ pub async fn inspect() -> DoctorReport {
             false,
         )
         .await,
+        check_readable_file(
+            "downloads_database",
+            &home.join(super::downloads::DATABASE_RELATIVE_PATH),
+            false,
+        )
+        .await,
+        check_readable_file(
+            "interactions_database",
+            Path::new(super::interactions::DATABASE_PATH),
+            false,
+        )
+        .await,
+        check_notifications().await,
+        check_biome(&home).await,
         check_home_cache(&home).await,
         check_bridge_app(),
         check_bridge_socket().await,
@@ -673,6 +687,45 @@ fn check_executable(name: &str, path: &Path, required: bool) -> DoctorCheck {
         name: name.to_string(),
         status,
         required,
+        detail,
+    }
+}
+
+async fn check_notifications() -> DoctorCheck {
+    match super::notifications::database_path().await {
+        Ok(path) => check_readable_file("notifications_database", &path, false).await,
+        Err(e) => DoctorCheck {
+            name: "notifications_database".into(),
+            status: if e.to_string().contains("Full Disk Access") {
+                CheckStatus::PermissionDenied
+            } else {
+                CheckStatus::NotConfigured
+            },
+            required: false,
+            detail: e.to_string(),
+        },
+    }
+}
+async fn check_biome(home: &Path) -> DoctorCheck {
+    let path = home.join(super::biome::STREAMS_RELATIVE_PATH);
+    let (status, detail) = match tokio::fs::read_dir(&path).await {
+        Ok(_) => (
+            CheckStatus::Ok,
+            format!("{} opened for listing", path.display()),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
+            CheckStatus::PermissionDenied,
+            format!("{}: {e}; Full Disk Access may be required", path.display()),
+        ),
+        Err(e) => (
+            CheckStatus::NotConfigured,
+            format!("{}: {e}", path.display()),
+        ),
+    };
+    DoctorCheck {
+        name: "biome_streams".into(),
+        status,
+        required: false,
         detail,
     }
 }

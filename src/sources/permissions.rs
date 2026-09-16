@@ -399,11 +399,17 @@ pub fn parse_ps_line(line: &str) -> Option<(u32, String)> {
 
 // ---------------------------------------------------------- requirements
 
-/// (source, path under $HOME) for the stores cider reads directly.
-/// Every one is under ~/Library, which Full Disk Access gates.
+/// (source, path under $HOME or absolute system path) for direct-read stores.
 pub const FULL_DISK_ACCESS_STORES: &[(&str, &str)] = &[
     ("messages", "Library/Messages/chat.db"),
     ("knowledge", super::knowledge::DATABASE_RELATIVE_PATH),
+    (
+        "notifications",
+        super::notifications::DATABASE_RELATIVE_PATH,
+    ),
+    ("downloads", super::downloads::DATABASE_RELATIVE_PATH),
+    ("interactions", super::interactions::DATABASE_PATH),
+    ("biome", super::biome::STREAMS_RELATIVE_PATH),
     ("mail", "Library/Mail/V*/MailData/Envelope Index"),
     ("safari", "Library/Safari/History.db"),
     ("safari", "Library/Safari/Bookmarks.plist"),
@@ -481,7 +487,7 @@ async fn full_disk_access(home: &Path) -> Requirement {
         status,
         detail: format!(
             "Probed by opening two stores for reading, which never prompts: {}. One grant \
-             covers every store cider reads from disk ({} of them under ~/Library)",
+             covers every store cider reads from disk ({} local stores)",
             observed.join("; "),
             FULL_DISK_ACCESS_STORES.len() - 1
         ),

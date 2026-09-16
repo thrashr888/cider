@@ -1,6 +1,7 @@
 pub mod activity_monitor;
 pub mod apps;
 pub mod automator;
+pub mod biome;
 pub mod bluetooth;
 pub mod books;
 pub mod bridge;
@@ -11,18 +12,22 @@ pub mod console_logs;
 pub mod contacts;
 pub mod disks;
 pub mod doctor;
+pub mod downloads;
 pub mod facetime;
 pub mod fonts;
 pub mod home;
 pub mod home_live;
 pub mod icloud;
+pub mod interactions;
 pub mod keychain;
 pub mod keyed_archive;
 pub mod knowledge;
+mod local_store;
 pub mod mail;
 pub mod messages;
 pub mod music;
 pub mod notes;
+pub mod notifications;
 pub mod passwords;
 pub mod permissions;
 pub mod photo_booth;
@@ -38,6 +43,7 @@ pub mod stocks;
 pub mod system_info;
 pub mod time_machine;
 mod util;
+pub use local_store::HistoryOptions;
 
 /// The result every mutating call returns (`create`, `complete`, `update`, …).
 /// Re-exported because those signatures name it: the rest of `util` is
