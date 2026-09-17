@@ -187,7 +187,7 @@ enum Commands {
     PhotoBooth,
     /// Fetch recent photos metadata from Photos
     Photos,
-    /// Safari bookmarks, history, tabs, and reading list
+    /// Safari history, tabs, page content, and authenticated GET requests
     Safari {
         #[command(subcommand)]
         action: Option<SafariAction>,
@@ -1382,12 +1382,85 @@ enum SafariAction {
         /// Max results
         #[arg(long, default_value = "100")]
         limit: u32,
+        /// Literal URL/title substring (ASCII case-insensitive)
+        #[arg(long)]
+        search: Option<String>,
+        /// Skip matching visits
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
     },
-    /// List currently open tabs
+    /// List currently open tabs and their one-based window/tab positions
     Tabs,
+    /// Read text or HTML from an existing tab (no page JavaScript needed)
+    Content {
+        #[command(flatten)]
+        target: SafariTargetArgs,
+        #[command(flatten)]
+        content: SafariContentArgs,
+    },
+    /// Open an HTTP(S) URL in a new tab, wait, and return page content; leaves tab open
+    Fetch {
+        url: String,
+        /// Existing Safari window position (one-based); choose the desired profile
+        #[arg(long, default_value_t = 1)]
+        window: u32,
+        #[command(flatten)]
+        content: SafariContentArgs,
+        /// Page-load deadline in seconds (1-120)
+        #[arg(long, default_value_t = 30)]
+        timeout: u32,
+    },
+    /// GET a same-origin URL using an existing tab's session (no redirects)
+    Request {
+        url: String,
+        #[command(flatten)]
+        target: SafariTargetArgs,
+        /// Maximum response body bytes to decode as UTF-8 (1-1000000)
+        #[arg(long, default_value_t = 100000)]
+        max_bytes: u32,
+        /// Request deadline in seconds (1-120)
+        #[arg(long, default_value_t = 30)]
+        timeout: u32,
+    },
     /// List Safari Reading List items
     #[command(name = "reading-list")]
     ReadingList,
+}
+
+#[derive(clap::Args)]
+struct SafariTargetArgs {
+    /// Window position from safari tabs (one-based)
+    #[arg(long, default_value_t = 1)]
+    window: u32,
+    /// Tab position from safari tabs (one-based)
+    #[arg(long, default_value_t = 1)]
+    tab: u32,
+}
+impl SafariTargetArgs {
+    fn target(&self) -> sources::safari::TabTarget {
+        sources::safari::TabTarget {
+            window: self.window,
+            tab: self.tab,
+        }
+    }
+}
+#[derive(clap::Args)]
+struct SafariContentArgs {
+    /// Output representation
+    #[arg(long, value_parser = ["text", "html"], default_value = "text")]
+    format: String,
+    /// Maximum Unicode characters returned (1-1000000)
+    #[arg(long, default_value_t = 100000)]
+    max_chars: u32,
+}
+impl SafariContentArgs {
+    fn format(&self) -> sources::safari::ContentFormat {
+        if self.format == "html" {
+            sources::safari::ContentFormat::Html
+        } else {
+            sources::safari::ContentFormat::Text
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1756,6 +1829,11 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
         } else {
             schema["stable_ids"] = serde_json::json!(false);
         }
+        if name == "safari" {
+            schema["tab_targeting"] =
+                serde_json::json!({"fields":["window","tab"],"one_based":true,"stable":false});
+            schema["history_args"] = serde_json::json!(["search", "limit", "offset"]);
+        }
         if name == "mail" {
             schema["friendly_mailboxes"] = serde_json::json!(true);
         }
@@ -1842,6 +1920,8 @@ fn is_mutating_action(action: &str) -> bool {
             | "install"
             | "download"
             | "evict"
+            | "fetch"
+            | "request"
     )
 }
 
@@ -3062,15 +3142,72 @@ async fn run() -> anyhow::Result<()> {
             None | Some(SafariAction::Bookmarks) => {
                 run_source!(sources::safari::bookmarks(), cli.pretty, cli.envelope)
             }
-            Some(SafariAction::History { limit }) => {
+            Some(SafariAction::History {
+                limit,
+                search,
+                offset,
+            }) => {
                 run_source!(
-                    sources::safari::history(Some(limit)),
+                    sources::safari::search_history(search.as_deref(), limit, offset),
                     cli.pretty,
                     cli.envelope
                 )
             }
             Some(SafariAction::Tabs) => {
                 run_source!(sources::safari::tabs(), cli.pretty, cli.envelope)
+            }
+            Some(SafariAction::Content { target, content }) => {
+                run_source!(
+                    sources::safari::content(target.target(), content.format(), content.max_chars),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(SafariAction::Fetch {
+                url,
+                window,
+                content,
+                timeout,
+            }) => {
+                sources::safari::validate_url(&url)?;
+                sources::safari::TabTarget { window, tab: 1 }.validate()?;
+                sources::safari::validate_timeout(timeout)?;
+                sources::safari::validate_content_limit(content.max_chars)?;
+                if cli.no_op {
+                    print_dry_run("fetch", format!("Open {url} in a new Safari tab in window {window}, read content, and leave the tab open"), cli.pretty, cli.envelope)?;
+                } else {
+                    run_source!(
+                        sources::safari::fetch(
+                            &url,
+                            window,
+                            content.format(),
+                            content.max_chars,
+                            timeout
+                        ),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
+            }
+            Some(SafariAction::Request {
+                url,
+                target,
+                max_bytes,
+                timeout,
+            }) => {
+                sources::safari::validate_url(&url)?;
+                target.target().validate()?;
+                sources::safari::validate_timeout(timeout)?;
+                sources::safari::validate_content_limit(max_bytes)?;
+                if cli.no_op {
+                    print_dry_run("request", format!("GET {url} from Safari window {} tab {}; origin is checked at execution", target.window, target.tab), cli.pretty, cli.envelope)?;
+                } else {
+                    run_source!(
+                        sources::safari::request(&url, target.target(), max_bytes, timeout),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
             }
             Some(SafariAction::ReadingList) => {
                 run_source!(sources::reading_list::fetch(), cli.pretty, cli.envelope)
@@ -4500,5 +4637,41 @@ mod tests {
             classify_error_code(&anyhow::anyhow!("invalid path: \"../x\" uses `..`")),
             "invalid_input"
         );
+    }
+    #[test]
+    fn safari_schema_and_arguments_describe_side_effects() {
+        for args in [
+            vec![
+                "cider", "safari", "content", "--tab", "2", "--format", "html",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "fetch",
+                "https://example.com",
+                "--dry-run",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "request",
+                "https://example.com/api",
+                "--dry-run",
+            ],
+            vec![
+                "cider", "safari", "history", "--search", "hello", "--offset", "2",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        assert!(Cli::try_parse_from(["cider", "safari", "content", "--format", "pdf"]).is_err());
+        let schema = build_schema(Some("safari"));
+        assert_eq!(schema["stable_ids"], false);
+        assert_eq!(schema["supports_dry_run"], true);
+        for action in schema["actions"].as_array().unwrap() {
+            let write = matches!(action["name"].as_str(), Some("fetch" | "request"));
+            assert_eq!(action["supports_dry_run"], write);
+            assert_eq!(action["kind"], if write { "write" } else { "read" });
+        }
     }
 }

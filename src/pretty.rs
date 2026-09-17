@@ -143,7 +143,15 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
             }
         }
         serde_json::Value::Object(obj) => {
-            if is_action_result(obj) {
+            if obj.get("action").and_then(|v| v.as_str()) == Some("fetch")
+                && obj.get("page").is_some_and(serde_json::Value::is_object)
+            {
+                render_object(&mut w, obj["page"].as_object().unwrap())?;
+            } else if obj.get("action").and_then(|v| v.as_str()) == Some("request")
+                && obj.contains_key("body")
+            {
+                render_object(&mut w, obj)?;
+            } else if is_action_result(obj) {
                 render_action_result(&mut w, obj)?;
             } else {
                 render_object(&mut w, obj)?;
@@ -517,5 +525,22 @@ mod tests {
         assert!(t.contains('✓'));
         let f = format_cell(&serde_json::json!(false));
         assert!(f.contains('✗'));
+    }
+}
+
+#[cfg(test)]
+mod safari_tests {
+    #[test]
+    fn fetched_and_requested_bodies_are_visible() {
+        for value in [
+            serde_json::json!({"ok":true,"action":"fetch","page":{"content":"page body","truncated":true}}),
+            serde_json::json!({"ok":false,"action":"request","status":401,"body":"response body"}),
+        ] {
+            let before = value.clone();
+            let mut out = Vec::new();
+            super::render(&mut out, &value).unwrap();
+            assert!(String::from_utf8(out).unwrap().contains("body"));
+            assert_eq!(value, before);
+        }
     }
 }

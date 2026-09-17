@@ -667,7 +667,15 @@ pub const AUTOMATION_TARGETS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Messages", &["messages send"]),
-    ("Safari", &["safari tabs"]),
+    (
+        "Safari",
+        &[
+            "safari tabs",
+            "safari content",
+            "safari fetch",
+            "safari request",
+        ],
+    ),
     (
         "Calendar",
         &["calendar (JXA fallback when cider-bridge is absent or the SQLite read fails)"],
