@@ -27,6 +27,11 @@ jobs:
       # break it — and would pass every check above, which all build the binary.
       - name: Clippy (library only, no Clap)
         run: cargo clippy --lib --no-default-features -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Safari request script tests
+        run: node --test tests/safari_request.cjs
       - name: Test
         run: cargo test
       - name: Build

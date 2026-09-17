@@ -115,7 +115,7 @@ cider spotlight --query "quarterly report"
 | iCloud Drive | `list`, `download`, `evict` (evict removes the local copy; the file stays in iCloud) |
 | Screen Sharing | `status`, `enable`, `disable` |
 | System Info | `show`, `set-name`, `defaults-read`, `defaults-write` |
-| Safari | `bookmarks`, `history`, `tabs`, `reading-list` |
+| Safari | `bookmarks`, `history`, `tabs`, `content`, `fetch`, `request`, `reading-list` |
 | Wi-Fi | `status`, `networks` |
 
 ### Read + CRUD
@@ -168,6 +168,86 @@ Full Disk Access may be needed for the launching app; check
 `cider permissions --source knowledge` and `cider doctor` (`knowledge_database`).
 Library consumers can use `sources::knowledge::{list, streams, ListOptions}`
 without the `cli` feature.
+
+### Safari: page content and existing sessions
+
+```bash
+cider safari history --search "github.com" --limit 20 --offset 0
+cider safari tabs --pretty
+cider safari content --window 1 --tab 2
+cider safari content --window 1 --tab 2 --format html --max-chars 50000
+cider safari fetch 'https://example.com' --window 1 --timeout 30 --dry-run
+cider safari fetch 'https://example.com' --window 1 --timeout 30
+cider safari request 'https://example.com/api/me' --window 1 --tab 2 --max-bytes 100000
+```
+
+`content` reads an existing tab's native Safari text or HTML source without
+executing page JavaScript. `fetch` opens a **new tab in an existing window**,
+waits for `document.readyState == complete`, and returns its content. It leaves
+the tab open on success or failure; it does not replace an existing page.
+Run Safari and open a window first. `fetch --dry-run` does not contact Safari.
+A completed document can still be a login page, an error page, or an app that
+loads more content later. Use `content` again after the app has loaded. Page
+reads have no HTTP status; `fetch` returns `{ok, action, requested_url, page}`
+with the final URL, title, format, content, truncation flag, and tab coordinates
+inside `page`. Native HTML is Safari's source representation, not raw response
+bytes or a guaranteed snapshot of every DOM change. Text/source do not expose
+cross-origin frame contents or binary downloads.
+
+`request` performs a GET inside the selected tab with `credentials: same-origin`
+and `mode: same-origin`. The requested URL must match that tab's scheme, host,
+and port. It returns `{ok, action, url, status, status_text, content_type, body,
+truncated}` plus a recovery `hint` for common HTTP failures (401, 403, 404,
+429, and 5xx). HTTP 4xx/5xx responses retain their body and set `ok: false` (the
+CLI still exits successfully because it obtained a response). Network, CSP,
+redirect, and timeout failures use the normal error envelope and nonzero exit.
+Redirects are rejected, including same-origin redirects. Response bodies are
+streamed to a byte limit and decoded as UTF-8; a limit inside a multibyte
+character can produce a replacement character. This is for text/JSON, not
+binary downloads. Both network commands support `--dry-run`; GETs can still
+have server-side effects. No custom methods, headers, request bodies, cookie
+export, or arbitrary JavaScript execution are exposed.
+
+Use the tab already signed in to the desired account for `request`. Browser
+cookies remain in Safari, including HttpOnly cookies that Safari sends itself.
+App-specific bearer tokens and CSRF headers are not automatically reconstructed.
+Profiles and private windows have separate sessions; `--window`/`--tab` select
+existing browser context, but Cider does not enumerate or switch profiles.
+Tab positions are **one-based and transient**: rerun `tabs` after moving or
+closing tabs, and avoid rearranging them during a command. `window_id` is also
+reported as metadata. Commands do not start Safari when it is closed.
+
+All tab commands need Automation permission for the launching app.
+`fetch` and `request` additionally require Safari Settings → Developer →
+**Allow JavaScript from Apple Events** (older Safari: Develop menu). Enable
+web developer features in Advanced settings if needed. Cider never changes
+these settings. `content` does not require that JavaScript permission.
+See [Apple's developer settings](https://developer.apple.com/documentation/safari-developer-tools/developer-settings).
+Safari WebDriver uses isolated automation storage, so it cannot borrow your
+normal Safari sessions; see [WebKit's explanation](https://webkit.org/blog/9395/webdriver-is-coming-to-safari-in-ios-13/).
+
+Failures include recovery instructions in the JSON error's `message` on stderr.
+Use these steps when a Safari command cannot access content:
+
+| Failure | How to make it work |
+|---------|---------------------|
+| JavaScript from Apple Events disabled | Safari → Settings → Advanced → enable **Show features for web developers** if Developer is hidden; then Settings → Developer → enable **Allow JavaScript from Apple Events**. Older Safari has this in the Develop menu. Retry. Remote automation and JavaScript from Smart Search field are not required. Native `content` works without this setting. |
+| Automation denied | System Settings → Privacy & Security → Automation → expand the app launching Cider (Terminal, Codex, or your host app) → enable Safari. If absent, run `cider safari tabs` from that app and allow the macOS prompt. A packaged host must declare `NSAppleEventsUsageDescription` and the Apple Events entitlement when hardened. |
+| History cannot be read | System Settings → Privacy & Security → Full Disk Access → add/enable the launching app, then fully quit and reopen it. Check `cider permissions --source safari`. |
+| Safari closed or tab not found | Open a Safari window in the desired profile. Run `cider safari tabs --pretty` and use its current one-based `--window` and `--tab` values. |
+| Request origin mismatch | Select an existing tab whose scheme, host, and port match the requested URL. Cider does not disable Safari's cross-origin restrictions. |
+| Request blocked by redirect, CSP, or network | Open the URL in Safari, complete any login, and use the final same-origin URL. If the site disallows page requests, read the loaded tab with `content`. |
+| Timeout or empty content | Check Safari for login/consent dialogs and unfinished loading. Retry with `--timeout 60` (maximum 120) for `fetch`/`request`, or read the loaded page with `content`. A new fetch tab may remain open. |
+
+History search matches literal URL/title substrings, case-insensitive for
+ASCII, in the default `~/Library/Safari/History.db` store. It returns visits
+(newest first; repeated URLs remain separate), with a 0–10000 limit and offset
+after filtering. It does not aggregate other Safari profile databases or
+private browsing. Full Disk Access may be required. SQLite is opened read-only
+with its live WAL, and JSON preserves tabs/newlines in titles. Library consumers
+can call `sources::safari::{search_history, tabs, content, fetch, request}` with
+`default-features = false`. These commands are not yet exposed through Cider's
+allowlisted MCP server.
 
 ### Notifications, download origins, interactions, and Biome
 
@@ -705,7 +785,7 @@ ping a bridge that is already running — never an AppleEvent, never a launch.
 | **Calendars** | `calendar` through `cider-bridge` (EventKit) | launching app | Privacy & Security › Calendars → **Full Access**, not Add Only (Add Only hides every event). Current macOS shows no Calendar prompt to a command-line requester: the first call registers the app in the pane, and you set it by hand |
 | **Reminders** | `reminders` through `cider-bridge` | launching app | The first call prompts; grant Full Access. Afterwards: Privacy & Security › Reminders |
 | **Contacts** | `contacts` through `cider-bridge` | launching app | Privacy & Security › Contacts. Like Calendar, no prompt for a command-line requester: set it by hand after the first call |
-| **Automation** (one pair per target app) | `notes`, `music`, `mail send/read/unread/trash/get`, `messages send`, `safari tabs`, `shortcuts run/view`, and the AppleScript/JXA fallbacks for `calendar`, `reminders`, `contacts` when the bridge is absent | launching app → target app | The first AppleEvent prompts, per pair; afterwards Privacy & Security › Automation. Always `not_probed`: the probe would itself be an AppleEvent |
+| **Automation** (one pair per target app) | `notes`, `music`, `mail send/read/unread/trash/get`, `messages send`, `safari tabs/content/fetch/request`, `shortcuts run/view`, and the AppleScript/JXA fallbacks for `calendar`, `reminders`, `contacts` when the bridge is absent | launching app → target app | The first AppleEvent prompts, per pair; afterwards Privacy & Security › Automation. Always `not_probed`: the probe would itself be an AppleEvent |
 | **HomeKit** | `home state/run/set/triggers`, `home --live` | Cider Bridge.app | The bridge app prompts on its first HomeKit call; Privacy & Security › HomeKit → Cider Bridge. Personal build only |
 | **Location** | nothing yet (reserved for a `location` command) | launching app | Privacy & Security › Location Services |
 
