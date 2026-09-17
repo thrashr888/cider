@@ -536,6 +536,19 @@ middle name, nickname, job title, department, birthday, and notes when present.
 Create and update accept the same richer name and work fields; repeat `--email`
 or `--phone` during creation to add several values.
 
+Notes come back twice over. `body` is Apple's `plaintext`, which flattens the
+note — every block on its own line, with no list markers and no blank line
+between paragraphs, so a bulleted list is indistinguishable from prose.
+`markdown` is the note's real structure, converted from the HTML the Notes app
+stores: paragraphs, `- ` bullets, `1. ` numbering, `- [x] ` checklists,
+headings, and links. Prefer `markdown`; `body` stays as it was for callers that
+already read it, and `markdown` falls back to it for a note with no rich text.
+
+```sh
+cider notes get --id 'x-coredata://...' | jq -r '.markdown'
+cider notes list --folder Recipes | jq -r '.[].markdown'
+```
+
 ## Schema And Diagnostics
 
 `cider schema` is generated from the real command parser. It describes every
