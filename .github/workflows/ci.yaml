@@ -30,8 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Safari request script tests
-        run: node --test tests/safari_request.cjs
+      - name: Safari browser script tests
+        run: node --test tests/safari_request.cjs tests/safari_monitor.cjs
       - name: Test
         run: cargo test
       - name: Build

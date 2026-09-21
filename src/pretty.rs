@@ -143,7 +143,43 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
             }
         }
         serde_json::Value::Object(obj) => {
-            if obj.get("action").and_then(|v| v.as_str()) == Some("fetch")
+            if matches!(
+                obj.get("action").and_then(|v| v.as_str()),
+                Some("network" | "monitor")
+            ) && obj.get("requests").is_some_and(serde_json::Value::is_array)
+            {
+                if let Some(page) = obj
+                    .get("page")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                {
+                    writeln!(w, "Page: {page}")?;
+                }
+                writeln!(
+                    w,
+                    "{} matching requests; truncated: {}; opened tab: {}; closed tab: {}",
+                    obj.get("matched_count").unwrap_or(&serde_json::Value::Null),
+                    obj.get("requests_truncated")
+                        .unwrap_or(&serde_json::Value::Null),
+                    obj.get("opened_tab").unwrap_or(&serde_json::Value::Null),
+                    obj.get("tab_closed").unwrap_or(&serde_json::Value::Null)
+                )?;
+                if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
+                    writeln!(w, "{message}")?;
+                }
+                render_table_with_columns(
+                    &mut w,
+                    obj["requests"].as_array().unwrap(),
+                    &[
+                        "request_id",
+                        "method",
+                        "status",
+                        "url",
+                        "mime_type",
+                        "body_state",
+                    ],
+                )?;
+            } else if obj.get("action").and_then(|v| v.as_str()) == Some("fetch")
                 && obj.get("page").is_some_and(serde_json::Value::is_object)
             {
                 render_object(&mut w, obj["page"].as_object().unwrap())?;
@@ -542,5 +578,21 @@ mod safari_tests {
             assert!(String::from_utf8(out).unwrap().contains("body"));
             assert_eq!(value, before);
         }
+    }
+}
+
+#[cfg(test)]
+mod safari_network_tests {
+    #[test]
+    fn network_table_shows_requests_without_dumping_bodies_or_changing_json() {
+        let value = serde_json::json!({"ok":true,"action":"network","requests":[{"request_id":"r1","method":"GET","status":200,"url":"https://example.com/api","mime_type":"application/json","body_state":"captured","response_body":"private-body"}]});
+        let before = value.clone();
+        let mut out = Vec::new();
+        super::render(&mut out, &value).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("https://example.com/api"));
+        assert!(text.contains("captured"));
+        assert!(!text.contains("private-body"));
+        assert_eq!(value, before);
     }
 }

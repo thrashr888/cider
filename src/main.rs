@@ -1422,6 +1422,46 @@ enum SafariAction {
         #[arg(long, default_value_t = 30)]
         timeout: u32,
     },
+    /// Capture actual page network requests in a new tab (Safari 27+); closes tab afterward
+    Network {
+        /// Page to load in Safari's automation session (may require separate sign-in)
+        url: String,
+        /// Match request URLs containing this substring
+        #[arg(long)]
+        filter: Option<String>,
+        /// Include original text response bodies returned by Safari
+        #[arg(long)]
+        bodies: bool,
+        /// Seconds to collect after navigation (0-60, less than timeout)
+        #[arg(long, default_value_t = 5)]
+        wait: u32,
+        /// Overall capture deadline in seconds (1-120), plus up to 5 seconds cleanup
+        #[arg(long, default_value_t = 60)]
+        timeout: u32,
+        /// Maximum matching requests returned (1-1000)
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Omit larger bodies intact (1-1000000 bytes); 16 MiB aggregate cap
+        #[arg(long, default_value_t = 1000000)]
+        max_body_bytes: usize,
+    },
+    /// Observe future fetch/XHR requests in an existing signed-in tab; interact with the page during capture
+    Monitor {
+        #[command(flatten)]
+        target: SafariTargetArgs,
+        #[arg(long)]
+        filter: Option<String>,
+        /// Include original text responses; parsed JSON/binary XHR bodies are unavailable
+        #[arg(long)]
+        bodies: bool,
+        /// Observation window (1-60 seconds); no navigation is initiated
+        #[arg(long, default_value_t = 20)]
+        seconds: u32,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long, default_value_t = 1000000)]
+        max_body_bytes: usize,
+    },
     /// List Safari Reading List items
     #[command(name = "reading-list")]
     ReadingList,
@@ -1833,6 +1873,8 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
             schema["tab_targeting"] =
                 serde_json::json!({"fields":["window","tab"],"one_based":true,"stable":false});
             schema["history_args"] = serde_json::json!(["search", "limit", "offset"]);
+            schema["network_capture"] = serde_json::json!({"requires":"Safari 27 native MCP", "request_ids":"capture-scoped", "opens_tab":true, "closes_tab":true, "bodies":"original Safari response text; availability and size limited"});
+            schema["network_monitor"] = serde_json::json!({"requires":"Automation and JavaScript from Apple Events", "request_ids":"capture-scoped", "opens_tab":false, "closes_tab":false, "coverage":"future fetch/XHR calls in the selected document"});
         }
         if name == "mail" {
             schema["friendly_mailboxes"] = serde_json::json!(true);
@@ -1922,6 +1964,8 @@ fn is_mutating_action(action: &str) -> bool {
             | "evict"
             | "fetch"
             | "request"
+            | "network"
+            | "monitor"
     )
 }
 
@@ -3204,6 +3248,63 @@ async fn run() -> anyhow::Result<()> {
                 } else {
                     run_source!(
                         sources::safari::request(&url, target.target(), max_bytes, timeout),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
+            }
+            Some(SafariAction::Network {
+                url,
+                filter,
+                bodies,
+                wait,
+                timeout,
+                limit,
+                max_body_bytes,
+            }) => {
+                let options = sources::safari_network::CaptureOptions {
+                    url,
+                    filter,
+                    bodies,
+                    wait,
+                    timeout,
+                    limit,
+                    max_body_bytes,
+                };
+                options.validate()?;
+                if cli.no_op {
+                    print_dry_run("network", format!("Open {} in a new Safari MCP tab, capture network traffic, and close that tab", options.url), cli.pretty, cli.envelope)?;
+                } else {
+                    run_source!(
+                        sources::safari_network::capture(&options),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
+            }
+            Some(SafariAction::Monitor {
+                target,
+                filter,
+                bodies,
+                seconds,
+                limit,
+                max_body_bytes,
+            }) => {
+                let options = sources::safari_network::MonitorOptions {
+                    target: target.target(),
+                    filter,
+                    bodies,
+                    seconds,
+                    limit,
+                    max_body_bytes,
+                };
+                options.validate()?;
+                if cli.no_op {
+                    print_dry_run("monitor", format!("Temporarily observe fetch/XHR traffic in Safari window {} tab {} for {seconds} seconds", target.window, target.tab), cli.pretty, cli.envelope)?;
+                } else {
+                    eprintln!("Monitoring Safari window {} tab {} for {seconds} seconds. Interact with the page to generate requests; do not reload it.", target.window, target.tab);
+                    run_source!(
+                        sources::safari_network::monitor(&options),
                         cli.pretty,
                         cli.envelope
                     )
@@ -4640,6 +4741,29 @@ mod tests {
     }
     #[test]
     fn safari_schema_and_arguments_describe_side_effects() {
+        assert!(Cli::try_parse_from([
+            "cider",
+            "safari",
+            "monitor",
+            "--tab",
+            "2",
+            "--seconds",
+            "30",
+            "--bodies",
+            "--dry-run"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "cider",
+            "safari",
+            "network",
+            "https://example.com",
+            "--filter",
+            "/api/",
+            "--bodies",
+            "--dry-run"
+        ])
+        .is_ok());
         for args in [
             vec![
                 "cider", "safari", "content", "--tab", "2", "--format", "html",
@@ -4669,7 +4793,10 @@ mod tests {
         assert_eq!(schema["stable_ids"], false);
         assert_eq!(schema["supports_dry_run"], true);
         for action in schema["actions"].as_array().unwrap() {
-            let write = matches!(action["name"].as_str(), Some("fetch" | "request"));
+            let write = matches!(
+                action["name"].as_str(),
+                Some("fetch" | "request" | "network" | "monitor")
+            );
             assert_eq!(action["supports_dry_run"], write);
             assert_eq!(action["kind"], if write { "write" } else { "read" });
         }
