@@ -174,7 +174,7 @@ impl TabTarget {
         );
         Ok(())
     }
-    fn script(&self) -> anyhow::Result<String> {
+    pub(super) fn script(&self) -> anyhow::Result<String> {
         self.validate()?;
         Ok(format!(
             r#"
@@ -338,7 +338,7 @@ JSON.stringify({{title: pageTab.name() || "", url: before, window: {window}, tab
     })
 }
 
-fn safari_error(error: anyhow::Error) -> anyhow::Error {
+pub(super) fn safari_error(error: anyhow::Error) -> anyhow::Error {
     let message = error.to_string();
     let lower = message.to_lowercase();
     let fix = if lower.contains("javascript from apple events") {

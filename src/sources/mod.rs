@@ -35,6 +35,7 @@ pub mod photos;
 pub mod reading_list;
 pub mod reminders;
 pub mod safari;
+pub mod safari_network;
 pub mod screen_sharing;
 pub mod screenshots;
 pub mod shortcuts;

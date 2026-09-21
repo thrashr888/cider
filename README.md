@@ -204,7 +204,7 @@ redirect, and timeout failures use the normal error envelope and nonzero exit.
 Redirects are rejected, including same-origin redirects. Response bodies are
 streamed to a byte limit and decoded as UTF-8; a limit inside a multibyte
 character can produce a replacement character. This is for text/JSON, not
-binary downloads. Both network commands support `--dry-run`; GETs can still
+binary downloads. Both `fetch` and `request` support `--dry-run`; GETs can still
 have server-side effects. No custom methods, headers, request bodies, cookie
 export, or arbitrary JavaScript execution are exposed.
 
@@ -217,14 +217,14 @@ Tab positions are **one-based and transient**: rerun `tabs` after moving or
 closing tabs, and avoid rearranging them during a command. `window_id` is also
 reported as metadata. Commands do not start Safari when it is closed.
 
-All tab commands need Automation permission for the launching app.
-`fetch` and `request` additionally require Safari Settings → Developer →
+The Apple Events tab commands (`tabs`, `content`, `fetch`, `request`, and `monitor`) need Automation permission for the launching app.
+`fetch`, `request`, and `monitor` additionally require Safari Settings → Developer →
 **Allow JavaScript from Apple Events** (older Safari: Develop menu). Enable
 web developer features in Advanced settings if needed. Cider never changes
 these settings. `content` does not require that JavaScript permission.
 See [Apple's developer settings](https://developer.apple.com/documentation/safari-developer-tools/developer-settings).
-Safari WebDriver uses isolated automation storage, so it cannot borrow your
-normal Safari sessions; see [WebKit's explanation](https://webkit.org/blog/9395/webdriver-is-coming-to-safari-in-ios-13/).
+Traditional Safari WebDriver uses isolated automation storage; the native MCP
+network capture below is a separate interface. For WebDriver, see [WebKit's explanation](https://webkit.org/blog/9395/webdriver-is-coming-to-safari-in-ios-13/).
 
 Failures include recovery instructions in the JSON error's `message` on stderr.
 Use these steps when a Safari command cannot access content:
@@ -238,6 +238,133 @@ Use these steps when a Safari command cannot access content:
 | Request origin mismatch | Select an existing tab whose scheme, host, and port match the requested URL. Cider does not disable Safari's cross-origin restrictions. |
 | Request blocked by redirect, CSP, or network | Open the URL in Safari, complete any login, and use the final same-origin URL. If the site disallows page requests, read the loaded tab with `content`. |
 | Timeout or empty content | Check Safari for login/consent dialogs and unfinished loading. Retry with `--timeout 60` (maximum 120) for `fetch`/`request`, or read the loaded page with `content`. A new fetch tab may remain open. |
+
+### Capture actual Safari network requests (Safari 27+)
+
+```sh
+# Inspect requests and original responses from a public page/API
+cider safari network 'https://api.github.com/repos/thrashr888/cider' --bodies
+cider safari network 'https://example.com' --filter example.com --pretty
+cider safari network 'https://example.com' --bodies --dry-run
+```
+
+`network` uses `/usr/bin/safaridriver --mcp`, **Safari's native MCP server**,
+introduced in Safari 27. It opens a new tab, enables network inspection before
+navigation, waits for traffic, collects a snapshot, and closes its tab.
+Safari controls the automation session's storage: **a login in a regular
+Safari tab does not guarantee a signed-in capture**. A fresh session in live
+X testing redirected to the signed-out page. Check `page.url` and `page.title`;
+Use `monitor` below to observe an existing signed-in tab. Cider does not attach
+to an existing tab/profile, transfer cookies, or reconstruct authorization
+headers. Safari may ask you to allow the external agent.
+See [WebKit's native MCP announcement](https://webkit.org/blog/18136/introducing-the-safari-mcp-server-for-web-developers/).
+
+Enable Safari Settings → Advanced → **Show features for web developers**, then
+Settings → Developer → **Allow remote automation and external agents**.
+JavaScript from Apple Events and Smart Search field are not required for this
+command. Unsupported Safari versions, disabled access, and connection failures
+return these setup instructions in the normal JSON error on stderr.
+
+The output contains `action: "network"`, `url`, `matched_count`,
+`requests_truncated`, `backend: "safari_mcp"`, `opened_tab`, `tab_closed`,
+final `page` URL/title, and `requests`. Each request includes its
+capture-scoped `request_id`, URL, method, available status/MIME/size/time metadata,
+and `body_state`. `--bodies` retrieves **the original decoded response text from
+Safari**, including real JSON returned by API endpoints. It never converts page
+HTML or DOM content to JSON. Endpoint IDs, query parameters, and request methods
+are discovered from traffic, not hardcoded; the site's own UI sends the requests.
+Headers, cookies, and request payloads are not exported or replayed.
+
+`body_state` is `not_requested`, `captured`, `unavailable`, `over_limit`, or
+`error` (with `body_error`). Missing/binary/evicted bodies depend on Safari's
+capture capabilities. `captured` means the text Safari supplied, not a guarantee
+of complete wire bytes; compressed transfer sizes can differ from decoded text
+sizes. Cider omits bodies larger than `--max-body-bytes` (default 1,000,000) or the
+16 MiB aggregate budget instead of cutting JSON in half. The request limit is
+100 by default (maximum 1,000), applied after `--filter`; `matched_count` is the
+number retained by Safari at the snapshot, not a guarantee of all page traffic.
+Filters are URL substrings: use `/HomeTimeline` to avoid matching JavaScript
+bundles named `bundle.HomeTimeline`.
+HTTP errors remain visible as request statuses; successful capture is `ok: true`
+even if individual requests or body retrievals fail. Empty matches are valid.
+
+The default wait is 5 seconds after navigation; use `--wait` (0–60) and
+`--timeout` (1–120, default 60) for slower pages. Timeout covers startup,
+navigation, waiting, and body retrieval; tab cleanup can take another 5 seconds.
+The process is terminated after completion or failure. If cleanup fails, a tab
+may remain open; successful output reports `tab_closed` and a recovery message.
+Native request buffers end with the MCP session, so listing and body retrieval
+happen together. Save the capture to inspect it later; request IDs cannot be
+reused in another invocation. This loads a real page and may cause its normal
+server-side activity; `--dry-run` performs no browser work.
+
+Library consumers can call `sources::safari_network::capture(&CaptureOptions)`
+with `default-features = false`; no MCP SDK feature is required.
+
+### Example: grab your Twitter / X feed as real API JSON
+
+Use `monitor` for your **existing signed-in Safari tab**. This records the site's
+actual fetch/XHR responses; it does not scrape tweets from HTML or turn the DOM
+into JSON. Enable Safari Settings → Developer → **Allow JavaScript from Apple
+Events**, and allow the launching app to automate Safari in System Settings →
+Privacy & Security → Automation. The CLI includes these recovery instructions
+if access is denied. Safari 27 / native MCP is not required for this mode.
+
+1. Sign in to X in Safari and open your profile (or another page outside Home).
+2. Find that tab's current one-based window/tab positions:
+
+   ```sh
+   cider safari tabs --pretty
+   ```
+
+3. Start capture, replacing the example positions with yours. After a moment,
+   click **Home → For you** in that Safari tab during the 30-second window.
+   Use X's navigation links; a full browser reload destroys the monitor.
+
+   ```sh
+   cider safari monitor --window 1 --tab 2 \
+     --filter '/i/api/graphql/' --bodies --seconds 30 > twitter-capture.json
+   ```
+
+4. Extract a successful timeline response **without reserializing it**:
+
+   ```sh
+   jq -je '[.requests[] | select(
+     .status == 200 and .body_state == "captured" and
+     (.url | test("/Home(Latest)?Timeline([?]|$)"))
+   )] | last | .response_body // error("No timeline body captured; retry and open Home during capture")' \
+     twitter-capture.json > twitter-feed.json
+
+   # Inspect the genuine API response's timeline instructions
+   jq '.data.home.home_timeline_urt.instructions' twitter-feed.json
+   ```
+
+`jq -j` writes the saved response string without adding a newline. GraphQL
+operation IDs change, so Cider observes the URL the UI actually requests. The
+site supplies its normal cookies, CSRF, bearer, and transaction headers; Cider
+does not export or reconstruct them. If no timeline request appears, repeat the
+capture and use X's Home navigation or scroll for another page of the feed.
+Use `/HomeTimeline` for a narrower URL filter, including the slash to avoid
+JavaScript bundles named `bundle.HomeTimeline`. API errors remain visible as
+statuses and original response bodies.
+
+`monitor` temporarily wraps the selected page's `fetch` and XMLHttpRequest
+methods, then restores them. It initiates no requests, leaves the tab open, and
+supports `--dry-run`. It records future calls from that document only: earlier
+requests, workers, frames, sockets, and saved references to the original methods
+are outside its coverage. Full navigation or reload ends the observation and
+returns a recovery error. Tab positions must stay unchanged during capture.
+
+Output uses `action: "monitor"`, `backend: "page_fetch_xhr"`, the same request
+fields as `network`, and `opened_tab: false`, `tab_closed: false`. Original text
+XHR responses and decoded fetch response streams can be captured. XHR with
+`responseType: "json"` is already parsed by Safari, so its body is `unavailable`
+rather than reserialized. Binary, unfinished, or excessive concurrent bodies
+are also unavailable. Per-body, aggregate, and request limits match `network`;
+oversized bodies are omitted whole. A timer restores wrappers if the caller is
+interrupted (background-tab timer throttling can delay cleanup).
+
+Library consumers can call `sources::safari_network::monitor(&MonitorOptions)`.
 
 History search matches literal URL/title substrings, case-insensitive for
 ASCII, in the default `~/Library/Safari/History.db` store. It returns visits
