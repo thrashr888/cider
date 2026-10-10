@@ -115,7 +115,7 @@ cider spotlight --query "quarterly report"
 | iCloud Drive | `list`, `download`, `evict` (evict removes the local copy; the file stays in iCloud) |
 | Screen Sharing | `status`, `enable`, `disable` |
 | System Info | `show`, `set-name`, `defaults-read`, `defaults-write` |
-| Safari | `bookmarks`, `history`, `tabs`, `content`, `fetch`, `request`, `reading-list` |
+| Safari | `bookmarks`, `history`, `tabs`, `content`, `fetch`, `request`, `eval`, `navigate`, `network-list`, `network`, `monitor`, `reading-list` |
 | Wi-Fi | `status`, `networks` |
 
 ### Read + CRUD
@@ -205,8 +205,97 @@ Redirects are rejected, including same-origin redirects. Response bodies are
 streamed to a byte limit and decoded as UTF-8; a limit inside a multibyte
 character can produce a replacement character. This is for text/JSON, not
 binary downloads. Both `fetch` and `request` support `--dry-run`; GETs can still
-have server-side effects. No custom methods, headers, request bodies, cookie
-export, or arbitrary JavaScript execution are exposed.
+have server-side effects. The default GET and the existing library `request`
+function remain compatible. Custom requests and evaluation are explicitly gated
+as described below; none of these browser capabilities are added to Cider's
+read-only MCP surface.
+
+### Gated browser evaluation, HTTP methods, and navigation
+
+```sh
+cider safari eval 'Promise.resolve({title: document.title})' --tab 2 --allow-eval
+cider safari eval --file script.js --tab 2 --allow-eval --max-chars 50000 --dry-run
+cider safari request 'https://example.com/api/items' --tab 2 \
+  --method POST --body '{"name":"example"}' \
+  --headers '{"Content-Type":"application/json"}' --allow-mutation --dry-run
+cider safari request 'https://example.com/api/items' --tab 2 \
+  --method PATCH --body-file payload.json --headers-file headers.json \
+  --allow-mutation
+cider safari navigate 'https://example.com/settings' --tab 2 --dry-run
+cider safari network-list --tab 2 --filter '/api/' --limit 100
+```
+
+`eval` requires `--allow-eval` even with `--dry-run`. It evaluates the supplied
+source in the selected document's global scope and awaits a returned promise.
+For async statements, use `(async () => { ...; return result; })()`. It returns
+`{ok, action:"eval", value_type, value, truncated}` using `JSON.stringify`
+semantics (including `toJSON`, omission of undefined object properties, and
+conversion of nonfinite numbers to null). An undefined completion has
+`value_type:"undefined"` and `value:null`, distinct from a JSON null result.
+Oversized serialized results have `value:null`, `truncated:true`, and a bounded
+`preview` of serialized JSON, not a falsely complete value. Circular values,
+BigInt, nonserializable top-level functions/symbols, thrown exceptions, and
+promise rejections are errors. Source/file input is limited to 1,000,000 UTF-8
+bytes; output is limited to 1-1,000,000 Unicode characters.
+
+**Evaluation is not sandboxed or read-only.** Caller JS can access script-readable
+page credentials, export data, navigate, or change server/page state, and can
+make cross-origin requests subject to normal browser policy. The same-origin
+request safeguard does not constrain arbitrary eval. A timeout bounds Cider's
+wait, **not the JavaScript execution**: synchronous loops can block the page,
+pending code can continue, and side effects are never rolled back. Output
+serialization itself runs in the page; the output limit is not a page memory
+quota. Do not pass untrusted page content as executable source. Neither source
+nor header/body values are echoed in dry-run descriptions.
+
+`request --method` supports GET, HEAD, POST, PUT, PATCH, DELETE, and OPTIONS.
+Anything other than a plain GET (including custom GET headers) requires
+`--allow-mutation`, also enforced by the library. `--headers` accepts a JSON
+string-to-string object; `--headers-file` and `--body-file` read bounded UTF-8
+files, mutually exclusive with their inline forms. Bodies are disallowed for
+GET/HEAD and capped at 1,000,000 UTF-8 bytes. Header names must be unique,
+case-insensitive HTTP tokens; at most 100 headers / 65,536 UTF-8 bytes are
+allowed. Browser-controlled headers (Cookie, Host, Origin, Referer, Sec-/Proxy-
+headers, etc.) and method-override headers are rejected rather than silently
+ignored. Caller-supplied Authorization/CSRF headers are supported, but Cider does
+not infer them, reconstruct tokens, or export request headers in the result.
+Browser cookies stay in Safari. Same-origin enforcement, no redirects, no
+retries, bounded response streaming, and the GET result shape all remain intact.
+Use a file rather than command-line arguments for sensitive header values.
+
+`navigate` replaces the page **only in the selected existing tab**, waits for
+document readiness, reports its final URL/title and tab coordinates, and leaves
+the tab open on success or failure. Redirects are allowed for page navigation;
+readiness is not proof of login, HTTP success, or network idle. The old page and
+its unsaved state may be lost; use `--dry-run` to preview. It does not create,
+close, or activate tabs.
+
+**`network-list` is a partial Resource Timing snapshot, not a full historical
+network/HTTP request list.** It returns `backend:"resource_timing"`,
+`coverage:"retained_resource_timing"`, `complete_history:false`,
+`headers_available:false`, `bodies_available:false`, `matched_count`,
+`requests_truncated`, and timing/size entries filtered by a case-sensitive
+literal URL substring. The page can clear or overflow its timing buffer;
+**an empty list does not imply no traffic**. Methods, statuses, request headers,
+response bodies, WebSockets, and all past HTTP traffic cannot be recovered this
+way; cross-origin/cache sizes can be zero. No future monitoring is started.
+Use `monitor` below for future fetch/XHR traffic in a signed-in tab.
+
+Safari's native MCP offers `list_tabs`, `list_network_requests`, and
+`get_network_request` with headers/body details for its automation-session tab
+handles. Cider's native `network` adapter owns a separate session and tab; there
+is no supported mapping here from regular Apple Events `--window`/`--tab`
+positions to those handles. Existing regular-tab retained native HTTP history
+is therefore **not available through these commands**, and native capture may
+require a separate sign-in. `network-list` does not disguise this limitation.
+
+Library entry points (all async, returning `anyhow::Result`):
+`safari::eval(javascript: &str, target: TabTarget, options: &EvalOptions) -> EvalResult`,
+`safari::request_with_options(url: &str, target: TabTarget, options: &RequestOptions) -> RequestResult`,
+`safari::navigate(url: &str, target: TabTarget, timeout: u32) -> NavigationResult`,
+and `safari::network_list(target: TabTarget, filter: Option<&str>, limit: u32) -> NetworkList`.
+Both options structs have safe `Default` implementations with gates disabled.
+The legacy `safari::request(url, target, max_bytes, timeout)` stays a plain GET.
 
 Use the tab already signed in to the desired account for `request`. Browser
 cookies remain in Safari, including HttpOnly cookies that Safari sends itself.
@@ -217,8 +306,9 @@ Tab positions are **one-based and transient**: rerun `tabs` after moving or
 closing tabs, and avoid rearranging them during a command. `window_id` is also
 reported as metadata. Commands do not start Safari when it is closed.
 
-The Apple Events tab commands (`tabs`, `content`, `fetch`, `request`, and `monitor`) need Automation permission for the launching app.
-`fetch`, `request`, and `monitor` additionally require Safari Settings → Developer →
+The Apple Events tab commands (`tabs`, `content`, `fetch`, `request`, `eval`,
+`navigate`, `network-list`, and `monitor`) need Automation permission for the launching app.
+`fetch`, `request`, `eval`, `navigate`, `network-list`, and `monitor` additionally require Safari Settings → Developer →
 **Allow JavaScript from Apple Events** (older Safari: Develop menu). Enable
 web developer features in Advanced settings if needed. Cider never changes
 these settings. `content` does not require that JavaScript permission.

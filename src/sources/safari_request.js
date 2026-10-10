@@ -14,7 +14,8 @@ function(config) {
     (async () => {
         try {
             const response = await fetch(url.href, {
-                method: "GET", credentials: "same-origin", mode: "same-origin",
+                method: config.method, headers: config.headers, body: config.body,
+                credentials: "same-origin", mode: "same-origin",
                 redirect: "error", signal: state.controller.signal
             });
             const reader = response.body && response.body.getReader();
