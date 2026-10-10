@@ -1,7 +1,8 @@
 use super::local_store;
 use super::util::run_command_with_timeout;
-use super::util::{run_jxa_with_timeout, ActionResult};
+use super::util::{run_jxa_stdin_with_timeout, run_jxa_with_timeout, ActionResult};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Debug, Serialize)]
@@ -364,7 +365,7 @@ pub(super) fn safari_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 async fn run_browser_script(script: &str, timeout: u32) -> anyhow::Result<String> {
-    run_jxa_with_timeout(script, Duration::from_secs(u64::from(timeout)))
+    run_jxa_stdin_with_timeout(script, Duration::from_secs(u64::from(timeout)))
         .await
         .map_err(safari_error)
 }
@@ -391,16 +392,165 @@ pub async fn request(
     max_bytes: u32,
     timeout: u32,
 ) -> anyhow::Result<RequestResult> {
+    request_with_options(
+        url,
+        target,
+        &RequestOptions {
+            max_bytes,
+            timeout,
+            ..RequestOptions::default()
+        },
+    )
+    .await
+}
+
+/// Custom requests are mutation-capable, including GETs with custom headers.
+/// This gate is enforced for library callers as well as the CLI.
+#[derive(Debug, Clone)]
+pub struct RequestOptions {
+    pub method: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<String>,
+    pub allow_mutation: bool,
+    pub max_bytes: u32,
+    pub timeout: u32,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            method: "GET".into(),
+            headers: BTreeMap::new(),
+            body: None,
+            allow_mutation: false,
+            max_bytes: 100_000,
+            timeout: 30,
+        }
+    }
+}
+
+impl RequestOptions {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_timeout(self.timeout)?;
+        validate_content_limit(self.max_bytes)?;
+        let method = self.method.to_ascii_uppercase();
+        anyhow::ensure!(
+            matches!(
+                method.as_str(),
+                "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+            ),
+            "invalid method: expected GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS"
+        );
+        anyhow::ensure!(
+            self.allow_mutation || (method == "GET" && self.headers.is_empty() && self.body.is_none()),
+            "invalid request: custom methods, headers, or bodies require --allow-mutation (library: allow_mutation=true)"
+        );
+        anyhow::ensure!(
+            self.body.is_none() || !matches!(method.as_str(), "GET" | "HEAD"),
+            "invalid body: GET and HEAD cannot have request bodies"
+        );
+        anyhow::ensure!(
+            self.body.as_ref().map_or(0, String::len) <= 1_000_000,
+            "invalid body: maximum is 1000000 UTF-8 bytes"
+        );
+        let mut names = std::collections::BTreeSet::new();
+        let mut bytes = 0usize;
+        for (name, value) in &self.headers {
+            let lower = name.to_ascii_lowercase();
+            anyhow::ensure!(
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
+                    && names.insert(lower.clone()),
+                "invalid headers: names must be unique HTTP tokens (case-insensitive)"
+            );
+            anyhow::ensure!(
+                !lower.starts_with("sec-")
+                    && !lower.starts_with("proxy-")
+                    && !matches!(
+                        lower.as_str(),
+                        "accept-charset"
+                            | "accept-encoding"
+                            | "access-control-request-headers"
+                            | "access-control-request-method"
+                            | "connection"
+                            | "content-length"
+                            | "cookie"
+                            | "cookie2"
+                            | "date"
+                            | "dnt"
+                            | "expect"
+                            | "host"
+                            | "keep-alive"
+                            | "origin"
+                            | "referer"
+                            | "set-cookie"
+                            | "te"
+                            | "trailer"
+                            | "transfer-encoding"
+                            | "upgrade"
+                            | "via"
+                            | "permissions-policy"
+                            | "user-agent"
+                            | "x-http-method"
+                            | "x-http-method-override"
+                            | "x-method-override"
+                    ),
+                "invalid headers: browser-controlled or method-override headers are not supported"
+            );
+            anyhow::ensure!(
+                value
+                    .chars()
+                    .all(|c| (c == '\t' || !c.is_control()) && u32::from(c) <= 255),
+                "invalid headers: values must be HTTP byte strings without control characters"
+            );
+            bytes += name.len() + value.len();
+        }
+        anyhow::ensure!(
+            self.headers.len() <= 100 && bytes <= 65_536,
+            "invalid headers: maximum is 100 headers and 65536 UTF-8 bytes"
+        );
+        Ok(())
+    }
+}
+
+/// Same-origin request; no redirects, retries, cookie export, or auth inference.
+/// Header/body values are deliberately not included in the result.
+pub async fn request_with_options(
+    url: &str,
+    target: TabTarget,
+    options: &RequestOptions,
+) -> anyhow::Result<RequestResult> {
     validate_url(url)?;
-    validate_timeout(timeout)?;
-    validate_content_limit(max_bytes)?;
-    let config = serde_json::json!({"url":url,"max_bytes":max_bytes,"timeout":timeout,
+    options.validate()?;
+    let config = serde_json::json!({"url":url,"max_bytes":options.max_bytes,"timeout":options.timeout,
+        "method":options.method.to_ascii_uppercase(),"headers":options.headers,"body":options.body,
         "key":format!("__cider_{}", uuid::Uuid::new_v4().simple())});
+    let mut result: RequestResult = serde_json::from_str(
+        &run_page_operation(
+            target,
+            &config,
+            include_str!("safari_request.js"),
+            options.timeout,
+        )
+        .await?,
+    )?;
+    result.hint = request_hint(result.status).map(String::from);
+    Ok(result)
+}
+
+async fn run_page_operation(
+    target: TabTarget,
+    config: &serde_json::Value,
+    operation: &str,
+    timeout: u32,
+) -> anyhow::Result<String> {
     // Safari does not reliably propagate uncaught page exceptions through
     // doJavaScript. Return startup failures explicitly instead of timing out.
     let page_script = format!(
         "(function(){{try{{return ({})({config});}}catch(error){{return JSON.stringify({{error:String(error.message || error)}});}}}})()",
-        include_str!("safari_request.js")
+        operation
     );
     let key = serde_json::to_string(config["key"].as_str().unwrap())?;
     let script = format!(
@@ -408,7 +558,7 @@ pub async fn request(
 const initialURL = target.url();
 const started = app.doJavaScript({}, {{in: target}});
 if (started !== "started") {{
-    let message = "Safari request could not start in this tab. Load an HTTP(S) page, wait for it to finish, then run cider safari tabs --pretty and retry with its --window and --tab";
+    let message = "Safari page operation could not start in this tab. Load a page, wait for it to finish, then run cider safari tabs --pretty and retry with its --window and --tab";
     try {{ message = JSON.parse(started).error || message; }} catch (e) {{}}
     throw new Error(message);
 }}
@@ -416,15 +566,15 @@ const deadline = Date.now() + {timeout} * 1000 + 1000;
 let result;
 try {{
     while (Date.now() < deadline) {{
-        if (target.url() !== initialURL) throw new Error("Safari tab navigated during request");
+        if (target.url() !== initialURL) throw new Error("Safari tab navigated during page operation");
         const raw = app.doJavaScript('JSON.stringify(window[' + {key} + '] && window[' + {key} + '].result || null)', {{in: target}});
         if (raw && raw !== "null") {{ result = JSON.parse(raw); break; }}
         delay(0.1);
     }}
-    if (!result) throw new Error("Safari request timed out");
+    if (!result) throw new Error("Safari page operation timed out; caller JavaScript may continue and side effects are not rolled back");
     if (result.error) throw new Error(result.error);
 }} finally {{
-    try {{ app.doJavaScript('(function(){{const s=window[' + {key} + '];if(s){{s.controller.abort();clearTimeout(s.timer);delete window[' + {key} + '];}}}})()', {{in: target}}); }} catch (e) {{}}
+    try {{ app.doJavaScript('(function(){{const s=window[' + {key} + '];if(s){{if(s.controller)s.controller.abort();clearTimeout(s.timer);delete window[' + {key} + '];}}}})()', {{in: target}}); }} catch (e) {{}}
 }}
 JSON.stringify(result)
 "#,
@@ -432,10 +582,7 @@ JSON.stringify(result)
         serde_json::to_string(&page_script)?,
         key = serde_json::to_string(&key)?
     );
-    let mut result: RequestResult =
-        serde_json::from_str(&run_browser_script(&script, timeout + 10).await?)?;
-    result.hint = request_hint(result.status).map(String::from);
-    Ok(result)
+    run_browser_script(&script, timeout + 10).await
 }
 
 fn request_hint(status: u16) -> Option<&'static str> {
@@ -449,9 +596,265 @@ fn request_hint(status: u16) -> Option<&'static str> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EvalOptions {
+    pub allow_eval: bool,
+    pub max_chars: u32,
+    pub timeout: u32,
+}
+
+impl Default for EvalOptions {
+    fn default() -> Self {
+        Self {
+            allow_eval: false,
+            max_chars: 100_000,
+            timeout: 30,
+        }
+    }
+}
+
+impl EvalOptions {
+    pub fn validate(&self, javascript: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.allow_eval,
+            "invalid eval: requires --allow-eval (library: allow_eval=true); caller JavaScript can mutate the page and send requests"
+        );
+        anyhow::ensure!(
+            !javascript.trim().is_empty() && javascript.len() <= 1_000_000,
+            "invalid JavaScript: expected nonempty source up to 1000000 UTF-8 bytes"
+        );
+        validate_content_limit(self.max_chars)?;
+        validate_timeout(self.timeout)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EvalResult {
+    #[serde(flatten)]
+    pub action: ActionResult,
+    /// json or undefined. JSON.stringify semantics apply, including toJSON.
+    pub value_type: String,
+    /// Null for undefined or truncated output; inspect value_type/truncated.
+    #[serde(default)]
+    pub value: serde_json::Value,
+    /// Truncated serialized JSON; never presented as a complete JSON value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    pub truncated: bool,
+}
+
+/// Evaluate source in the selected document's global scope and await its result.
+/// Use an async IIFE for statements with await. A timeout cannot cancel caller
+/// JavaScript, undo mutations, or interrupt a synchronous page-blocking loop.
+pub async fn eval(
+    javascript: &str,
+    target: TabTarget,
+    options: &EvalOptions,
+) -> anyhow::Result<EvalResult> {
+    options.validate(javascript)?;
+    let config = serde_json::json!({
+        "javascript":javascript,"max_chars":options.max_chars,"timeout":options.timeout,
+        "key":format!("__cider_{}", uuid::Uuid::new_v4().simple())
+    });
+    Ok(serde_json::from_str(
+        &run_page_operation(
+            target,
+            &config,
+            include_str!("safari_eval.js"),
+            options.timeout,
+        )
+        .await?,
+    )?)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NavigationResult {
+    #[serde(flatten)]
+    pub action: ActionResult,
+    pub requested_url: String,
+    pub url: String,
+    pub title: String,
+    pub window: u32,
+    pub tab: u32,
+    pub window_id: i64,
+}
+
+/// Navigate only the selected existing tab. It remains open even on failure.
+/// Completion means document readiness, not network idle or successful login.
+pub async fn navigate(
+    url: &str,
+    target: TabTarget,
+    timeout: u32,
+) -> anyhow::Result<NavigationResult> {
+    validate_url(url)?;
+    validate_timeout(timeout)?;
+    let config = serde_json::json!({"url":url,"timeout":timeout,"window":target.window,"tab":target.tab,
+        "key":format!("__cider_{}", uuid::Uuid::new_v4().simple())});
+    let script = format!(
+        "{}\n({})({config})",
+        target.script()?,
+        include_str!("safari_navigate.js")
+    );
+    Ok(serde_json::from_str(
+        &run_browser_script(&script, timeout + 10).await?,
+    )?)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResourceTimingRequest {
+    pub url: String,
+    pub initiator_type: String,
+    pub start_time_ms: f64,
+    pub duration_ms: f64,
+    pub transfer_size_bytes: u64,
+    pub encoded_body_size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetworkList {
+    pub backend: String,
+    pub coverage: String,
+    pub complete_history: bool,
+    pub headers_available: bool,
+    pub bodies_available: bool,
+    pub url: String,
+    pub matched_count: usize,
+    pub requests_truncated: bool,
+    pub requests: Vec<ResourceTimingRequest>,
+    pub limitations: String,
+}
+
+/// Read only Resource Timing entries retained by this document, not full HTTP
+/// history. Methods, request headers, and response bodies are unavailable.
+pub async fn network_list(
+    target: TabTarget,
+    filter: Option<&str>,
+    limit: u32,
+) -> anyhow::Result<NetworkList> {
+    anyhow::ensure!(
+        (1..=1000).contains(&limit),
+        "invalid limit: expected 1-1000"
+    );
+    anyhow::ensure!(
+        filter.map_or(0, str::len) <= 4096,
+        "invalid filter: maximum is 4096 UTF-8 bytes"
+    );
+    let config = serde_json::json!({"filter":filter,"limit":limit});
+    let page_script = format!(
+        "(function(){{try{{return ({})({config});}}catch(error){{return JSON.stringify({{error:String(error.message || error)}});}}}})()",
+        include_str!("safari_network_list.js")
+    );
+    let script = format!(
+        r#"{}
+const before = target.url();
+const raw = app.doJavaScript({}, {{in:target}});
+if (target.url() !== before) throw new Error("Safari tab navigated during network list");
+const result = JSON.parse(raw);
+if (result.error) throw new Error(result.error);
+JSON.stringify(result)
+"#,
+        target.script()?,
+        serde_json::to_string(&page_script)?
+    );
+    Ok(serde_json::from_str(
+        &run_browser_script(&script, 20).await?,
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_options_gate_and_validate_before_automation() {
+        let mut options = RequestOptions::default();
+        assert!(options.validate().is_ok());
+        options.method = "POST".into();
+        assert!(options
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("allow-mutation"));
+        options.allow_mutation = true;
+        options.body = Some("{}".into());
+        assert!(options.validate().is_ok());
+        options.method = "GET".into();
+        assert!(options.validate().is_err());
+        options.body = None;
+        options
+            .headers
+            .insert("Authorization".into(), "Bearer caller-supplied".into());
+        assert!(options.validate().is_ok());
+        options.allow_mutation = false;
+        assert!(options.validate().is_err());
+        options.allow_mutation = true;
+        for name in [
+            "Cookie",
+            "Host",
+            "Origin",
+            "Sec-Fetch-Site",
+            "X-HTTP-Method-Override",
+            "bad name",
+        ] {
+            options.headers.clear();
+            options.headers.insert(name.into(), "x".into());
+            assert!(options.validate().is_err(), "{name}");
+        }
+        options.headers.clear();
+        options
+            .headers
+            .insert("X-App".into(), "ok\r\ninjected: yes".into());
+        assert!(options.validate().is_err());
+        options.headers.insert("X-App".into(), "ok".into());
+        options.headers.insert("x-app".into(), "duplicate".into());
+        assert!(options.validate().is_err());
+        options.headers.clear();
+        options.method = "TRACE".into();
+        assert!(options.validate().is_err());
+        options.method = "PATCH".into();
+        options.body = Some("x".repeat(1_000_001));
+        assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn eval_gates_and_result_shapes_are_explicit() {
+        let mut options = EvalOptions::default();
+        assert!(options.validate("1+1").is_err());
+        options.allow_eval = true;
+        assert!(options.validate("Promise.resolve({ok:true})").is_ok());
+        assert!(options.validate(" ").is_err());
+        assert!(options.validate(&"x".repeat(1_000_001)).is_err());
+        for value in [
+            serde_json::json!({"ok":true,"action":"eval","value_type":"json","value":null,"truncated":false}),
+            serde_json::json!({"ok":true,"action":"eval","value_type":"json","value":{"n":42},"truncated":false}),
+            serde_json::json!({"ok":true,"action":"eval","value_type":"json","value":null,"preview":"{\"n\":","truncated":true}),
+            serde_json::json!({"ok":true,"action":"eval","value_type":"undefined","value":null,"truncated":false}),
+        ] {
+            let parsed: EvalResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        }
+    }
+
+    #[tokio::test]
+    async fn library_gates_fail_without_touching_safari() {
+        assert!(eval("1", TabTarget::default(), &EvalOptions::default())
+            .await
+            .is_err());
+        assert!(request_with_options(
+            "https://example.com",
+            TabTarget::default(),
+            &RequestOptions {
+                method: "POST".into(),
+                ..RequestOptions::default()
+            }
+        )
+        .await
+        .is_err());
+        assert!(navigate("javascript:alert(1)", TabTarget::default(), 30)
+            .await
+            .is_err());
+        assert!(network_list(TabTarget::default(), None, 0).await.is_err());
+    }
 
     #[tokio::test]
     async fn history_search_is_literal_paginated_and_preserves_text() {
