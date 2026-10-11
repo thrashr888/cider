@@ -16,7 +16,7 @@ function fixture(options = {}) {
             writes++;
             target.window.key = {result:null};
             if (options.request) target.window.key.controller={abort(){aborted++;}};
-            return "started";
+            return options.startup || "started";
         }
         if (code.startsWith("JSON.stringify((")) {
             polls++;
@@ -67,4 +67,24 @@ test("completed exception retains completion phase without implying rollback",()
     const f=fixture({error:{error:"caller exception",phase:"completed",cancellation:"not_needed"}});
     assert.equal(f.result.cider_operation_error.phase,"completed");
     assert.equal(f.result.cider_operation_error.cancellation,"not_needed");
+});
+test("explicit startup refusal retains before-dispatch metadata",()=>{
+    const f=fixture({startup:JSON.stringify({error:"Binary transfer handle mismatch",phase:"before_dispatch"})});
+    assert.equal(f.result.cider_operation_error.phase,"before_dispatch");
+    assert.equal(f.result.cider_operation_error.cancellation,"not_needed");
+});
+test("reload, window move, and frame-only markers cannot resolve a top-level document",()=>{
+    const original={window:{__cider_document_identity:"original"},location:{origin:"https://example.com"}};
+    const reloaded={window:{},location:{origin:"https://example.com"}};
+    const frameOnly={window:{frames:[original.window]},location:{origin:"https://example.com"}};
+    for (const windows of [
+        [{id:()=>7,tabs:()=>[reloaded]}],
+        [{id:()=>8,tabs:()=>[original]}],
+        [{id:()=>7,tabs:()=>[frameOnly]}],
+    ]) {
+        const app={running:()=>true,windows:()=>windows,
+            doJavaScript:(code,{in:target})=>vm.runInNewContext(code,target)};
+        const locate=vm.runInNewContext(`(${resolver})`)({window_id:7,document_id:"original",origin:"https://example.com"},app);
+        assert.throws(locate,/unavailable|changed/);
+    }
 });

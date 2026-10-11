@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+#[path = "safari_binary.rs"]
+mod safari_binary;
+pub use safari_binary::{
+    abort_binary_transfer, finish_binary_transfer, open_binary_transfer, read_binary_chunk,
+    write_binary_chunk, BinaryChunk, BinaryDirection, BinaryTransfer, BinaryTransferOptions,
+};
+
 #[derive(Debug, Serialize)]
 pub struct Bookmark {
     pub title: String,

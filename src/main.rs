@@ -1375,6 +1375,11 @@ enum PasswordsAction {
 
 #[derive(Subcommand)]
 enum SafariAction {
+    /// Bounded document-pinned binary chunks through a caller-supplied page adapter
+    Binary {
+        #[command(subcommand)]
+        command: SafariBinaryAction,
+    },
     /// List Safari bookmarks (default)
     Bookmarks,
     /// List browsing history
@@ -1552,6 +1557,71 @@ impl SafariContentArgs {
             sources::safari::ContentFormat::Text
         }
     }
+}
+
+#[derive(Subcommand)]
+enum SafariBinaryAction {
+    /// Open an adapter factory; URLs and credentials stay in the page
+    Open {
+        #[arg(long)]
+        file: String,
+        #[arg(long, value_parser = ["upload", "download"])]
+        direction: String,
+        #[arg(long)]
+        allow_eval: bool,
+        #[command(flatten)]
+        target: SafariTargetArgs,
+        #[arg(long, default_value_t = 128000)]
+        chunk_bytes: u32,
+        /// Consumer-selected total byte budget (not an expected exact length)
+        #[arg(long)]
+        total_bytes: u64,
+        #[arg(long, default_value_t = 30)]
+        timeout: u32,
+        #[arg(long, default_value_t = 60)]
+        idle_timeout: u32,
+    },
+    /// Read one chunk; JSON returns {handle, chunk:{offset,bytes,done}}
+    Read {
+        /// JSON handle from the last acknowledged operation
+        #[arg(long)]
+        handle_file: String,
+    },
+    /// Write one bounded raw binary file; JSON returns the advanced handle
+    Write {
+        #[arg(long)]
+        handle_file: String,
+        #[arg(long)]
+        file: String,
+    },
+    /// Acknowledge adapter close and release its state
+    Finish {
+        #[arg(long)]
+        handle_file: String,
+    },
+    /// Request best-effort abort; dispatched writes cannot be undone
+    Abort {
+        #[arg(long)]
+        handle_file: String,
+    },
+}
+
+fn safari_binary_file(path: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= limit,
+        "binary input exceeds {limit} bytes"
+    );
+    Ok(bytes)
+}
+
+fn safari_binary_handle(path: &str) -> anyhow::Result<sources::safari::BinaryTransfer> {
+    let handle: sources::safari::BinaryTransfer =
+        serde_json::from_slice(&safari_binary_file(path, 16_384)?)?;
+    handle.validate()?;
+    Ok(handle)
 }
 
 fn safari_input(inline: Option<String>, file: Option<String>) -> anyhow::Result<Option<String>> {
@@ -1910,9 +1980,15 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
     });
 
     if !top_level {
-        let mutating = is_mutating_action(name);
+        let mutating = name == "binary" || is_mutating_action(name);
         schema["kind"] = serde_json::json!(if mutating { "write" } else { "read" });
         schema["supports_dry_run"] = serde_json::json!(mutating);
+        if name == "binary" {
+            for action in schema["actions"].as_array_mut().unwrap() {
+                action["kind"] = serde_json::json!("write");
+                action["supports_dry_run"] = serde_json::json!(true);
+            }
+        }
     } else {
         let has_mutations = schema["actions"]
             .as_array()
@@ -1950,6 +2026,8 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
             schema["network_list"] = serde_json::json!({"backend":"resource_timing","complete_history":false,"coverage":"retained entries in selected document; empty does not mean no traffic","headers_available":false,"bodies_available":false,"native_limit":"native MCP tab handles belong to its automation session, not Apple Events tab positions"});
             schema["eval"] = serde_json::json!({"gate":"allow-eval","async":"awaits returned promise","timeout_cancels_javascript":false,"read_only_mcp":false});
             schema["request"] = serde_json::json!({"default_method":"GET","custom_request_gate":"allow-mutation","same_origin":true,"redirects":false,"retries":false,"auth_inference":false,"read_only_mcp":false});
+            schema["binary_transfer"] = serde_json::json!({"gate":"allow-eval","document_scoped":true,"max_chunk_bytes":128000,"total_bytes":"explicit consumer budget, at most 9007199254740991","max_live_transfers":4,"retries":false,"fetch_request_streaming":false,"read_only_mcp":false});
+            schema["frame_targeting"] = serde_json::json!({"existing_tab_backend":"apple_events","existing_tab_cross_origin_frames":false,"native_frame_api":"Safari 27 MCP evaluate_javascript(frameId)","native_existing_tab_attachment":"not advertised or verified","evidence":"docs/safari-frame-targeting.md"});
         }
         if name == "mail" {
             schema["friendly_mailboxes"] = serde_json::json!(true);
@@ -3259,162 +3337,327 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         },
-        Commands::Safari { action } => {
-            match action {
-                None | Some(SafariAction::Bookmarks) => {
-                    run_source!(sources::safari::bookmarks(), cli.pretty, cli.envelope)
-                }
-                Some(SafariAction::History {
-                    limit,
-                    search,
-                    offset,
-                }) => {
+        Commands::Safari { action } => match action {
+            None | Some(SafariAction::Bookmarks) => {
+                run_source!(sources::safari::bookmarks(), cli.pretty, cli.envelope)
+            }
+            Some(SafariAction::History {
+                limit,
+                search,
+                offset,
+            }) => {
+                run_source!(
+                    sources::safari::search_history(search.as_deref(), limit, offset),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(SafariAction::Tabs) => {
+                run_source!(sources::safari::tabs(), cli.pretty, cli.envelope)
+            }
+            Some(SafariAction::Content { target, content }) => {
+                run_source!(
+                    sources::safari::content(target.target(), content.format(), content.max_chars),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(SafariAction::Fetch {
+                url,
+                window,
+                content,
+                timeout,
+            }) => {
+                sources::safari::validate_url(&url)?;
+                sources::safari::TabTarget { window, tab: 1 }.validate()?;
+                sources::safari::validate_timeout(timeout)?;
+                sources::safari::validate_content_limit(content.max_chars)?;
+                if cli.no_op {
+                    print_dry_run("fetch", format!("Open {url} in a new Safari tab in window {window}, read content, and leave the tab open"), cli.pretty, cli.envelope)?;
+                } else {
                     run_source!(
-                        sources::safari::search_history(search.as_deref(), limit, offset),
-                        cli.pretty,
-                        cli.envelope
-                    )
-                }
-                Some(SafariAction::Tabs) => {
-                    run_source!(sources::safari::tabs(), cli.pretty, cli.envelope)
-                }
-                Some(SafariAction::Content { target, content }) => {
-                    run_source!(
-                        sources::safari::content(
-                            target.target(),
+                        sources::safari::fetch(
+                            &url,
+                            window,
                             content.format(),
-                            content.max_chars
+                            content.max_chars,
+                            timeout
                         ),
                         cli.pretty,
                         cli.envelope
                     )
                 }
-                Some(SafariAction::Fetch {
-                    url,
-                    window,
-                    content,
-                    timeout,
-                }) => {
-                    sources::safari::validate_url(&url)?;
-                    sources::safari::TabTarget { window, tab: 1 }.validate()?;
-                    sources::safari::validate_timeout(timeout)?;
-                    sources::safari::validate_content_limit(content.max_chars)?;
-                    if cli.no_op {
-                        print_dry_run("fetch", format!("Open {url} in a new Safari tab in window {window}, read content, and leave the tab open"), cli.pretty, cli.envelope)?;
-                    } else {
-                        run_source!(
-                            sources::safari::fetch(
-                                &url,
-                                window,
-                                content.format(),
-                                content.max_chars,
-                                timeout
-                            ),
-                            cli.pretty,
-                            cli.envelope
+            }
+            Some(SafariAction::Request {
+                url,
+                target,
+                method,
+                headers,
+                headers_file,
+                body,
+                body_file,
+                allow_mutation,
+                max_bytes,
+                timeout,
+            }) => {
+                sources::safari::validate_url(&url)?;
+                target.target().validate()?;
+                let headers = safari_input(headers, headers_file)?
+                    .map(|text| serde_json::from_str(&text))
+                    .transpose()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "invalid headers: expected a JSON string-to-string object: {error}"
                         )
-                    }
-                }
-                Some(SafariAction::Request {
-                    url,
-                    target,
+                    })?
+                    .unwrap_or_default();
+                let options = sources::safari::RequestOptions {
                     method,
                     headers,
-                    headers_file,
-                    body,
-                    body_file,
+                    body: safari_input(body, body_file)?,
                     allow_mutation,
                     max_bytes,
                     timeout,
-                }) => {
-                    sources::safari::validate_url(&url)?;
-                    target.target().validate()?;
-                    let headers = safari_input(headers, headers_file)?
-                        .map(|text| serde_json::from_str(&text))
-                        .transpose()
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "invalid headers: expected a JSON string-to-string object: {error}"
-                            )
-                        })?
-                        .unwrap_or_default();
-                    let options = sources::safari::RequestOptions {
-                        method,
-                        headers,
-                        body: safari_input(body, body_file)?,
-                        allow_mutation,
-                        max_bytes,
-                        timeout,
-                    };
-                    options.validate()?;
-                    if cli.no_op {
-                        print_dry_run("request", format!("{} {url} from Safari window {} tab {}; origin is checked at execution; header/body values omitted", options.method.to_ascii_uppercase(), target.window, target.tab), cli.pretty, cli.envelope)?;
-                    } else {
-                        run_source!(
-                            sources::safari::request_with_options(&url, target.target(), &options),
-                            cli.pretty,
-                            cli.envelope
-                        )
-                    }
-                }
-                Some(SafariAction::Eval {
-                    javascript,
-                    file,
-                    allow_eval,
-                    target,
-                    max_chars,
-                    timeout,
-                }) => {
-                    target.target().validate()?;
-                    let javascript = safari_input(javascript, file)?.ok_or_else(|| {
-                        anyhow::anyhow!("invalid eval: provide JavaScript or --file")
-                    })?;
-                    let options = sources::safari::EvalOptions {
-                        allow_eval,
-                        max_chars,
-                        timeout,
-                    };
-                    options.validate(&javascript)?;
-                    if cli.no_op {
-                        print_dry_run("eval", format!("Evaluate caller JavaScript in Safari window {} tab {}; source omitted; timeout does not cancel side effects", target.window, target.tab), cli.pretty, cli.envelope)?;
-                    } else {
-                        run_source!(
-                            sources::safari::eval(&javascript, target.target(), &options),
-                            cli.pretty,
-                            cli.envelope
-                        )
-                    }
-                }
-                Some(SafariAction::Navigate {
-                    url,
-                    target,
-                    timeout,
-                }) => {
-                    sources::safari::validate_url(&url)?;
-                    sources::safari::validate_timeout(timeout)?;
-                    target.target().validate()?;
-                    if cli.no_op {
-                        print_dry_run("navigate", format!("Navigate Safari window {} tab {} to {url}; leave selected tab open", target.window, target.tab), cli.pretty, cli.envelope)?;
-                    } else {
-                        run_source!(
-                            sources::safari::navigate(&url, target.target(), timeout),
-                            cli.pretty,
-                            cli.envelope
-                        )
-                    }
-                }
-                Some(SafariAction::NetworkList {
-                    target,
-                    filter,
-                    limit,
-                }) => {
+                };
+                options.validate()?;
+                if cli.no_op {
+                    print_dry_run("request", format!("{} {url} from Safari window {} tab {}; origin is checked at execution; header/body values omitted", options.method.to_ascii_uppercase(), target.window, target.tab), cli.pretty, cli.envelope)?;
+                } else {
                     run_source!(
-                        sources::safari::network_list(target.target(), filter.as_deref(), limit),
+                        sources::safari::request_with_options(&url, target.target(), &options),
                         cli.pretty,
                         cli.envelope
                     )
                 }
-                Some(SafariAction::Network {
+            }
+            Some(SafariAction::Binary { command }) => match command {
+                SafariBinaryAction::Open {
+                    file,
+                    direction,
+                    allow_eval,
+                    target,
+                    chunk_bytes,
+                    total_bytes,
+                    timeout,
+                    idle_timeout,
+                } => {
+                    target.target().validate()?;
+                    let javascript = safari_input(None, Some(file))?.unwrap();
+                    let options = sources::safari::BinaryTransferOptions {
+                        allow_eval,
+                        chunk_bytes,
+                        total_bytes,
+                        timeout,
+                        idle_timeout,
+                    };
+                    options.validate()?;
+                    sources::safari::EvalOptions {
+                        allow_eval,
+                        max_chars: 1,
+                        timeout,
+                    }
+                    .validate(&javascript)?;
+                    let direction = if direction == "upload" {
+                        sources::safari::BinaryDirection::Upload
+                    } else {
+                        sources::safari::BinaryDirection::Download
+                    };
+                    if cli.no_op {
+                        print_dry_run(
+                            "binary-open",
+                            "Open bounded caller adapter; source omitted",
+                            cli.pretty,
+                            cli.envelope,
+                        )?;
+                    } else {
+                        run_source!(
+                            async {
+                                let document =
+                                    sources::safari::document_target(target.target()).await?;
+                                sources::safari::open_binary_transfer(
+                                    &javascript,
+                                    &document,
+                                    direction,
+                                    &options,
+                                )
+                                .await
+                            },
+                            cli.pretty,
+                            cli.envelope
+                        )
+                    }
+                }
+                SafariBinaryAction::Read { handle_file } => {
+                    let mut handle = safari_binary_handle(&handle_file)?;
+                    anyhow::ensure!(
+                        handle.direction == sources::safari::BinaryDirection::Download,
+                        "not a download"
+                    );
+                    if cli.no_op {
+                        print_dry_run(
+                            "binary-read",
+                            "Read one bounded chunk from pinned document",
+                            cli.pretty,
+                            cli.envelope,
+                        )?;
+                    } else {
+                        run_source!(
+                            async {
+                                let chunk = sources::safari::read_binary_chunk(&mut handle).await?;
+                                Ok::<_, anyhow::Error>(
+                                    serde_json::json!({"handle":handle,"chunk":chunk}),
+                                )
+                            },
+                            cli.pretty,
+                            cli.envelope
+                        )
+                    }
+                }
+                SafariBinaryAction::Write { handle_file, file } => {
+                    let mut handle = safari_binary_handle(&handle_file)?;
+                    anyhow::ensure!(
+                        handle.direction == sources::safari::BinaryDirection::Upload,
+                        "not an upload"
+                    );
+                    let bytes = safari_binary_file(&file, u64::from(handle.options.chunk_bytes))?;
+                    anyhow::ensure!(
+                        !bytes.is_empty()
+                            && bytes.len() as u64 <= handle.options.total_bytes - handle.offset,
+                        "invalid binary write bounds"
+                    );
+                    if cli.no_op {
+                        print_dry_run(
+                            "binary-write",
+                            "Write one bounded chunk; bytes omitted",
+                            cli.pretty,
+                            cli.envelope,
+                        )?;
+                    } else {
+                        run_source!(
+                            async {
+                                sources::safari::write_binary_chunk(&mut handle, &bytes).await?;
+                                Ok::<_, anyhow::Error>(handle)
+                            },
+                            cli.pretty,
+                            cli.envelope
+                        )
+                    }
+                }
+                SafariBinaryAction::Finish { handle_file } => {
+                    let mut handle = safari_binary_handle(&handle_file)?;
+                    if cli.no_op {
+                        print_dry_run(
+                            "binary-finish",
+                            "Close pinned page adapter",
+                            cli.pretty,
+                            cli.envelope,
+                        )?;
+                    } else {
+                        run_source!(
+                            async {
+                                sources::safari::finish_binary_transfer(&mut handle).await?;
+                                Ok::<_, anyhow::Error>(handle)
+                            },
+                            cli.pretty,
+                            cli.envelope
+                        )
+                    }
+                }
+                SafariBinaryAction::Abort { handle_file } => {
+                    let mut handle = safari_binary_handle(&handle_file)?;
+                    if cli.no_op {
+                        print_dry_run(
+                            "binary-abort",
+                            "Request abort; does not undo writes",
+                            cli.pretty,
+                            cli.envelope,
+                        )?;
+                    } else {
+                        run_source!(
+                            async {
+                                sources::safari::abort_binary_transfer(&mut handle).await?;
+                                Ok::<_, anyhow::Error>(handle)
+                            },
+                            cli.pretty,
+                            cli.envelope
+                        )
+                    }
+                }
+            },
+            Some(SafariAction::Eval {
+                javascript,
+                file,
+                allow_eval,
+                target,
+                max_chars,
+                timeout,
+            }) => {
+                target.target().validate()?;
+                let javascript = safari_input(javascript, file)?
+                    .ok_or_else(|| anyhow::anyhow!("invalid eval: provide JavaScript or --file"))?;
+                let options = sources::safari::EvalOptions {
+                    allow_eval,
+                    max_chars,
+                    timeout,
+                };
+                options.validate(&javascript)?;
+                if cli.no_op {
+                    print_dry_run("eval", format!("Evaluate caller JavaScript in Safari window {} tab {}; source omitted; timeout does not cancel side effects", target.window, target.tab), cli.pretty, cli.envelope)?;
+                } else {
+                    run_source!(
+                        sources::safari::eval(&javascript, target.target(), &options),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
+            }
+            Some(SafariAction::Navigate {
+                url,
+                target,
+                timeout,
+            }) => {
+                sources::safari::validate_url(&url)?;
+                sources::safari::validate_timeout(timeout)?;
+                target.target().validate()?;
+                if cli.no_op {
+                    print_dry_run(
+                        "navigate",
+                        format!(
+                            "Navigate Safari window {} tab {} to {url}; leave selected tab open",
+                            target.window, target.tab
+                        ),
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    run_source!(
+                        sources::safari::navigate(&url, target.target(), timeout),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
+            }
+            Some(SafariAction::NetworkList {
+                target,
+                filter,
+                limit,
+            }) => {
+                run_source!(
+                    sources::safari::network_list(target.target(), filter.as_deref(), limit),
+                    cli.pretty,
+                    cli.envelope
+                )
+            }
+            Some(SafariAction::Network {
+                url,
+                filter,
+                bodies,
+                wait,
+                timeout,
+                limit,
+                max_body_bytes,
+            }) => {
+                let options = sources::safari_network::CaptureOptions {
                     url,
                     filter,
                     bodies,
@@ -3422,60 +3665,50 @@ async fn run() -> anyhow::Result<()> {
                     timeout,
                     limit,
                     max_body_bytes,
-                }) => {
-                    let options = sources::safari_network::CaptureOptions {
-                        url,
-                        filter,
-                        bodies,
-                        wait,
-                        timeout,
-                        limit,
-                        max_body_bytes,
-                    };
-                    options.validate()?;
-                    if cli.no_op {
-                        print_dry_run("network", format!("Open {} in a new Safari MCP tab, capture network traffic, and close that tab", options.url), cli.pretty, cli.envelope)?;
-                    } else {
-                        run_source!(
-                            sources::safari_network::capture(&options),
-                            cli.pretty,
-                            cli.envelope
-                        )
-                    }
+                };
+                options.validate()?;
+                if cli.no_op {
+                    print_dry_run("network", format!("Open {} in a new Safari MCP tab, capture network traffic, and close that tab", options.url), cli.pretty, cli.envelope)?;
+                } else {
+                    run_source!(
+                        sources::safari_network::capture(&options),
+                        cli.pretty,
+                        cli.envelope
+                    )
                 }
-                Some(SafariAction::Monitor {
-                    target,
+            }
+            Some(SafariAction::Monitor {
+                target,
+                filter,
+                bodies,
+                seconds,
+                limit,
+                max_body_bytes,
+            }) => {
+                let options = sources::safari_network::MonitorOptions {
+                    target: target.target(),
                     filter,
                     bodies,
                     seconds,
                     limit,
                     max_body_bytes,
-                }) => {
-                    let options = sources::safari_network::MonitorOptions {
-                        target: target.target(),
-                        filter,
-                        bodies,
-                        seconds,
-                        limit,
-                        max_body_bytes,
-                    };
-                    options.validate()?;
-                    if cli.no_op {
-                        print_dry_run("monitor", format!("Temporarily observe fetch/XHR traffic in Safari window {} tab {} for {seconds} seconds", target.window, target.tab), cli.pretty, cli.envelope)?;
-                    } else {
-                        eprintln!("Monitoring Safari window {} tab {} for {seconds} seconds. Interact with the page to generate requests; do not reload it.", target.window, target.tab);
-                        run_source!(
-                            sources::safari_network::monitor(&options),
-                            cli.pretty,
-                            cli.envelope
-                        )
-                    }
-                }
-                Some(SafariAction::ReadingList) => {
-                    run_source!(sources::reading_list::fetch(), cli.pretty, cli.envelope)
+                };
+                options.validate()?;
+                if cli.no_op {
+                    print_dry_run("monitor", format!("Temporarily observe fetch/XHR traffic in Safari window {} tab {} for {seconds} seconds", target.window, target.tab), cli.pretty, cli.envelope)?;
+                } else {
+                    eprintln!("Monitoring Safari window {} tab {} for {seconds} seconds. Interact with the page to generate requests; do not reload it.", target.window, target.tab);
+                    run_source!(
+                        sources::safari_network::monitor(&options),
+                        cli.pretty,
+                        cli.envelope
+                    )
                 }
             }
-        }
+            Some(SafariAction::ReadingList) => {
+                run_source!(sources::reading_list::fetch(), cli.pretty, cli.envelope)
+            }
+        },
         Commands::Reminders { action } => match action {
             None => {
                 run_source!(sources::reminders::list(None), cli.pretty, cli.envelope)
@@ -4962,7 +5195,7 @@ mod tests {
         for action in schema["actions"].as_array().unwrap() {
             let write = matches!(
                 action["name"].as_str(),
-                Some("fetch" | "request" | "network" | "monitor" | "eval" | "navigate")
+                Some("fetch" | "request" | "network" | "monitor" | "eval" | "navigate" | "binary")
             );
             assert_eq!(action["supports_dry_run"], write);
             assert_eq!(action["kind"], if write { "write" } else { "read" });
@@ -5043,5 +5276,92 @@ mod tests {
         assert_eq!(schema["network_list"]["complete_history"], false);
         assert_eq!(schema["network_list"]["headers_available"], false);
         assert_eq!(schema["network_list"]["bodies_available"], false);
+    }
+
+    #[test]
+    fn safari_binary_cli_and_frame_limits_are_discoverable() {
+        for args in [
+            vec![
+                "cider",
+                "safari",
+                "binary",
+                "open",
+                "--file",
+                "factory.js",
+                "--direction",
+                "download",
+                "--total-bytes",
+                "750001",
+                "--allow-eval",
+                "--dry-run",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "binary",
+                "read",
+                "--handle-file",
+                "handle.json",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "binary",
+                "write",
+                "--handle-file",
+                "handle.json",
+                "--file",
+                "chunk.bin",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "binary",
+                "finish",
+                "--handle-file",
+                "handle.json",
+            ],
+            vec![
+                "cider",
+                "safari",
+                "binary",
+                "abort",
+                "--handle-file",
+                "handle.json",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "cider",
+            "safari",
+            "binary",
+            "open",
+            "--file",
+            "factory.js",
+            "--direction",
+            "download"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["cider", "safari", "binary", "read"]).is_err());
+        let schema = build_schema(Some("safari"));
+        assert_eq!(schema["binary_transfer"]["max_chunk_bytes"], 128000);
+        assert_eq!(schema["binary_transfer"]["retries"], false);
+        assert_eq!(schema["binary_transfer"]["fetch_request_streaming"], false);
+        assert_eq!(
+            schema["frame_targeting"]["existing_tab_cross_origin_frames"],
+            false
+        );
+        let binary = schema["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["name"] == "binary")
+            .unwrap();
+        assert_eq!(binary["supports_dry_run"], true);
+        for action in binary["actions"].as_array().unwrap() {
+            assert_eq!(action["kind"], "write");
+            assert_eq!(action["supports_dry_run"], true);
+        }
     }
 }

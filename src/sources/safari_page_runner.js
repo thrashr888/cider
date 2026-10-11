@@ -10,7 +10,14 @@ function(config) {
         const started = app.doJavaScript(config.page, {in: target});
         if (started !== "started") {
             let message = "Safari page operation could not start";
-            try { message = JSON.parse(started).error || message; } catch (error) {}
+            try {
+                const startup = JSON.parse(started);
+                message = startup.error || message;
+                if (startup.phase === "before_dispatch") {
+                    phase = "before_dispatch";
+                    cancellation = "not_needed";
+                }
+            } catch (error) {}
             throw new Error(message);
         }
         while (Date.now() < deadline) {

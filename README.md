@@ -234,6 +234,17 @@ another window. Library callers can use `document_target(TabTarget)` once and
 `eval_document(source, &DocumentTarget, &EvalOptions)` for successive operations
 without silently switching documents. Both are additive; positional APIs remain.
 
+For larger binary payloads, the additive `open_binary_transfer`,
+`read_binary_chunk`, `write_binary_chunk`, `finish_binary_transfer`, and
+`abort_binary_transfer` library APIs (CLI: `safari binary`) move bounded chunks
+through a caller-owned page adapter without buffering the entire transfer or
+exporting authentication metadata. See [binary transport contracts and
+examples](docs/safari-binary-transfers.md). These target top-level documents.
+Apple Events cannot select a cross-origin iframe; Safari 27's native frame API
+belongs to a separate automation context with no verified existing-tab
+attachment. See [frame API evidence and supported
+alternatives](docs/safari-frame-targeting.md).
+
 Page-operation failures downcast to `PageOperationError` in the Rust library.
 CLI error JSON additionally includes `phase` (`before_dispatch`, `running`,
 `completed`, `unknown`) and `cancellation` (`not_needed`, `requested`,
