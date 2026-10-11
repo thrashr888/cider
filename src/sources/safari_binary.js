@@ -77,7 +77,7 @@ function(config) {
                 result.done = true;
                 result.hex = "";
             } else {
-                if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > max) {
+                if (Object.prototype.toString.call(bytes) !== "[object Uint8Array]" || !ArrayBuffer.isView(bytes) || bytes.byteLength === 0 || bytes.byteLength > max) {
                     throw new Error("invalid binary chunk");
                 }
                 result.done = false;

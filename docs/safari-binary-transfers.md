@@ -118,16 +118,16 @@ backpressure:
 ```sh
 cider safari binary open --file factory.js --direction download \
   --total-bytes 10000000 --chunk-bytes 128000 --tab 2 --allow-eval
-# Save the returned plain JSON handle to handle.json using your consumer.
+# Result: {"ok":true,"action":"binary-open","handle":{...}}. Save the result (or just its handle) to handle.json.
 cider safari binary read --handle-file handle.json
-# Result: {"handle":{...advanced handle...},"chunk":{"offset":0,"bytes":[0,255],"done":false}}
+# Result: {"ok":true,"action":"binary-read","handle":{...advanced handle...},"chunk":{"offset":0,"bytes":[0,255],"done":false}}
 # Replace handle.json with result.handle after each acknowledged read.
 cider safari binary finish --handle-file handle.json
 
 cider safari binary open --file sink.js --direction upload \
   --total-bytes 10000000 --tab 2 --allow-eval
 cider safari binary write --handle-file handle.json --file one-chunk.bin
-# Write/finish/abort return the updated plain handle.
+# Write/finish/abort return {"ok":true,"action":"binary-<verb>","handle":{...updated...}}.
 cider safari binary abort --handle-file handle.json
 ```
 
