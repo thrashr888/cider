@@ -14,7 +14,7 @@ async function run({url = 'https://example.com/api', max_bytes = 10, response, f
             return response || new Response('hello world', {status: 200, headers: {'content-type': 'text/plain'}});
         }};
     const start = vm.runInNewContext(`(${script})`, context);
-    start({url, max_bytes, timeout: 1, key: '__test'});
+    start({url, method: 'GET', headers: {}, body: null, max_bytes, timeout: 1, key: '__test'});
     for (let i = 0; i < 50 && !context.window.__test.result; i++) await new Promise(setImmediate);
     return {result: context.window.__test.result, calls, timers, context};
 }

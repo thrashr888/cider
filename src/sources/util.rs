@@ -55,6 +55,52 @@ pub async fn run_jxa_with_timeout(script: &str, timeout: Duration) -> anyhow::Re
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+/// Feed large caller-provided scripts through stdin instead of argv limits.
+pub async fn run_jxa_stdin_with_timeout(script: &str, timeout: Duration) -> anyhow::Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("JXA stdin unavailable"))?;
+    let output = tokio::time::timeout(timeout, async {
+        input.write_all(script.as_bytes()).await?;
+        drop(input);
+        child.wait_with_output().await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("JXA timed out after {timeout:?}"))??;
+    if !output.status.success() {
+        anyhow::bail!("JXA failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod jxa_stdin_tests {
+    #[tokio::test]
+    async fn large_scripts_avoid_argv_limits_without_accessing_apps() {
+        let script = format!("/*{}*/\nJSON.stringify({{ok:true}})", "x".repeat(1_000_000));
+        let output = super::run_jxa_stdin_with_timeout(&script, std::time::Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert_eq!(output, r#"{"ok":true}"#);
+        let error = super::run_jxa_stdin_with_timeout(
+            "delay(5); 'done'",
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
+}
+
 pub async fn run_command_with_timeout(
     cmd: &str,
     args: &[&str],
@@ -253,7 +299,7 @@ pub fn modified_since(modified: Option<DateTime<Utc>>, since: Option<DateTime<Ut
 }
 
 /// Result of a write action (create, update, delete, etc.)
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ActionResult {
     pub ok: bool,
     pub action: String,

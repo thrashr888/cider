@@ -143,7 +143,43 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
             }
         }
         serde_json::Value::Object(obj) => {
-            if matches!(
+            if obj.get("backend").and_then(|v| v.as_str()) == Some("resource_timing") {
+                writeln!(
+                    w,
+                    "Partial retained Resource Timing (not full HTTP history)"
+                )?;
+                if let Some(limitations) = obj.get("limitations").and_then(|v| v.as_str()) {
+                    writeln!(w, "{limitations}")?;
+                }
+                writeln!(
+                    w,
+                    "{} matching entries; truncated: {}",
+                    obj.get("matched_count").unwrap_or(&serde_json::Value::Null),
+                    obj.get("requests_truncated")
+                        .unwrap_or(&serde_json::Value::Null)
+                )?;
+                if let Some(requests) = obj.get("requests").and_then(|v| v.as_array()) {
+                    render_table_with_columns(
+                        &mut w,
+                        requests,
+                        &[
+                            "url",
+                            "initiator_type",
+                            "start_time_ms",
+                            "duration_ms",
+                            "transfer_size_bytes",
+                            "encoded_body_size_bytes",
+                        ],
+                    )?;
+                }
+            } else if obj.get("action").and_then(|v| v.as_str()) == Some("eval") {
+                let mut metadata = obj.clone();
+                let result = metadata.remove("value");
+                render_object(&mut w, &metadata)?;
+                if let Some(result) = result {
+                    writeln!(w, "value: {}", serde_json::to_string_pretty(&result)?)?;
+                }
+            } else if matches!(
                 obj.get("action").and_then(|v| v.as_str()),
                 Some("network" | "monitor")
             ) && obj.get("requests").is_some_and(serde_json::Value::is_array)
@@ -183,8 +219,9 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
                 && obj.get("page").is_some_and(serde_json::Value::is_object)
             {
                 render_object(&mut w, obj["page"].as_object().unwrap())?;
-            } else if obj.get("action").and_then(|v| v.as_str()) == Some("request")
-                && obj.contains_key("body")
+            } else if (obj.get("action").and_then(|v| v.as_str()) == Some("request")
+                && obj.contains_key("body"))
+                || obj.get("action").and_then(|v| v.as_str()) == Some("navigate")
             {
                 render_object(&mut w, obj)?;
             } else if is_action_result(obj) {
@@ -567,10 +604,25 @@ mod tests {
 #[cfg(test)]
 mod safari_tests {
     #[test]
+    fn partial_network_list_discloses_limits_even_when_empty() {
+        let value = serde_json::json!({"backend":"resource_timing","complete_history":false,
+            "matched_count":0,"requests_truncated":false,"requests":[],"limitations":"Empty does not mean no requests"});
+        let before = value.clone();
+        let mut out = Vec::new();
+        super::render(&mut out, &value).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("not full HTTP history"));
+        assert!(text.contains("Empty does not mean no requests"));
+        assert_eq!(value, before);
+    }
+
+    #[test]
     fn fetched_and_requested_bodies_are_visible() {
         for value in [
             serde_json::json!({"ok":true,"action":"fetch","page":{"content":"page body","truncated":true}}),
             serde_json::json!({"ok":false,"action":"request","status":401,"body":"response body"}),
+            serde_json::json!({"ok":true,"action":"eval","value_type":"json","value":{"body":"evaluated body"},"truncated":false}),
+            serde_json::json!({"ok":true,"action":"navigate","url":"https://example.com/body"}),
         ] {
             let before = value.clone();
             let mut out = Vec::new();

@@ -6,13 +6,21 @@ import os
 /// current, so there is no work item to cancel and no lock held across the call.
 public final class IdleTimer: Sendable {
     public let timeout: TimeInterval
-    private let queue: DispatchQueue
+    private let schedule: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
     private let onIdle: @Sendable () -> Void
     private let generation = OSAllocatedUnfairLock(initialState: 0)
 
-    public init(timeout: TimeInterval, queue: DispatchQueue = .global(), onIdle: @escaping @Sendable () -> Void) {
+    public convenience init(timeout: TimeInterval, queue: DispatchQueue = .global(), onIdle: @escaping @Sendable () -> Void) {
+        self.init(timeout: timeout, schedule: { delay, work in
+            queue.asyncAfter(deadline: .now() + delay, execute: work)
+        }, onIdle: onIdle)
+    }
+
+    init(timeout: TimeInterval,
+         schedule: @escaping @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void,
+         onIdle: @escaping @Sendable () -> Void) {
         self.timeout = timeout
-        self.queue = queue
+        self.schedule = schedule
         self.onIdle = onIdle
     }
 
@@ -25,7 +33,7 @@ public final class IdleTimer: Sendable {
             gen += 1
             return gen
         }
-        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+        schedule(timeout) { [weak self] in
             guard let self, self.generation.withLock({ $0 == mine }) else { return }
             self.onIdle()
         }
