@@ -660,7 +660,10 @@ pub async fn eval(
         &run_page_operation(
             target,
             &config,
-            include_str!("safari_eval.js"),
+            &include_str!("safari_eval.js").replace(
+                "(0, eval)(config.javascript)",
+                &format!("(\n{javascript}\n)"),
+            ),
             options.timeout,
         )
         .await?,
