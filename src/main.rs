@@ -1618,8 +1618,11 @@ fn safari_binary_file(path: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
 }
 
 fn safari_binary_handle(path: &str) -> anyhow::Result<sources::safari::BinaryTransfer> {
-    let handle: sources::safari::BinaryTransfer =
-        serde_json::from_slice(&safari_binary_file(path, 16_384)?)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&safari_binary_file(path, 16_384)?)?;
+    if let Some(inner) = value.get_mut("handle") {
+        value = inner.take();
+    }
+    let handle: sources::safari::BinaryTransfer = serde_json::from_value(value)?;
     handle.validate()?;
     Ok(handle)
 }
@@ -3474,13 +3477,16 @@ async fn run() -> anyhow::Result<()> {
                             async {
                                 let document =
                                     sources::safari::document_target(target.target()).await?;
-                                sources::safari::open_binary_transfer(
+                                let handle = sources::safari::open_binary_transfer(
                                     &javascript,
                                     &document,
                                     direction,
                                     &options,
                                 )
-                                .await
+                                .await?;
+                                Ok::<_, anyhow::Error>(
+                                    serde_json::json!({"ok":true,"action":"binary-open","handle":handle}),
+                                )
                             },
                             cli.pretty,
                             cli.envelope
@@ -3505,7 +3511,7 @@ async fn run() -> anyhow::Result<()> {
                             async {
                                 let chunk = sources::safari::read_binary_chunk(&mut handle).await?;
                                 Ok::<_, anyhow::Error>(
-                                    serde_json::json!({"handle":handle,"chunk":chunk}),
+                                    serde_json::json!({"ok":true,"action":"binary-read","handle":handle,"chunk":chunk}),
                                 )
                             },
                             cli.pretty,
@@ -3536,7 +3542,9 @@ async fn run() -> anyhow::Result<()> {
                         run_source!(
                             async {
                                 sources::safari::write_binary_chunk(&mut handle, &bytes).await?;
-                                Ok::<_, anyhow::Error>(handle)
+                                Ok::<_, anyhow::Error>(
+                                    serde_json::json!({"ok":true,"action":"binary-write","handle":handle}),
+                                )
                             },
                             cli.pretty,
                             cli.envelope
@@ -3556,7 +3564,9 @@ async fn run() -> anyhow::Result<()> {
                         run_source!(
                             async {
                                 sources::safari::finish_binary_transfer(&mut handle).await?;
-                                Ok::<_, anyhow::Error>(handle)
+                                Ok::<_, anyhow::Error>(
+                                    serde_json::json!({"ok":true,"action":"binary-finish","handle":handle}),
+                                )
                             },
                             cli.pretty,
                             cli.envelope
@@ -3576,7 +3586,9 @@ async fn run() -> anyhow::Result<()> {
                         run_source!(
                             async {
                                 sources::safari::abort_binary_transfer(&mut handle).await?;
-                                Ok::<_, anyhow::Error>(handle)
+                                Ok::<_, anyhow::Error>(
+                                    serde_json::json!({"ok":true,"action":"binary-abort","handle":handle}),
+                                )
                             },
                             cli.pretty,
                             cli.envelope
