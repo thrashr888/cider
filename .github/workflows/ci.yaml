@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: '22'
       - name: Safari browser script tests
-        run: node --test tests/safari_request.cjs tests/safari_monitor.cjs
+        run: node --test tests/safari_request.cjs tests/safari_monitor.cjs tests/safari_browser.js
       - name: Test
         run: cargo test
       - name: Build
