@@ -2,7 +2,8 @@ function(config) {
     const state = {result: null};
     window[config.key] = state;
     state.timer = setTimeout(() => {
-        state.result = {error: "Safari eval timed out; JavaScript may still be running and side effects are not rolled back"};
+        state.result = {error: "Safari eval timed out; JavaScript may still be running and side effects are not rolled back",
+            phase: "running", cancellation: "unsupported"};
         setTimeout(() => { delete window[config.key]; }, 2000);
     }, config.timeout * 1000);
     Promise.resolve().then(() => (0, eval)(config.javascript)).then(value => {
@@ -25,7 +26,8 @@ function(config) {
         clearTimeout(state.timer);
     }).catch(error => {
         if (!state.result) {
-            state.result = {error: "Safari eval failed: " + String(error && error.message || error)};
+            state.result = {error: "Safari eval failed: " + String(error && error.message || error),
+                phase: "completed", cancellation: "not_needed"};
             clearTimeout(state.timer);
         }
     }).finally(() => {

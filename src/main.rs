@@ -4227,13 +4227,18 @@ async fn main() -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(err) if is_broken_pipe(&err) => Ok(()),
         Err(err) => {
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": false,
                 "error": {
                     "code": classify_error_code(&err),
                     "message": err.to_string(),
                 }
             });
+            if let Some(operation) = err.downcast_ref::<sources::safari::PageOperationError>() {
+                payload["error"]["code"] = serde_json::json!("safari_page_operation");
+                payload["error"]["phase"] = serde_json::to_value(operation.phase)?;
+                payload["error"]["cancellation"] = serde_json::to_value(operation.cancellation)?;
+            }
             eprintln!("{}", payload);
             std::process::exit(1);
         }

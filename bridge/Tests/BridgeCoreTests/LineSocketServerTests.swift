@@ -156,7 +156,8 @@ final class LineSocketServerTests: XCTestCase {
     func testIdleTimerFiresAfterQuietPeriodAndRequestsResetIt() async throws {
         let idle = expectation(description: "idle fired")
         let fireCount = OSAllocatedUnfairLock(initialState: 0)
-        let timer = IdleTimer(timeout: 0.3) {
+        let scheduler = ManualIdleScheduler()
+        let timer = IdleTimer(timeout: 0.3, schedule: scheduler.schedule) {
             fireCount.withLock { $0 += 1 }
             idle.fulfill()
         }
@@ -165,11 +166,12 @@ final class LineSocketServerTests: XCTestCase {
         defer { server.stop() }
 
         let client = try LineSocketClient(path: path)
-        try await Task.sleep(for: .milliseconds(200))
+        scheduler.advance(by: 0.2)
         XCTAssertEqual(try client.call(Request(id: 1, cmd: "ping")).ok, true)
-        try await Task.sleep(for: .milliseconds(200))
+        scheduler.advance(by: 0.2)
         // 400 ms elapsed but only 200 ms since the last request: not idle yet.
         XCTAssertEqual(fireCount.withLock { $0 }, 0)
+        scheduler.advance(by: 0.2)
         await fulfillment(of: [idle], timeout: 1)
         XCTAssertEqual(fireCount.withLock { $0 }, 1)
     }
@@ -183,15 +185,46 @@ final class IdleTimerTests: XCTestCase {
         await fulfillment(of: [fired], timeout: 1)
     }
 
-    func testTouchDefersAndStopCancels() async throws {
-        let fired = expectation(description: "fired")
-        fired.isInverted = true
-        let timer = IdleTimer(timeout: 0.15) { fired.fulfill() }
+    func testTouchDefersAndStopCancels() {
+        let scheduler = ManualIdleScheduler()
+        let count = OSAllocatedUnfairLock(initialState: 0)
+        let timer = IdleTimer(timeout: 0.15, schedule: scheduler.schedule) {
+            count.withLock { $0 += 1 }
+        }
         timer.start()
-        try await Task.sleep(for: .milliseconds(100))
+        scheduler.advance(by: 0.1)
         timer.touch()
-        try await Task.sleep(for: .milliseconds(100))
+        scheduler.advance(by: 0.1)
+        XCTAssertEqual(count.withLock { $0 }, 0)
         timer.stop()
-        await fulfillment(of: [fired], timeout: 0.3)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(count.withLock { $0 }, 0)
+        timer.start()
+        scheduler.advance(by: 0.2)
+        XCTAssertEqual(count.withLock { $0 }, 1)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(count.withLock { $0 }, 1)
+    }
+}
+
+private final class ManualIdleScheduler: Sendable {
+    private struct State {
+        var now: TimeInterval = 0
+        var pending: [(TimeInterval, @Sendable () -> Void)] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    func schedule(delay: TimeInterval, work: @escaping @Sendable () -> Void) {
+        state.withLock { $0.pending.append(($0.now + delay, work)) }
+    }
+
+    func advance(by interval: TimeInterval) {
+        let ready = state.withLock { value -> [@Sendable () -> Void] in
+            value.now += interval
+            let ready = value.pending.filter { $0.0 <= value.now }.map { $0.1 }
+            value.pending.removeAll { $0.0 <= value.now }
+            return ready
+        }
+        for work in ready { work() }
     }
 }

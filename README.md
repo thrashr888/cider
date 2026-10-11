@@ -225,6 +225,24 @@ cider safari navigate 'https://example.com/settings' --tab 2 --dry-run
 cider safari network-list --tab 2 --filter '/api/' --limit 100
 ```
 
+Async `eval` and `request` operations now track the original Safari window ID and
+document identity rather than repeatedly trusting tab positions. Tab/window
+reordering and same-origin SPA route changes are tolerated; reload, replacement,
+closure or a different origin stop the operation. This is a **document-scoped**
+handle, not a durable native Safari tab ID, and cannot survive moving a tab into
+another window. Library callers can use `document_target(TabTarget)` once and
+`eval_document(source, &DocumentTarget, &EvalOptions)` for successive operations
+without silently switching documents. Both are additive; positional APIs remain.
+
+Page-operation failures downcast to `PageOperationError` in the Rust library.
+CLI error JSON additionally includes `phase` (`before_dispatch`, `running`,
+`completed`, `unknown`) and `cancellation` (`not_needed`, `requested`,
+`unsupported`, `unknown`). `completed` may mean caller JavaScript threw after
+side effects. `requested` only means fetch abort was requested, not that a server
+write was undone. Arbitrary eval cannot be cancelled. Only a verified
+`before_dispatch` failure establishes that caller code was not started; never
+blindly retry other write failures.
+
 `eval` requires `--allow-eval` even with `--dry-run`. It evaluates the supplied
 source in the selected document's global scope and awaits a returned promise.
 For async statements, use `(async () => { ...; return result; })()`. It returns

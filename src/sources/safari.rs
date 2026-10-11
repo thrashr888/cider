@@ -162,6 +162,83 @@ pub struct TabTarget {
     pub window: u32,
     pub tab: u32,
 }
+
+/// A document-scoped handle, not a native Safari tab ID. Survives tab/window
+/// reordering and same-origin SPA routes, but intentionally expires on reload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentTarget {
+    pub window_id: i64,
+    pub document_id: String,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationPhase {
+    BeforeDispatch,
+    Running,
+    Completed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationStatus {
+    NotNeeded,
+    Requested,
+    Unsupported,
+    Unknown,
+}
+
+/// `Requested` means AbortController.abort was requested, not that a server
+/// mutation was cancelled. Running/unknown failures must never be blindly retried.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PageOperationError {
+    pub message: String,
+    pub phase: OperationPhase,
+    pub cancellation: CancellationStatus,
+}
+impl std::fmt::Display for PageOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (phase: {:?}, cancellation: {:?}; side effects are not rolled back)",
+            self.message, self.phase, self.cancellation
+        )
+    }
+}
+impl std::error::Error for PageOperationError {}
+
+/// Capture the current document identity without navigation or credential access.
+pub async fn document_target(target: TabTarget) -> anyhow::Result<DocumentTarget> {
+    let marker = uuid::Uuid::new_v4().to_string();
+    let page = format!("(function(){{if(!window.__cider_document_identity)Object.defineProperty(window,'__cider_document_identity',{{value:{}}});return JSON.stringify({{document_id:window.__cider_document_identity,origin:location.origin}});}})()",serde_json::to_string(&marker)?);
+    let script = format!("{}\nconst identity=JSON.parse(app.doJavaScript({},{{in:target}}));identity.window_id=win.id();JSON.stringify(identity)",
+        target.script()?,serde_json::to_string(&page)?);
+    let result: DocumentTarget = serde_json::from_str(&run_browser_script(&script, 20).await?)?;
+    validate_document_target(&result)?;
+    Ok(result)
+}
+
+fn validate_document_target(target: &DocumentTarget) -> anyhow::Result<()> {
+    uuid::Uuid::parse_str(&target.document_id)?;
+    let origin = url::Url::parse(&target.origin)?;
+    anyhow::ensure!(
+        matches!(origin.scheme(), "http" | "https")
+            && origin.origin().ascii_serialization() == target.origin,
+        "document target requires an HTTP(S) origin"
+    );
+    Ok(())
+}
+
+fn document_selection(target: &DocumentTarget) -> anyhow::Result<String> {
+    validate_document_target(target)?;
+    Ok(format!(
+        "const app=Application('com.apple.Safari');const locate=({})({},app);",
+        include_str!("safari_document_target.js"),
+        serde_json::to_string(target)?
+    ))
+}
 impl Default for TabTarget {
     fn default() -> Self {
         Self { window: 1, tab: 1 }
@@ -546,43 +623,57 @@ async fn run_page_operation(
     operation: &str,
     timeout: u32,
 ) -> anyhow::Result<String> {
+    let document = document_target(target)
+        .await
+        .map_err(|_| PageOperationError {
+            message: "Safari document could not be selected".into(),
+            phase: OperationPhase::BeforeDispatch,
+            cancellation: CancellationStatus::NotNeeded,
+        })?;
+    run_document_operation(&document, config, operation, timeout).await
+}
+
+async fn run_document_operation(
+    target: &DocumentTarget,
+    config: &serde_json::Value,
+    operation: &str,
+    timeout: u32,
+) -> anyhow::Result<String> {
     // Safari does not reliably propagate uncaught page exceptions through
     // doJavaScript. Return startup failures explicitly instead of timing out.
+    let guard = format!(
+        "window.__cider_document_identity === {} && location.origin === {}",
+        serde_json::to_string(&target.document_id)?,
+        serde_json::to_string(&target.origin)?
+    );
     let page_script = format!(
-        "(function(){{try{{return ({})({config});}}catch(error){{return JSON.stringify({{error:String(error.message || error)}});}}}})()",
-        operation
+        "(function(){{try{{if(!({guard}))throw new Error('Document target changed before dispatch');return ({operation})({config});}}catch(error){{return JSON.stringify({{error:String(error.message || error)}});}}}})()"
     );
     let key = serde_json::to_string(config["key"].as_str().unwrap())?;
+    let config = serde_json::json!({"timeout":timeout,"key":key,"guard":guard,"page":page_script});
     let script = format!(
-        r#"{}
-const initialURL = target.url();
-const started = app.doJavaScript({}, {{in: target}});
-if (started !== "started") {{
-    let message = "Safari page operation could not start in this tab. Load a page, wait for it to finish, then run cider safari tabs --pretty and retry with its --window and --tab";
-    try {{ message = JSON.parse(started).error || message; }} catch (e) {{}}
-    throw new Error(message);
-}}
-const deadline = Date.now() + {timeout} * 1000 + 1000;
-let result;
-try {{
-    while (Date.now() < deadline) {{
-        if (target.url() !== initialURL) throw new Error("Safari tab navigated during page operation");
-        const raw = app.doJavaScript('JSON.stringify(window[' + {key} + '] && window[' + {key} + '].result || null)', {{in: target}});
-        if (raw && raw !== "null") {{ result = JSON.parse(raw); break; }}
-        delay(0.1);
-    }}
-    if (!result) throw new Error("Safari page operation timed out; caller JavaScript may continue and side effects are not rolled back");
-    if (result.error) throw new Error(result.error);
-}} finally {{
-    try {{ app.doJavaScript('(function(){{const s=window[' + {key} + '];if(s){{if(s.controller)s.controller.abort();clearTimeout(s.timer);delete window[' + {key} + '];}}}})()', {{in: target}}); }} catch (e) {{}}
-}}
-JSON.stringify(result)
-"#,
-        target.script()?,
-        serde_json::to_string(&page_script)?,
-        key = serde_json::to_string(&key)?
+        "{}\n({})({config})",
+        document_selection(target)?,
+        include_str!("safari_page_runner.js")
     );
-    run_browser_script(&script, timeout + 10).await
+    let output = run_browser_script(&script, timeout + 10)
+        .await
+        .map_err(|_| PageOperationError {
+            message: "Safari operation transport failed; inspect the affected page before retrying"
+                .into(),
+            phase: OperationPhase::Unknown,
+            cancellation: CancellationStatus::Unknown,
+        })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&output).map_err(|_| PageOperationError {
+            message: "Safari operation returned invalid transport data".into(),
+            phase: OperationPhase::Unknown,
+            cancellation: CancellationStatus::Unknown,
+        })?;
+    if let Some(error) = value.get("cider_operation_error") {
+        return Err(serde_json::from_value::<PageOperationError>(error.clone())?.into());
+    }
+    Ok(output)
 }
 
 fn request_hint(status: u16) -> Option<&'static str> {
@@ -668,6 +759,29 @@ pub async fn eval(
         )
         .await?,
     )?)
+}
+
+/// Evaluate against a previously captured document handle. Reloads expire it.
+pub async fn eval_document(
+    javascript: &str,
+    target: &DocumentTarget,
+    options: &EvalOptions,
+) -> anyhow::Result<EvalResult> {
+    options.validate(javascript)?;
+    validate_document_target(target)?;
+    let config = serde_json::json!({"javascript":javascript,"max_chars":options.max_chars,"timeout":options.timeout,
+        "key":format!("__cider_{}",uuid::Uuid::new_v4().simple())});
+    let output = run_document_operation(
+        target,
+        &config,
+        &include_str!("safari_eval.js").replace(
+            "(0, eval)(config.javascript)",
+            &format!("(\n{javascript}\n)"),
+        ),
+        options.timeout,
+    )
+    .await?;
+    Ok(serde_json::from_str(&output)?)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -767,6 +881,39 @@ JSON.stringify(result)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_handles_and_failure_metadata_are_typed_and_bounded() {
+        let target = DocumentTarget {
+            window_id: 7,
+            document_id: uuid::Uuid::new_v4().to_string(),
+            origin: "https://example.com".into(),
+        };
+        assert!(validate_document_target(&target).is_ok());
+        for origin in [
+            "https://example.com/path",
+            "file:///tmp/x",
+            "https://user@example.com",
+        ] {
+            assert!(validate_document_target(&DocumentTarget {
+                origin: origin.into(),
+                ..target.clone()
+            })
+            .is_err());
+        }
+        let error = PageOperationError {
+            message: "Timeout".into(),
+            phase: OperationPhase::Running,
+            cancellation: CancellationStatus::Unsupported,
+        };
+        let wrapped = anyhow::Error::new(error);
+        let typed = wrapped.downcast_ref::<PageOperationError>().unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap()["phase"], "running");
+        assert_eq!(
+            serde_json::to_value(typed).unwrap()["cancellation"],
+            "unsupported"
+        );
+    }
 
     #[test]
     fn request_options_gate_and_validate_before_automation() {

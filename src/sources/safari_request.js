@@ -7,7 +7,7 @@ function(config) {
     window[config.key] = state;
     state.timer = setTimeout(() => {
         state.controller.abort();
-        state.result = {error: "Safari request timed out"};
+        state.result = {error: "Safari request timed out", phase: "running", cancellation: "requested"};
         // Cleanup even if the osascript process is killed by its caller.
         setTimeout(() => { delete window[config.key]; }, 2000);
     }, config.timeout * 1000);
@@ -35,12 +35,13 @@ function(config) {
                 } finally { await reader.cancel(); }
             }
             body += decoder.decode();
-            state.result = {ok: response.ok, action: "request", url: response.url,
+            if (!state.result) state.result = {ok: response.ok, action: "request", url: response.url,
                 status: response.status, status_text: response.statusText,
                 content_type: response.headers.get("content-type") || "", body, truncated};
         } catch (error) {
-            state.result = {error: error.name === "AbortError" ? "Safari request timed out" :
-                "Safari request failed (network, CSP, or redirect). Open the URL in Safari to complete login or follow redirects, then retry with its final same-origin URL. If the site blocks in-page requests, use cider safari content instead. Details: " + error.message};
+            if (!state.result) state.result = {error: error.name === "AbortError" ? "Safari request timed out" :
+                "Safari request failed (network, CSP, or redirect). Open the URL in Safari to complete login or follow redirects, then retry with its final same-origin URL. If the site blocks in-page requests, use cider safari content instead. Details: " + error.message,
+                phase: "completed", cancellation: error.name === "AbortError" ? "requested" : "not_needed"};
         }
     })();
     return "started";
