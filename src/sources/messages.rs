@@ -15,6 +15,9 @@ pub struct Message {
     pub conversation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<chrono::Utc>>,
+    /// Absolute paths of the message's attachments (photos, files), oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 /// List recent messages. `since`, when given, replaces the `days` window: the
@@ -39,15 +42,18 @@ SELECT
     COALESCE(h.id, '') AS handle_id,
     COALESCE(c.display_name, '') AS chat_name,
     COALESCE(c.chat_identifier, '') AS chat_identifier,
-    CASE WHEN m.text IS NULL AND m.attributedBody IS NOT NULL THEN 1 ELSE 0 END AS has_attributed
+    CASE WHEN m.text IS NULL AND m.attributedBody IS NOT NULL THEN 1 ELSE 0 END AS has_attributed,
+    COALESCE((SELECT GROUP_CONCAT(a.filename, char(31)) FROM message_attachment_join maj
+              JOIN attachment a ON a.ROWID = maj.attachment_id
+              WHERE maj.message_id = m.ROWID AND a.filename IS NOT NULL), '') AS attachments
 FROM message m
 LEFT JOIN handle h ON m.handle_id = h.ROWID
 LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
 LEFT JOIN chat c ON cmj.chat_id = c.ROWID
 WHERE m.date >= {apple_ns}
-  AND (m.text IS NOT NULL AND m.text != '' OR m.attributedBody IS NOT NULL)
+  AND (m.text IS NOT NULL AND m.text != '' OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
 ORDER BY m.date DESC
-LIMIT 200;
+LIMIT 2000;
 "#
     );
 
@@ -91,6 +97,20 @@ end tell"#,
     ))
 }
 
+/// Attachment paths from the `char(31)`-joined column, with `~/` expanded to `$HOME`.
+fn attachment_paths(joined: &str) -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    joined
+        .split('\u{1f}')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.strip_prefix("~/") {
+            Some(rest) => format!("{home}/{rest}"),
+            None => p.to_string(),
+        })
+        .collect()
+}
+
 /// A JSON field that sqlite3 may emit as a number or a string, read as i64.
 fn json_i64(value: &serde_json::Value) -> i64 {
     match value {
@@ -122,17 +142,25 @@ fn parse_json_rows(output: &str) -> Vec<Message> {
 
     for row in &rows {
         let rowid = json_i64(&row["rowid"]);
-        let text = row["msg_text"].as_str().unwrap_or("").trim();
+        // An attachment sits in the text as U+FFFC; the path list carries it instead.
+        let text = row["msg_text"]
+            .as_str()
+            .unwrap_or("")
+            .replace('\u{FFFC}', "");
+        let text = text.trim();
         let has_attributed = json_i64(&row["has_attributed"]) == 1;
+        let attachments = attachment_paths(row["attachments"].as_str().unwrap_or(""));
 
-        if text.is_empty() && !has_attributed {
+        if text.is_empty() && !has_attributed && attachments.is_empty() {
             continue;
         }
 
-        let body_text = if text.is_empty() {
-            "[Attachment or rich text]".to_string()
-        } else {
+        let body_text = if !text.is_empty() {
             text.to_string()
+        } else if !attachments.is_empty() {
+            "[Attachment]".to_string()
+        } else {
+            "[Attachment or rich text]".to_string()
         };
 
         let unix_ts = json_i64(&row["unix_ts"]);
@@ -172,6 +200,7 @@ fn parse_json_rows(output: &str) -> Vec<Message> {
         records.push(Message {
             id: format!("msg_{rowid}"),
             text: body_text,
+            attachments,
             sender,
             is_from_me,
             service: service.to_string(),
@@ -202,6 +231,18 @@ mod tests {
         assert!(records[0].timestamp.is_some());
         assert_eq!(records[1].sender, "Me");
         assert!(records[1].is_from_me);
+    }
+
+    #[test]
+    fn test_parse_json_rows_attachments() {
+        let output = r#"[{"rowid":7,"msg_text":"\ufffc","unix_ts":1760000000,"is_from_me":0,"handle_id":"+15551234567","chat_name":"","chat_identifier":"+15551234567","has_attributed":0,"attachments":"/tmp/a.heic\u001f~/Library/Messages/Attachments/b.png"}]"#;
+        let records = parse_json_rows(output);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, "[Attachment]");
+        assert_eq!(records[0].attachments.len(), 2);
+        assert_eq!(records[0].attachments[0], "/tmp/a.heic");
+        assert!(records[0].attachments[1].ends_with("/Library/Messages/Attachments/b.png"));
+        assert!(!records[0].attachments[1].starts_with('~'));
     }
 
     #[test]
