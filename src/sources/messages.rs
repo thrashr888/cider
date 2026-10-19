@@ -111,6 +111,62 @@ fn attachment_paths(joined: &str) -> Vec<String> {
         .collect()
 }
 
+/// Sends a photo or file. Messages reliably reads attachments only from places it can see, so
+/// the file is copied into `~/Pictures/cider` first (copies older than a day are removed).
+pub async fn send_file(to: &str, path: &std::path::Path) -> anyhow::Result<ActionResult> {
+    let staged = stage_attachment(path)?;
+    let script = format!(
+        r#"tell application "Messages"
+    set targetService to 1st account whose service type = iMessage
+    set theBuddy to buddy "{}" of targetService
+    send (POSIX file "{}") to theBuddy
+end tell"#,
+        escape_applescript(to),
+        escape_applescript(&staged.to_string_lossy())
+    );
+    run_osascript_with_timeout(&script, std::time::Duration::from_secs(60)).await?;
+    Ok(ActionResult::success_with_message(
+        "send",
+        &format!(
+            "Sent {} to {to}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ),
+    ))
+}
+
+/// Copies `path` into `~/Pictures/cider` under a unique name and returns the copy.
+fn stage_attachment(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| anyhow::anyhow!("Can't read attachment {}: {e}", path.display()))?;
+    if !meta.is_file() {
+        anyhow::bail!("Attachment {} is not a file", path.display());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = std::path::Path::new(&home).join("Pictures/cider");
+    std::fs::create_dir_all(&dir)?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let day = std::time::Duration::from_secs(86_400);
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|age| age > day).unwrap_or(false))
+                .unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let staged = dir.join(format!("{stamp}-{name}"));
+    std::fs::copy(path, &staged)?;
+    Ok(staged)
+}
+
 /// A JSON field that sqlite3 may emit as a number or a string, read as i64.
 fn json_i64(value: &serde_json::Value) -> i64 {
     match value {
@@ -243,6 +299,12 @@ mod tests {
         assert_eq!(records[0].attachments[0], "/tmp/a.heic");
         assert!(records[0].attachments[1].ends_with("/Library/Messages/Attachments/b.png"));
         assert!(!records[0].attachments[1].starts_with('~'));
+    }
+
+    #[test]
+    fn test_stage_attachment_rejects_missing_and_directories() {
+        assert!(stage_attachment(std::path::Path::new("/nonexistent/cider-test.png")).is_err());
+        assert!(stage_attachment(std::path::Path::new("/tmp")).is_err());
     }
 
     #[test]
