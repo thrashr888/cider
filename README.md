@@ -697,7 +697,7 @@ sources; add `calendar`, `reminders`, or `doctor` to enable those tools.
 
 ### Available MCP tools
 
-With no `--sources` option, all eight sources below are enabled. An explicit
+With no `--sources` option, the eight sources below except `weather` are enabled (weather is opt-in because it launches the Cider Bridge app). An explicit
 list replaces that default. Unknown source names fail at startup, and disabled
 tools are excluded from discovery and cannot be invoked by name. This first
 version exposes the following subset of Cider; it has no write tools or generic
@@ -713,6 +713,24 @@ shell/CLI execution tool.
 | `calendar` | `calendar_list`, `calendar_calendars` | What events are coming up? |
 | `reminders` | `reminders_list`, `reminders_lists` | What incomplete reminders are on my Shopping list? |
 | `doctor` | `doctor` | Which local stores are available, and what access is missing? |
+| `weather` | `weather_current`, `weather_forecast` | What's the weather at home this week? |
+
+### Interactive cards (MCP Apps)
+
+Hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
+(the `io.modelcontextprotocol/ui` extension) can show a card with a tool's
+result instead of raw JSON. Cider declares each card as a `ui://` resource
+(`text/html;profile=mcp-app`) and links it from the tool's `_meta.ui.resourceUri`:
+
+| Card | Tools | Shows |
+|------|-------|-------|
+| `ui://cider/weather` | `weather_current`, `weather_forecast` | Conditions, the next hours, the coming days, and Apple Weather attribution |
+| `ui://cider/agenda` | `calendar_list` | Events grouped by day |
+
+Cards are self-contained pages: no scripts or styles from the network. The
+weather card loads only Apple's attribution logo from `weatherkit.apple.com`,
+declared in its `_meta.ui.csp`. Links in a card ask the host to open them.
+Cards are listed only when their source is enabled.
 
 Arguments are typed and discoverable through MCP `tools/list`. For example,
 a client can call `knowledge_list` with:

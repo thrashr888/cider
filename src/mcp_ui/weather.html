@@ -1,0 +1,54 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.now { display: flex; align-items: center; gap: 14px; }
+.icon { font-size: 44px; line-height: 1; }
+.temp { font-size: 40px; font-weight: 300; letter-spacing: -1px; }
+.cond { font-size: 15px; font-weight: 600; }
+.hours { display: flex; gap: 14px; overflow-x: auto; padding: 12px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.hour { display: grid; justify-items: center; gap: 2px; min-width: 34px; font-size: 12px; }
+.days { display: grid; grid-template-columns: 48px 26px 1fr 40px 40px; gap: 6px 10px; align-items: center; padding-top: 4px; }
+.bar { height: 4px; border-radius: 2px; background: linear-gradient(90deg, #64d2ff, #ffd60a, #ff9f0a); }
+.attr { margin-top: 10px; font-size: 11px; display: flex; gap: 6px; align-items: center; }
+.attr img { height: 11px; }
+</style></head>
+<body><div id="app" class="muted">Loading weather…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const ICONS = { clear: "☀️", mostlyClear: "🌤️", partlyCloudy: "⛅", mostlyCloudy: "🌥️", cloudy: "☁️", foggy: "🌫️", haze: "🌫️",
+  drizzle: "🌦️", rain: "🌧️", heavyRain: "🌧️", showers: "🌦️", thunderstorms: "⛈️", isolatedThunderstorms: "⛈️", scatteredThunderstorms: "⛈️",
+  snow: "🌨️", flurries: "🌨️", heavySnow: "❄️", sleet: "🌨️", windy: "💨", breezy: "🍃", hot: "🌡️", frigid: "🥶", smoky: "🌫️" };
+const icon = (c, day = true) => (!day && /clear/i.test(c || "")) ? "🌙" : (ICONS[c] || "🌡️");
+const words = (c) => (c || "").replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase());
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No weather")}</span>`; return; }
+  const w = out.data, us = /^en-US|^en-LR|^my/i.test(host.locale || navigator.language);
+  const t = (c) => c == null ? "–" : `${Math.round(us ? c * 9 / 5 + 32 : c)}°`;
+  const time = (iso, opts) => new Date(iso).toLocaleTimeString(host.locale, opts);
+  const day = (iso, i) => i === 0 ? "Today" : new Date(iso + "T12:00:00").toLocaleDateString(host.locale, { weekday: "short" });
+  let html = "";
+  if (w.temperature_c != null) {
+    html += `<div class="now"><div class="icon">${icon(w.condition, w.is_daylight)}</div><div><div class="temp">${t(w.temperature_c)}</div>
+      <div class="cond">${esc(words(w.condition))}</div></div><div style="margin-left:auto;text-align:right" class="muted">
+      Feels like ${t(w.apparent_temperature_c)}<br>Wind ${Math.round(us ? w.wind_kph / 1.609 : w.wind_kph)} ${us ? "mph" : "km/h"}<br>Humidity ${w.humidity}%</div></div>`;
+  }
+  if (w.hourly_next_24?.length) {
+    html += `<div class="hours">` + w.hourly_next_24.slice(0, 12).map((h, i) =>
+      `<div class="hour"><span class="muted">${i === 0 ? "Now" : time(h.time, { hour: "numeric" })}</span><span>${icon(h.condition)}</span><b>${t(h.temperature_c)}</b></div>`).join("") + `</div>`;
+  }
+  if (w.days?.length) {
+    const lo = Math.min(...w.days.map((d) => d.low_c)), hi = Math.max(...w.days.map((d) => d.high_c)), span = Math.max(hi - lo, 1);
+    html += `<div class="days">` + w.days.map((d, i) => `<b>${day(d.date, i)}</b><span>${icon(d.condition)}</span>
+      <div style="padding-left:${(d.low_c - lo) / span * 100}%;padding-right:${(hi - d.high_c) / span * 100}%"><div class="bar"></div></div>
+      <span class="muted" style="text-align:right">${t(d.low_c)}</span><b style="text-align:right">${t(d.high_c)}</b>`).join("") + `</div>`;
+  }
+  const a = w.attribution || {};
+  const logo = host.theme === "dark" ? a.logo_dark_url : a.logo_light_url;
+  html += `<div class="attr muted">${logo ? `<img src="${esc(logo)}" alt="${esc(a.service_name)}">` : esc(a.service_name || "Apple Weather")}
+    ${a.legal_url ? `<a href="${esc(a.legal_url)}">Data sources</a>` : ""}</div>`;
+  app.className = ""; app.innerHTML = html;
+}
+</script></body></html>

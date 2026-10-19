@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+h3 { margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+h3:first-child { margin-top: 0; }
+.event { display: grid; grid-template-columns: 4px 72px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.event:last-child { border-bottom: 0; }
+.dot { border-radius: 2px; background: var(--accent); }
+.when { font-variant-numeric: tabular-nums; }
+.title { font-weight: 600; }
+</style></head>
+<body><div id="app" class="muted">Loading calendar…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const hue = (name) => [...String(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No events")}</span>`; return; }
+  const events = (out.data || []).filter((e) => e.start_date);
+  if (!events.length) { app.textContent = "Nothing on the calendar."; return; }
+  const today = new Date().toDateString();
+  const byDay = new Map();
+  for (const e of events) {
+    const d = new Date(e.start_date), key = d.toDateString();
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(e);
+  }
+  const fmt = (iso) => new Date(iso).toLocaleTimeString(host.locale, { hour: "numeric", minute: "2-digit" });
+  let html = "";
+  for (const [key, list] of byDay) {
+    const d = new Date(key);
+    html += `<h3>${key === today ? "Today" : d.toLocaleDateString(host.locale, { weekday: "long", month: "short", day: "numeric" })}</h3>`;
+    html += list.map((e) => `<div class="event"><div class="dot" style="background:hsl(${hue(e.calendar)} 70% 55%)"></div>
+      <div class="when muted">${e.is_all_day ? "All day" : fmt(e.start_date) + (e.end_date ? `<br>${fmt(e.end_date)}` : "")}</div>
+      <div><div class="title">${esc(e.title)}</div><div class="muted">${esc([e.location, e.calendar].filter(Boolean).join(" · "))}</div>
+      ${e.url && /^https?:/i.test(e.url) ? `<a href="${esc(e.url)}">Join or open</a>` : ""}</div></div>`).join("");
+  }
+  app.className = ""; app.innerHTML = html;
+}
+</script></body></html>
