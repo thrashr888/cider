@@ -21,9 +21,13 @@
     host: () => host,
   };
 
-  const reportSize = () =>
-    notify("ui/notifications/size-changed", { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight });
-  new ResizeObserver(reportSize).observe(document.documentElement);
+  // The body's own height: the document's scrollHeight never drops below the frame, so a card
+  // measured that way could grow but never shrink to fit its content.
+  const reportSize = () => {
+    const box = document.body.getBoundingClientRect();
+    notify("ui/notifications/size-changed", { width: Math.ceil(box.width), height: Math.ceil(box.height) });
+  };
+  new ResizeObserver(reportSize).observe(document.body);
 
   window.addEventListener("message", (event) => {
     const message = event.data;
