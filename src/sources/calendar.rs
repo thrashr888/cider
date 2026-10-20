@@ -278,8 +278,8 @@ SELECT
     COALESCE(ci.summary, '') AS title,
     COALESCE(c.title, '') AS calendar,
     COALESCE(l.title, '') AS location,
-    datetime(ci.start_date + 978307200, 'unixepoch') AS start_date,
-    datetime(ci.end_date + 978307200, 'unixepoch') AS end_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.start_date + 978307200, 'unixepoch') AS start_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.end_date + 978307200, 'unixepoch') AS end_date,
     COALESCE(ci.all_day, 0) AS all_day,
     COALESCE(ci.description, '') AS notes,
     COALESCE(ci.url, '') AS url,
@@ -520,8 +520,8 @@ SELECT
     COALESCE(ci.summary, '') AS title,
     COALESCE(c.title, '') AS calendar,
     COALESCE(l.title, '') AS location,
-    datetime(ci.start_date + 978307200, 'unixepoch') AS start_date,
-    datetime(ci.end_date + 978307200, 'unixepoch') AS end_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.start_date + 978307200, 'unixepoch') AS start_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.end_date + 978307200, 'unixepoch') AS end_date,
     COALESCE(ci.all_day, 0) AS all_day,
     COALESCE(ci.description, '') AS notes,
     COALESCE(ci.url, '') AS url,
@@ -569,8 +569,8 @@ SELECT
     COALESCE(ci.ZSUMMARY, '') AS title,
     COALESCE(cal.ZTITLE, '') AS calendar,
     COALESCE(ci.ZLOCATION, '') AS location,
-    datetime(ci.ZSTARTDATE + 978307200, 'unixepoch') AS start_date,
-    datetime(ci.ZENDDATE + 978307200, 'unixepoch') AS end_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.ZSTARTDATE + 978307200, 'unixepoch') AS start_date,
+    strftime('%Y-%m-%dT%H:%M:%SZ', ci.ZENDDATE + 978307200, 'unixepoch') AS end_date,
     COALESCE(ci.ZISALLDAY, 0) AS all_day,
     COALESCE(ci.ZNOTES, '') AS notes,
     '' AS url,
@@ -668,9 +668,9 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
         }
         let calendar = row["calendar"].as_str().unwrap_or("").trim();
         let location = row["location"].as_str().unwrap_or("").trim();
-        let start_date = row["start_date"].as_str().unwrap_or("").trim();
-        let end_date = row["end_date"].as_str().unwrap_or("").trim();
         let is_all_day = row["all_day"].as_i64().unwrap_or(0) != 0;
+        let start_date = event_time(row["start_date"].as_str().unwrap_or(""), is_all_day);
+        let end_date = event_time(row["end_date"].as_str().unwrap_or(""), is_all_day);
         let notes = row["notes"].as_str().map(str::trim).unwrap_or("");
         let url = row["url"].as_str().map(str::trim).unwrap_or("");
 
@@ -686,12 +686,12 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
             start_date: if start_date.is_empty() {
                 None
             } else {
-                Some(start_date.to_string())
+                Some(start_date)
             },
             end_date: if end_date.is_empty() {
                 None
             } else {
-                Some(end_date.to_string())
+                Some(end_date)
             },
             is_all_day,
             notes: if notes.is_empty() {
@@ -714,9 +714,45 @@ fn parse_json_rows(output: &str) -> Vec<CalendarEvent> {
     records
 }
 
+/// Timed events are UTC instants in RFC 3339 (`2026-03-14T10:00:00Z`); all-day events are
+/// floating dates (`2026-03-15`), since their midnight belongs to no time zone. Older
+/// zone-less store output (`2026-03-14 10:00:00`, UTC) is upgraded the same way.
+fn event_time(raw: &str, all_day: bool) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if all_day {
+        return raw.chars().take(10).collect();
+    }
+    let bytes = raw.as_bytes();
+    if raw.len() == 19 && bytes[10] == b' ' {
+        return format!("{}T{}Z", &raw[..10], &raw[11..]);
+    }
+    raw.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_times_say_their_zone() {
+        assert_eq!(
+            event_time("2026-03-14T10:00:00Z", false),
+            "2026-03-14T10:00:00Z"
+        );
+        assert_eq!(
+            event_time("2026-03-14 10:00:00", false),
+            "2026-03-14T10:00:00Z"
+        );
+        assert_eq!(event_time("2026-03-15T00:00:00Z", true), "2026-03-15");
+        assert_eq!(
+            event_time("2026-03-14T17:00:00.000Z", false),
+            "2026-03-14T17:00:00.000Z"
+        );
+        assert_eq!(event_time("", false), "");
+    }
 
     #[test]
     fn test_parse_json_rows() {
@@ -737,6 +773,11 @@ mod tests {
         assert!(!records[0].is_all_day);
         assert!(records[1].is_all_day);
         assert_eq!(records[1].notes.as_deref(), Some("Bring cake"));
+        assert_eq!(
+            records[0].start_date.as_deref(),
+            Some("2026-03-14T10:00:00Z")
+        );
+        assert_eq!(records[1].start_date.as_deref(), Some("2026-03-15"));
     }
 
     #[test]
