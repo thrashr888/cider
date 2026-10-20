@@ -1,0 +1,76 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+h3 { margin: 12px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+h3:first-child { margin-top: 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+.tile { text-align: left; padding: 9px 10px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); min-height: 64px; }
+.tile.on { background: #ffd60a; color: #1d1d1f; border-color: #ffd60a; }
+.tile .n { font-weight: 600; font-size: 12px; line-height: 1.2; }
+.tile .s { font-size: 11px; opacity: .75; margin-top: 3px; }
+.ic { font-size: 18px; }
+.scenes { display: flex; flex-wrap: wrap; gap: 6px; }
+.note { font-size: 11px; margin-top: 8px; }
+</style></head>
+<body><div id="app" class="muted">Loading Home…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const ICON = { lightbulb: "💡", outlet: "🔌", switch: "🔘", thermostat: "🌡️", lock_mechanism: "🔒", fan: "🌀", garage_door_opener: "🚗",
+  window_covering: "🪟", temperature_sensor: "🌡️", humidity_sensor: "💧", motion_sensor: "🏃", contact_sensor: "🚪", television: "📺", speaker: "🔈", air_purifier: "🌬️" };
+let state = null;
+const powerKey = (a) => ["power_state", "active", "on"].find((k) => k in a.values);
+function status(a) {
+  const v = a.values, parts = [];
+  const p = powerKey(a);
+  if (p) parts.push(v[p] === true || v[p] === 1 ? "On" : "Off");
+  if (v.brightness != null && (v[p] === true || v[p] === 1)) parts.push(`${v.brightness}%`);
+  if (v.current_temperature != null) parts.push(`${Math.round(v.current_temperature * 9 / 5 + 32)}°`);
+  if (v.target_temperature != null) parts.push(`→ ${Math.round(v.target_temperature * 9 / 5 + 32)}°`);
+  if (v.current_relative_humidity != null) parts.push(`${Math.round(v.current_relative_humidity)}%`);
+  if (v.lock_current_state != null) parts.push(v.lock_current_state === 1 ? "Locked" : "Unlocked");
+  if (v.current_position != null) parts.push(`${v.current_position}% open`);
+  return parts.join(" · ") || (a.type || "").replace(/_/g, " ");
+}
+async function toggle(i) {
+  const a = state.accessories[i], key = powerKey(a);
+  if (!key || !a.writable.includes(key)) return;
+  const on = a.values[key] === true || a.values[key] === 1, value = typeof a.values[key] === "number" ? (on ? 0 : 1) : !on;
+  try {
+    const result = await cider.callTool("home_set", { accessory: a.id, characteristic: key, value });
+    if (result?.structuredContent?.ok === false) throw new Error(result.structuredContent.error?.message);
+    a.values[key] = value; draw();
+  } catch (e) { note(e.message || "Not changed"); }
+}
+async function scene(i) {
+  const sc = state.scenes[i];
+  try {
+    const result = await cider.callTool("home_run_scene", { scene: sc.id || sc.name });
+    if (result?.structuredContent?.ok === false) throw new Error(result.structuredContent.error?.message);
+    note(`Ran ${sc.name}.`);
+  } catch (e) { note(e.message || "Not run"); }
+}
+function note(text) { document.getElementById("note").textContent = text; }
+function draw() {
+  const rooms = new Map();
+  state.accessories.forEach((a, i) => { const r = a.room || "Default Room"; if (!rooms.has(r)) rooms.set(r, []); rooms.get(r).push([a, i]); });
+  let html = "";
+  for (const [room, list] of rooms) {
+    html += `<h3>${esc(room)}</h3><div class="grid">` + list.map(([a, i]) => {
+      const key = powerKey(a), on = key && (a.values[key] === true || a.values[key] === 1);
+      const canToggle = key && a.writable.includes(key);
+      return `<button class="tile ${on ? "on" : ""}" ${canToggle ? `onclick="toggle(${i})"` : "disabled"} title="${canToggle ? "Toggle" : ""}">
+        <div class="ic">${ICON[a.type] || "🏠"}</div><div class="n">${esc(a.name)}</div><div class="s">${esc(status(a))}</div></button>`;
+    }).join("") + `</div>`;
+  }
+  if (state.scenes?.length) html += `<h3>Scenes</h3><div class="scenes">` + state.scenes.map((sc, i) => `<button onclick="scene(${i})">${esc(sc.name)}</button>`).join("") + `</div>`;
+  html += `<div id="note" class="note muted">Tapping a tile or scene asks before changing anything.</div>`;
+  const app = document.getElementById("app"); app.className = ""; app.innerHTML = html;
+}
+function render(result) {
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { document.getElementById("app").innerHTML = `<span class="error">${esc(out.error?.message || "Home isn't available")}</span>`; return; }
+  state = { accessories: out.data.accessories || [], scenes: Array.isArray(out.data.scenes) ? out.data.scenes : [] };
+  draw();
+}
+</script></body></html>
