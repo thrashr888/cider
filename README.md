@@ -746,6 +746,12 @@ result instead of raw JSON. Cider declares each card as a `ui://` resource
 
 Buttons on a card (Home tiles, music controls, a reminder's checkbox) ask the host to call that tool, so the host's confirmation applies.
 
+Here they are in [Tavern](https://github.com/thrashr888/tavern), a Mac app that shows Pi agents' cider cards inline (made-up data):
+
+| Weather and agenda | Home |
+| --- | --- |
+| ![Weather and agenda cards in a Tavern thread](https://raw.githubusercontent.com/thrashr888/tavern/main/docs/screenshots/cards.png) | ![The Home card in a Tavern thread](https://raw.githubusercontent.com/thrashr888/tavern/main/docs/screenshots/home.png) |
+
 Cards are self-contained pages: no scripts or styles from the network. The
 weather card loads only Apple's attribution logo from `weatherkit.apple.com`,
 declared in its `_meta.ui.csp`. Links in a card ask the host to open them.
