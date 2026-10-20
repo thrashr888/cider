@@ -6,7 +6,7 @@
 .temp { font-size: 40px; font-weight: 300; letter-spacing: -1px; }
 .cond { font-size: 15px; font-weight: 600; }
 .hours { display: flex; gap: 14px; overflow-x: auto; padding: 12px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
-.hour { display: grid; justify-items: center; gap: 2px; min-width: 34px; font-size: 12px; }
+.hour { display: grid; justify-items: center; gap: 2px; min-width: 40px; font-size: 12px; white-space: nowrap; }
 .days { display: grid; grid-template-columns: 48px 26px 1fr 40px 40px; gap: 6px 10px; align-items: center; padding-top: 4px; }
 .bar { height: 4px; border-radius: 2px; background: linear-gradient(90deg, #64d2ff, #ffd60a, #ff9f0a); }
 .attr { margin-top: 10px; font-size: 11px; display: flex; gap: 6px; align-items: center; }
@@ -30,6 +30,13 @@ function render(result, host) {
   const time = (iso, opts) => new Date(iso).toLocaleTimeString(host.locale, opts);
   const day = (iso, i) => i === 0 ? "Today" : new Date(iso + "T12:00:00").toLocaleDateString(host.locale, { weekday: "short" });
   let html = "";
+  // A forecast has no current reading: lead with the next hour and today's range instead.
+  const first = w.hourly_next_24?.[0], today = w.days?.[0];
+  if (w.temperature_c == null && first) {
+    html += `<div class="now"><div class="icon">${icon(first.condition)}</div><div><div class="temp">${t(first.temperature_c)}</div>
+      <div class="cond">${esc(words(first.condition))}</div></div>${today ? `<div style="margin-left:auto;text-align:right" class="muted">
+      H ${t(today.high_c)} · L ${t(today.low_c)}<br>${today.precipitation_chance ? `${today.precipitation_chance}% chance of rain` : "No rain expected"}</div>` : ""}</div>`;
+  }
   if (w.temperature_c != null) {
     html += `<div class="now"><div class="icon">${icon(w.condition, w.is_daylight)}</div><div><div class="temp">${t(w.temperature_c)}</div>
       <div class="cond">${esc(words(w.condition))}</div></div><div style="margin-left:auto;text-align:right" class="muted">

@@ -13,6 +13,8 @@ h3:first-child { margin-top: 0; }
 <script>/*BRIDGE*/</script>
 <script>
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// Calendar's store gives UTC as "YYYY-MM-DD HH:MM:SS" with no zone; Date() would read that as local.
+const when = (s) => new Date(/^\d{4}-\d\d-\d\d \d\d:\d\d(:\d\d)?$/.test(s) ? s.replace(" ", "T") + "Z" : s);
 const hue = (name) => [...String(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 function render(result, host) {
   const app = document.getElementById("app");
@@ -23,11 +25,11 @@ function render(result, host) {
   const today = new Date().toDateString();
   const byDay = new Map();
   for (const e of events) {
-    const d = new Date(e.start_date), key = d.toDateString();
+    const d = when(e.start_date), key = d.toDateString();
     if (!byDay.has(key)) byDay.set(key, []);
     byDay.get(key).push(e);
   }
-  const fmt = (iso) => new Date(iso).toLocaleTimeString(host.locale, { hour: "numeric", minute: "2-digit" });
+  const fmt = (iso) => when(iso).toLocaleTimeString(host.locale, { hour: "numeric", minute: "2-digit" });
   let html = "";
   for (const [key, list] of byDay) {
     const d = new Date(key);
