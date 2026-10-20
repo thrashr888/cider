@@ -8,3 +8,6 @@ body { margin: 0; padding: 14px 16px; background: transparent; }
 .spread { justify-content: space-between; }
 a { color: var(--accent); text-decoration: none; }
 .error { color: #ff453a; }
+button { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }

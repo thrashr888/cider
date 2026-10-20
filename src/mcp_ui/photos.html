@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
+.ph { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: var(--card); }
+.ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ph .tag { position: absolute; left: 5px; bottom: 4px; font-size: 10px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.ph .fav { position: absolute; right: 5px; top: 3px; font-size: 12px; }
+.ph .none { display: grid; place-items: center; height: 100%; font-size: 22px; }
+</style></head>
+<body><div id="app" class="muted">Loading Photos…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No photos")}</span>`; return; }
+  const photos = out.data || [];
+  if (!photos.length) { app.textContent = "No recent photos."; return; }
+  app.className = "";
+  app.innerHTML = `<div class="grid">` + photos.map((p) => {
+    const when = p.date ? new Date(p.date).toLocaleDateString(host.locale, { month: "short", day: "numeric" }) : "";
+    const img = typeof p.thumbnail === "string" && p.thumbnail.startsWith("data:image/") ? `<img src="${esc(p.thumbnail)}" alt="">` : `<div class="none">${p.kind === "video" ? "🎬" : "🖼️"}</div>`;
+    return `<div class="ph">${img}${p.is_favorite ? '<span class="fav">❤️</span>' : ""}<span class="tag">${esc(when)}${p.kind === "video" ? " · video" : ""}</span></div>`;
+  }).join("") + `</div>`;
+}
+</script></body></html>

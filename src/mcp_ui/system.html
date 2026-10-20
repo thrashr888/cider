@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.big { font-size: 28px; } .title { font-size: 15px; font-weight: 700; }
+.rows { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; }
+.k { color: var(--muted); }
+.meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 3px; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.meter i.hot { background: #ff9f0a; } .meter i.full { background: #ff453a; }
+</style></head>
+<body><div id="app" class="muted">Loading…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const gb = (b) => `${(b / 1e9).toFixed(b > 1e11 ? 0 : 1)} GB`;
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No status")}</span>`; return; }
+  const { system: s = {}, wifi: w, disks = [], time_machine: tm } = out.data;
+  let rows = "";
+  const row = (k, v) => v ? (rows += `<div class="k">${esc(k)}</div><div>${v}</div>`) : null;
+  row("macOS", esc([s.os_version, s.os_build && `(${s.os_build})`].filter(Boolean).join(" ")));
+  row("Chip", esc([s.chip, s.memory_gb].filter(Boolean).join(" · ")));
+  row("Up", esc((s.uptime || "").replace(/^.*up\s+/, "").replace(/,\s*\d+ users?.*$/, "")));
+  row("Wi-Fi", w ? esc(w.connected ? [w.ssid || "Connected", w.signal_strength != null && `${w.signal_strength} dBm`, w.ip_address].filter(Boolean).join(" · ") : "Not connected") : "");
+  for (const d of disks.filter((d) => d.mount_point === "/" || d.mount_point.startsWith("/Volumes/")).slice(0, 4)) {
+    const pct = Math.round(d.used_percent), cls = pct > 90 ? "full" : pct > 75 ? "hot" : "";
+    row(d.mount_point === "/" ? "Disk" : d.name, `${gb(d.available_bytes)} free of ${gb(d.total_bytes)}<div class="meter"><i class="${cls}" style="width:${pct}%"></i></div>`);
+  }
+  if (tm) {
+    const running = /Running\s*=\s*1/.test(tm.status || "");
+    const state = running ? "Backing up now" : tm.latest_backup ? `Last backup ${tm.latest_backup}` : tm.destination ? `Backs up to ${tm.destination}` : "Not set up";
+    row("Time Machine", esc(state));
+  }
+  app.className = "";
+  app.innerHTML = `<div class="head"><div class="big">💻</div><div><div class="title">${esc(s.computer_name || s.hostname || "This Mac")}</div>
+    <div class="muted">${esc(s.hardware_model || "")}</div></div></div><div class="rows">${rows}</div>`;
+}
+</script></body></html>

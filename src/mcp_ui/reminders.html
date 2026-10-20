@@ -5,7 +5,7 @@ h3 { margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; letter-spac
 h3:first-child { margin-top: 0; }
 .r { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .r:last-child { border-bottom: 0; }
-.box { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--muted); margin-top: 2px; }
+.box { padding: 0; cursor: pointer; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--muted); margin-top: 2px; }
 .done .box { background: var(--accent); border-color: var(--accent); }
 .done .t { text-decoration: line-through; color: var(--muted); }
 .due { font-size: 12px; white-space: nowrap; } .late { color: #ff453a; }
@@ -15,6 +15,13 @@ h3:first-child { margin-top: 0; }
 <script>/*BRIDGE*/</script>
 <script>
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+async function complete(button, id) {
+  try {
+    const result = await cider.callTool("reminders_complete", { id });
+    if (result?.structuredContent?.ok === false) throw new Error(result.structuredContent.error?.message);
+    button.closest(".r").classList.add("done");
+  } catch (e) { button.title = e.message || "Not changed"; }
+}
 function render(result, host) {
   const app = document.getElementById("app");
   const out = result.structuredContent ?? {};
@@ -33,7 +40,7 @@ function render(result, host) {
   };
   let html = "";
   for (const [list, rs] of byList) {
-    html += `<h3>${esc(list)}</h3>` + rs.map((r) => `<div class="r ${r.completed ? "done" : ""}"><div class="box"></div>
+    html += `<h3>${esc(list)}</h3>` + rs.map((r) => `<div class="r ${r.completed ? "done" : ""}"><button class="box" title="Mark done" ${r.completed ? "disabled" : `onclick="complete(this, '${esc(r.id).replace(/'/g, "")}')"`}></button>
       <div class="t">${r.flagged ? '<span class="flag">⚑</span> ' : ""}${"!".repeat(r.priority >= 1 && r.priority <= 4 ? 3 : r.priority === 5 ? 2 : r.priority > 5 ? 1 : 0)}${r.priority ? " " : ""}${esc(r.title)}</div>${due(r)}</div>`).join("");
   }
   app.className = ""; app.innerHTML = html;

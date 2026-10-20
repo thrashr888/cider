@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.c { display: grid; grid-template-columns: 40px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.c:last-child { border-bottom: 0; }
+.av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; color: #fff; }
+.name { font-weight: 700; } .org { font-size: 12px; }
+.line { font-size: 12px; } .label { color: var(--muted); }
+</style></head>
+<body><div id="app" class="muted">Loading contacts…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const hue = (name) => [...String(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 11);
+const label = (l) => String(l || "").replace(/^_\$!<|>!\$_$/g, "").toLowerCase();
+function render(result) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No contacts")}</span>`; return; }
+  const people = out.data || [];
+  if (!people.length) { app.textContent = "No matching contacts."; return; }
+  app.className = "";
+  app.innerHTML = people.slice(0, 12).map((c) => {
+    const initials = (c.name || "?").split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+    const lines = [...(c.phones || []).map((p) => [label(p.label) || "phone", esc(p.value)]),
+      ...(c.emails || []).map((e) => [label(e.label) || "email", esc(e.value)])].slice(0, 4);
+    return `<div class="c"><div class="av" style="background:hsl(${hue(c.name)} 45% 50%)">${esc(initials)}</div><div>
+      <div class="name">${esc(c.name)}</div>${c.organization || c.job_title ? `<div class="org muted">${esc([c.job_title, c.organization].filter(Boolean).join(" · "))}</div>` : ""}
+      ${lines.map(([l, v]) => `<div class="line"><span class="label">${esc(l)}</span> ${v}</div>`).join("")}</div></div>`;
+  }).join("");
+}
+</script></body></html>

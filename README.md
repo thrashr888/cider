@@ -697,7 +697,7 @@ sources; add `calendar`, `reminders`, or `doctor` to enable those tools.
 
 ### Available MCP tools
 
-With no `--sources` option, the first eight sources below are enabled. `weather`, `stocks`, `notes` and `music` are opt-in: weather launches the Cider Bridge app, and notes and music use app automation that macOS may ask about. An explicit
+With no `--sources` option, the first eight sources below are enabled. The rest are opt-in: `weather` and `home` launch the Cider Bridge app, several use app automation that macOS may ask about, and `actions` turns on the tools that change things (each also needs its own source, so `music,actions` enables playback control). Hosts should confirm every action. An explicit
 list replaces that default. Unknown source names fail at startup, and disabled
 tools are excluded from discovery and cannot be invoked by name. This first
 version exposes the following subset of Cider; it has no write tools or generic
@@ -716,7 +716,14 @@ shell/CLI execution tool.
 | `weather` | `weather_current`, `weather_forecast` | What's the weather at home this week? |
 | `stocks` | `stocks_quotes` | How is my watchlist doing today? |
 | `notes` | `notes_list`, `notes_get` | What did I write in my planning note? |
-| `music` | `music_now_playing` | What's playing? |
+| `music` | `music_now_playing` (+ `music_play`, `music_pause`, `music_toggle`, `music_next`, `music_previous` with `actions`) | What's playing? Skip this one. |
+| `home` | `home_status` (+ `home_set`, `home_run_scene` with `actions`) | Which lights are on? Turn off the living room. |
+| `shortcuts` | `shortcuts_list` (+ `shortcuts_run` with `actions`) | Run my "Leaving home" shortcut. |
+| `system` | `system_status` | How much disk is left? When was the last backup? |
+| `photos` | `photos_recent` | Show me today's photos. |
+| `contacts` | `contacts_search`, `contacts_get` | What's Sam's number? |
+
+With `actions`, `reminders` also gets `reminders_complete` and `reminders_create`.
 
 ### Interactive cards (MCP Apps)
 
@@ -731,7 +738,13 @@ result instead of raw JSON. Cider declares each card as a `ui://` resource
 | `ui://cider/agenda` | `calendar_list` | Events grouped by day |
 | `ui://cider/reminders` | `reminders_list` | Reminders by list, with due dates, flags and priority |
 | `ui://cider/stocks` | `stocks_quotes` | Quotes with price and daily change |
-| `ui://cider/now-playing` | `music_now_playing` | The track playing in Music |
+| `ui://cider/now-playing` | `music_now_playing` | The track playing in Music, with previous, play/pause and next |
+| `ui://cider/home` | `home_status` | Accessories by room and scenes; tiles toggle power and scenes run |
+| `ui://cider/system` | `system_status` | macOS, chip, uptime, Wi-Fi, disks and Time Machine |
+| `ui://cider/photos` | `photos_recent` | Recent photos as thumbnails (the model's text leaves them out) |
+| `ui://cider/contacts` | `contacts_search`, `contacts_get` | Contact cards |
+
+Buttons on a card (Home tiles, music controls, a reminder's checkbox) ask the host to call that tool, so the host's confirmation applies.
 
 Cards are self-contained pages: no scripts or styles from the network. The
 weather card loads only Apple's attribution logo from `weatherkit.apple.com`,

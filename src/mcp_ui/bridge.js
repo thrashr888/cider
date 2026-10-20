@@ -16,6 +16,8 @@
 
   window.cider = {
     openLink: (url) => request("ui/open-link", { url }).catch(() => {}),
+    // Asks the host to run one of this server's tools (the host confirms with the user).
+    callTool: (name, args = {}) => request("tools/call", { name, arguments: args }),
     host: () => host,
   };
 
