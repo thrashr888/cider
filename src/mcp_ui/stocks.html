@@ -18,7 +18,9 @@ function render(result, host) {
   if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No quotes")}</span>`; return; }
   const quotes = out.data || [];
   if (!quotes.length) { app.textContent = "No quotes in the Stocks app's watchlist."; return; }
-  const money = (q, v) => v == null ? "–" : v.toLocaleString(host.locale, { style: "currency", currency: q.currency || "USD" });
+  // Indexes (^VIX, ^GSPC) are points, not money.
+  const money = (q, v) => v == null ? "–" : q.symbol?.startsWith("^") ? v.toLocaleString(host.locale, { maximumFractionDigits: 2 })
+    : v.toLocaleString(host.locale, { style: "currency", currency: q.currency || "USD" });
   app.className = "";
   app.innerHTML = quotes.map((q) => {
     const pct = q.change_percent, cls = pct > 0 ? "up" : pct < 0 ? "down" : "flat";
