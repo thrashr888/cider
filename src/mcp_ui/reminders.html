@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+h3 { margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+h3:first-child { margin-top: 0; }
+.r { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.r:last-child { border-bottom: 0; }
+.box { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--muted); margin-top: 2px; }
+.done .box { background: var(--accent); border-color: var(--accent); }
+.done .t { text-decoration: line-through; color: var(--muted); }
+.due { font-size: 12px; white-space: nowrap; } .late { color: #ff453a; }
+.flag { color: #ff9f0a; }
+</style></head>
+<body><div id="app" class="muted">Loading reminders…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No reminders")}</span>`; return; }
+  const items = out.data || [];
+  if (!items.length) { app.textContent = "No reminders."; return; }
+  const byList = new Map();
+  for (const r of items) { if (!byList.has(r.list)) byList.set(r.list, []); byList.get(r.list).push(r); }
+  const now = new Date();
+  const due = (r) => {
+    if (!r.due_date) return "";
+    const d = new Date(r.due_date);
+    const text = r.is_all_day ? d.toLocaleDateString(host.locale, { month: "short", day: "numeric", timeZone: "UTC" })
+      : d.toLocaleString(host.locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return `<span class="due ${!r.completed && d < now ? "late" : "muted"}">${esc(text)}</span>`;
+  };
+  let html = "";
+  for (const [list, rs] of byList) {
+    html += `<h3>${esc(list)}</h3>` + rs.map((r) => `<div class="r ${r.completed ? "done" : ""}"><div class="box"></div>
+      <div class="t">${r.flagged ? '<span class="flag">⚑</span> ' : ""}${"!".repeat(r.priority >= 1 && r.priority <= 4 ? 3 : r.priority === 5 ? 2 : r.priority > 5 ? 1 : 0)}${r.priority ? " " : ""}${esc(r.title)}</div>${due(r)}</div>`).join("");
+  }
+  app.className = ""; app.innerHTML = html;
+}
+</script></body></html>

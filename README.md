@@ -697,7 +697,7 @@ sources; add `calendar`, `reminders`, or `doctor` to enable those tools.
 
 ### Available MCP tools
 
-With no `--sources` option, the eight sources below except `weather` are enabled (weather is opt-in because it launches the Cider Bridge app). An explicit
+With no `--sources` option, the first eight sources below are enabled. `weather`, `stocks`, `notes` and `music` are opt-in: weather launches the Cider Bridge app, and notes and music use app automation that macOS may ask about. An explicit
 list replaces that default. Unknown source names fail at startup, and disabled
 tools are excluded from discovery and cannot be invoked by name. This first
 version exposes the following subset of Cider; it has no write tools or generic
@@ -714,6 +714,9 @@ shell/CLI execution tool.
 | `reminders` | `reminders_list`, `reminders_lists` | What incomplete reminders are on my Shopping list? |
 | `doctor` | `doctor` | Which local stores are available, and what access is missing? |
 | `weather` | `weather_current`, `weather_forecast` | What's the weather at home this week? |
+| `stocks` | `stocks_quotes` | How is my watchlist doing today? |
+| `notes` | `notes_list`, `notes_get` | What did I write in my planning note? |
+| `music` | `music_now_playing` | What's playing? |
 
 ### Interactive cards (MCP Apps)
 
@@ -726,6 +729,9 @@ result instead of raw JSON. Cider declares each card as a `ui://` resource
 |------|-------|-------|
 | `ui://cider/weather` | `weather_current`, `weather_forecast` | Conditions, the next hours, the coming days, and Apple Weather attribution |
 | `ui://cider/agenda` | `calendar_list` | Events grouped by day |
+| `ui://cider/reminders` | `reminders_list` | Reminders by list, with due dates, flags and priority |
+| `ui://cider/stocks` | `stocks_quotes` | Quotes with price and daily change |
+| `ui://cider/now-playing` | `music_now_playing` | The track playing in Music |
 
 Cards are self-contained pages: no scripts or styles from the network. The
 weather card loads only Apple's attribution logo from `weatherkit.apple.com`,

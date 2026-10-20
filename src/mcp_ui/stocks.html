@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.q { display: grid; grid-template-columns: 1fr auto 74px; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.q:last-child { border-bottom: 0; }
+.sym { font-weight: 700; } .name { font-size: 12px; } .price { font-variant-numeric: tabular-nums; font-weight: 600; }
+.chg { font-variant-numeric: tabular-nums; font-weight: 600; text-align: center; border-radius: 6px; padding: 3px 6px; color: #fff; }
+.up { background: #30d158; } .down { background: #ff453a; } .flat { background: #8e8e93; }
+.foot { margin-top: 8px; font-size: 11px; }
+</style></head>
+<body><div id="app" class="muted">Loading quotes…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No quotes")}</span>`; return; }
+  const quotes = out.data || [];
+  if (!quotes.length) { app.textContent = "No quotes in the Stocks app's watchlist."; return; }
+  const money = (q, v) => v == null ? "–" : v.toLocaleString(host.locale, { style: "currency", currency: q.currency || "USD" });
+  app.className = "";
+  app.innerHTML = quotes.map((q) => {
+    const pct = q.change_percent, cls = pct > 0 ? "up" : pct < 0 ? "down" : "flat";
+    return `<div class="q"><div><div class="sym">${esc(q.symbol)}</div><div class="name muted">${esc(q.name || "")}</div></div>
+      <div class="price">${money(q, q.price)}</div><div class="chg ${cls}">${pct == null ? "–" : (pct > 0 ? "+" : "") + pct.toFixed(2) + "%"}</div></div>`;
+  }).join("") + `<div class="foot muted">From the Stocks app's cache${quotes.some((q) => q.exchange_status === "closed") ? " · market closed" : ""}</div>`;
+}
+</script></body></html>

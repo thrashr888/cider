@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.np { display: flex; gap: 14px; align-items: center; }
+.art { width: 56px; height: 56px; border-radius: 10px; display: grid; place-items: center; font-size: 26px; background: linear-gradient(135deg, #fa2d48, #a033ff); color: #fff; }
+.title { font-size: 15px; font-weight: 700; } .track { flex: 1; min-width: 0; }
+.track div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar { height: 4px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--fg); }
+.times { display: flex; justify-content: space-between; font-size: 11px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+</style></head>
+<body><div id="app" class="muted">Loading Music…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+function render(result) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "Music isn't available")}</span>`; return; }
+  const n = out.data || {};
+  app.className = "";
+  if (!n.name || n.state === "stopped") { app.innerHTML = `<div class="np"><div class="art">♪</div><div class="track muted">Nothing playing in Music.</div></div>`; return; }
+  const pct = n.duration ? Math.min(100, (n.position / n.duration) * 100) : 0;
+  app.innerHTML = `<div class="np"><div class="art">${n.state === "playing" ? "▶︎" : "❚❚"}</div><div class="track">
+    <div class="title">${esc(n.name)}</div><div class="muted">${esc([n.artist, n.album].filter(Boolean).join(" — "))}</div>
+    <div class="bar"><i style="width:${pct}%"></i></div><div class="times muted"><span>${clock(n.position)}</span><span>${n.state}</span><span>${clock(n.duration)}</span></div></div></div>`;
+}
+</script></body></html>
