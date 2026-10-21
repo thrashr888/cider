@@ -21,7 +21,7 @@
   const applied = new Set();
   const applyTheme = () => {
     const root = document.documentElement;
-    root.dataset.theme = ["dark", "parchment", "hearth"].includes(host.theme) ? host.theme : "light";
+    root.dataset.theme = host.theme === "dark" ? "dark" : "light";
     // Drop the last context's overrides so a removed one falls back to the theme.
     for (const name of applied) root.style.removeProperty(name);
     applied.clear();
