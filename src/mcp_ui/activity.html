@@ -1,0 +1,53 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>/*STYLE*/
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.stat { background: var(--card); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.stat .v { white-space: nowrap; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.meter { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 5px; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.meter i.hot { background: var(--amber); } .meter i.full { background: var(--red); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; table-layout: fixed; }
+th { font-size: 11px; font-weight: 500; color: var(--muted); text-align: right; padding: 0 0 4px; }
+th:first-child, td:first-child { text-align: left; }
+td { padding: 4px 0; border-top: 1px solid var(--line); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+td.sorted { font-weight: 600; }
+.pid { color: var(--muted); font-size: 11px; margin-left: 4px; }
+@media (max-width: 380px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+</style></head>
+<body><div id="app" class="muted">Loading…</div>
+<script>/*BRIDGE*/</script>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const meter = (pct) => {
+  const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+  return `<div class="meter"><i class="${p > 90 ? "full" : p > 70 ? "hot" : ""}" style="width:${p}%"></i></div>`;
+};
+const mem = (mb) => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+function render(result, host) {
+  const app = document.getElementById("app");
+  const out = result.structuredContent ?? {};
+  if (!out.ok) { app.innerHTML = `<span class="error">${esc(out.error?.message || "No activity")}</span>`; return; }
+  const a = out.data ?? {};
+  const memPct = a.memory_total_gb ? (a.memory_used_gb / a.memory_total_gb) * 100 : 0;
+  const load = a.load_average ?? [];
+  const loadPct = a.cpu_cores ? ((load[0] || 0) / a.cpu_cores) * 100 : 0;
+  const stat = (k, v, pct) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div>${pct == null ? "" : meter(pct)}</div>`;
+  const byMem = a.sort === "memory";
+  const rows = (a.processes ?? []).map((p) => `<tr><td title="${esc(p.name)}">${esc(p.name)}<span class="pid">${esc(p.pid)}</span></td>
+    <td class="${byMem ? "" : "sorted"}">${Number(p.cpu_percent).toFixed(1)}%</td><td class="${byMem ? "sorted" : ""}">${mem(p.memory_mb)}</td>
+    <td class="muted">${esc(p.user)}</td></tr>`).join("");
+  app.className = "";
+  app.innerHTML = `<div class="stats">
+      ${stat("CPU", `${Math.round(a.cpu_percent ?? 0)}%`, a.cpu_percent)}
+      ${stat("Memory", `${(a.memory_used_gb ?? 0).toFixed(1)} GB`, memPct)}
+      ${stat("Load", load.map((l) => Number(l).toFixed(2))[0] ?? "–", loadPct)}
+      ${stat("Swap", `${(a.swap_used_gb ?? 0).toFixed(1)} GB`, null)}
+    </div>
+    <table><colgroup><col><col style="width:64px"><col style="width:72px"><col style="width:84px"></colgroup>
+    <thead><tr><th>${esc(a.processes_total ?? "")} processes</th><th>CPU</th><th>Memory</th><th>User</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="muted" style="font-size:11px;margin-top:6px">${esc(a.cpu_cores ?? "?")} cores · ${Math.round(a.memory_total_gb ?? 0)} GB memory · load ${load.map((l) => Number(l).toFixed(2)).join(" ")}${a.memory_free_percent != null ? ` · ${esc(a.memory_free_percent)}% memory free` : ""}</div>`;
+}
+</script></body></html>

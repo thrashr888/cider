@@ -1,13 +1,20 @@
 :root { --fg: #1d1d1f; --muted: #6e6e73; --card: #f5f5f7; --line: rgba(0,0,0,.08); --accent: #0a84ff;
+  --green: #1a7f37; --amber: #c27c00; --red: #d70015;
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; color: var(--fg); }
-:root[data-theme="dark"] { --fg: #f5f5f7; --muted: #a1a1a6; --card: #2c2c2e; --line: rgba(255,255,255,.1); }
+:root[data-theme="dark"] { --fg: #f5f5f7; --muted: #a1a1a6; --card: #2c2c2e; --line: rgba(255,255,255,.1);
+  --green: #30d158; --amber: #ff9f0a; --red: #ff453a; }
+/* Tavern's Parchment (light) and Hearth (dark) themes. */
+:root[data-theme="parchment"] { --fg: #3b2a1a; --muted: #7a6448; --card: rgba(139,90,43,.09); --line: rgba(59,42,26,.14); --accent: #8b4a1c;
+  --green: #4f7a3a; --amber: #a8741a; --red: #a63a2a; }
+:root[data-theme="hearth"] { --fg: #f1e4cf; --muted: #b8a184; --card: rgba(241,228,207,.07); --line: rgba(241,228,207,.11); --accent: #e8a54b;
+  --green: #9cbf6e; --amber: #f2b45a; --red: #e07a5f; }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 14px 16px; background: transparent; }
 .muted { color: var(--muted); }
 .row { display: flex; align-items: center; gap: 10px; }
 .spread { justify-content: space-between; }
 a { color: var(--accent); text-decoration: none; }
-.error { color: #ff453a; }
+.error { color: var(--red); }
 button { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; }

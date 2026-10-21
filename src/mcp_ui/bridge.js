@@ -12,7 +12,21 @@
     });
   const notify = (method, params) => send({ method, params });
   let host = { theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light", locale: navigator.language };
-  const applyTheme = () => document.documentElement.dataset.theme = host.theme || "light";
+  // A host's style variables (SEP-1865 hostContext.styles) win over the card's own palette.
+  const VARIABLES = {
+    "--color-text-primary": "--fg", "--color-text-secondary": "--muted", "--color-background-secondary": "--card",
+    "--color-border-primary": "--line", "--color-text-info": "--accent", "--color-text-success": "--green",
+    "--color-text-danger": "--red", "--color-text-warning": "--amber", "--font-sans": "font-family",
+  };
+  const applyTheme = () => {
+    const root = document.documentElement;
+    root.dataset.theme = ["dark", "parchment", "hearth"].includes(host.theme) ? host.theme : "light";
+    for (const [name, value] of Object.entries(host.styles?.variables ?? {})) {
+      if (typeof value !== "string" || !value) continue;
+      if (/^--(fg|muted|card|line|accent|green|amber|red)$/.test(name)) root.style.setProperty(name, value);
+      else if (VARIABLES[name]) root.style.setProperty(VARIABLES[name], value);
+    }
+  };
 
   window.cider = {
     openLink: (url) => request("ui/open-link", { url }).catch(() => {}),

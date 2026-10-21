@@ -720,6 +720,8 @@ shell/CLI execution tool.
 | `home` | `home_status` (+ `home_set`, `home_run_scene` with `actions`) | Which lights are on? Turn off the living room. |
 | `shortcuts` | `shortcuts_list` (+ `shortcuts_run` with `actions`) | Run my "Leaving home" shortcut. |
 | `system` | `system_status` | How much disk is left? When was the last backup? |
+| `system` | `system_activity` | What's using the CPU or memory right now? |
+| `system` | `console_logs` | What has WindowServer been complaining about? |
 | `photos` | `photos_recent` | Show me today's photos. |
 | `contacts` | `contacts_search`, `contacts_get` | What's Sam's number? |
 
@@ -741,6 +743,8 @@ result instead of raw JSON. Cider declares each card as a `ui://` resource
 | `ui://cider/now-playing` | `music_now_playing` | The track playing in Music, with previous, play/pause and next |
 | `ui://cider/home` | `home_status` | Accessories by room and scenes; tiles toggle power and scenes run |
 | `ui://cider/system` | `system_status` | macOS, chip, uptime, Wi-Fi, disks and Time Machine |
+| `ui://cider/activity` | `system_activity` | CPU, memory, swap and load, with the top processes |
+| `ui://cider/logs` | `console_logs` | Recent unified log errors, or every level for one process |
 | `ui://cider/photos` | `photos_recent` | Recent photos as thumbnails (the model's text leaves them out) |
 | `ui://cider/contacts` | `contacts_search`, `contacts_get` | Contact cards |
 
