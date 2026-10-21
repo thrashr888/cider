@@ -50,20 +50,20 @@ pub async fn fetch(minutes: u32) -> anyhow::Result<Vec<LogEntry>> {
 pub async fn query(q: &LogQuery<'_>) -> anyhow::Result<Vec<LogEntry>> {
     let (minutes, predicate) = predicate(q)?;
     let last = format!("{}m", minutes);
-    let output = run_command_with_timeout(
-        "log",
-        &[
-            "show",
-            "--last",
-            &last,
-            "--style",
-            "ndjson",
-            "--predicate",
-            &predicate,
-        ],
-        std::time::Duration::from_secs(45),
-    )
-    .await?;
+    let mut args = vec![
+        "show",
+        "--last",
+        &last,
+        "--style",
+        "ndjson",
+        "--predicate",
+        &predicate,
+    ];
+    // `log show` leaves Info and Debug out unless asked.
+    if q.all_levels {
+        args.extend(["--info", "--debug"]);
+    }
+    let output = run_command_with_timeout("log", &args, std::time::Duration::from_secs(45)).await?;
     let mut entries = parse(&output);
     let skip = entries.len().saturating_sub(q.limit.max(1));
     entries.drain(..skip);
@@ -74,7 +74,11 @@ pub async fn query(q: &LogQuery<'_>) -> anyhow::Result<Vec<LogEntry>> {
 /// checked and quoted here, so neither can change the predicate's shape.
 pub fn predicate(q: &LogQuery<'_>) -> anyhow::Result<(u32, String)> {
     let process = q.process.map(str::trim).filter(|p| !p.is_empty());
-    let search = q.search.map(str::trim).filter(|s| !s.is_empty());
+    let search = q
+        .search
+        .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if let Some(p) = process {
         anyhow::ensure!(
             p.len() <= 64
@@ -83,7 +87,7 @@ pub fn predicate(q: &LogQuery<'_>) -> anyhow::Result<(u32, String)> {
             "process must be a plain process name, like Safari or WindowServer"
         );
     }
-    if let Some(s) = search {
+    if let Some(s) = &search {
         anyhow::ensure!(s.chars().count() <= 200, "search is at most 200 characters");
     }
     anyhow::ensure!(
@@ -101,12 +105,7 @@ pub fn predicate(q: &LogQuery<'_>) -> anyhow::Result<(u32, String)> {
         parts.push(format!("process == \"{p}\""));
     }
     if let Some(s) = search {
-        let quoted = s
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect::<String>()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        let quoted = s.replace('\\', "\\\\").replace('"', "\\\"");
         parts.push(format!("eventMessage CONTAINS[c] \"{quoted}\""));
     }
     Ok((minutes, parts.join(" AND ")))
@@ -188,6 +187,12 @@ mod tests {
         .is_err());
         assert!(predicate(&LogQuery {
             all_levels: true,
+            ..Default::default()
+        })
+        .is_err());
+        assert!(predicate(&LogQuery {
+            all_levels: true,
+            search: Some("\u{0} \t"),
             ..Default::default()
         })
         .is_err());

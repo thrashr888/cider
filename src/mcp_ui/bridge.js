@@ -18,13 +18,18 @@
     "--color-border-primary": "--line", "--color-text-info": "--accent", "--color-text-success": "--green",
     "--color-text-danger": "--red", "--color-text-warning": "--amber", "--font-sans": "font-family",
   };
+  const applied = new Set();
   const applyTheme = () => {
     const root = document.documentElement;
     root.dataset.theme = ["dark", "parchment", "hearth"].includes(host.theme) ? host.theme : "light";
+    // Drop the last context's overrides so a removed one falls back to the theme.
+    for (const name of applied) root.style.removeProperty(name);
+    applied.clear();
+    const set = (name, value) => (root.style.setProperty(name, value), applied.add(name));
     for (const [name, value] of Object.entries(host.styles?.variables ?? {})) {
       if (typeof value !== "string" || !value) continue;
-      if (/^--(fg|muted|card|line|accent|green|amber|red)$/.test(name)) root.style.setProperty(name, value);
-      else if (VARIABLES[name]) root.style.setProperty(VARIABLES[name], value);
+      if (/^--(fg|muted|card|line|accent|green|amber|red)$/.test(name)) set(name, value);
+      else if (VARIABLES[name]) set(VARIABLES[name], value);
     }
   };
 

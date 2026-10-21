@@ -1062,10 +1062,11 @@ async fn execute(name: &str, args: Value) -> Result<Value, Failure> {
                 search: a.search.as_deref(),
                 limit: a.limit.unwrap_or(50).clamp(1, 200) as usize,
             };
-            sources::console_logs::predicate(&query)
+            // The window actually read: level all is capped shorter.
+            let (minutes, _) = sources::console_logs::predicate(&query)
                 .map_err(|e| Failure::invalid(e.to_string()))?;
             data(json!({
-                "minutes": query.minutes,
+                "minutes": minutes,
                 "level": if query.all_levels { "all" } else { "errors" },
                 "process": query.process,
                 "search": query.search,
