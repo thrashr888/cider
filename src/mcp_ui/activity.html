@@ -11,6 +11,7 @@
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; table-layout: fixed; }
 th { font-size: 11px; font-weight: 500; color: var(--muted); text-align: right; padding: 0 0 4px; }
 th:first-child, td:first-child { text-align: left; }
+th + th, td + td { padding-left: 10px; }
 td { padding: 4px 0; border-top: 1px solid var(--line); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 td.sorted { font-weight: 600; }
 .pid { color: var(--muted); font-size: 11px; margin-left: 4px; }
@@ -45,7 +46,7 @@ function render(result, host) {
       ${stat("Load", load.map((l) => Number(l).toFixed(2))[0] ?? "–", loadPct)}
       ${stat("Swap", `${(a.swap_used_gb ?? 0).toFixed(1)} GB`, null)}
     </div>
-    <table><colgroup><col><col style="width:64px"><col style="width:72px"><col style="width:84px"></colgroup>
+    <table><colgroup><col><col style="width:68px"><col style="width:80px"><col style="width:80px"></colgroup>
     <thead><tr><th>${esc(a.processes_total ?? "")} processes</th><th>CPU</th><th>Memory</th><th>User</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <div class="muted" style="font-size:11px;margin-top:6px">${esc(a.cpu_cores ?? "?")} cores · ${Math.round(a.memory_total_gb ?? 0)} GB memory · load ${load.map((l) => Number(l).toFixed(2)).join(" ")}${a.memory_free_percent != null ? ` · ${esc(a.memory_free_percent)}% memory free` : ""}</div>`;
