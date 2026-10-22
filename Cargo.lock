@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "cider-cli"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
