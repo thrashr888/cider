@@ -858,14 +858,17 @@ enum MessagesAction {
         #[arg(long)]
         since: Option<String>,
     },
-    /// Send an iMessage/SMS
+    /// Send an iMessage/SMS: text, image or file attachments, or both
     Send {
         /// Recipient phone number or email
         #[arg(long)]
         to: String,
         /// Message text
+        #[arg(long, required_unless_present = "file")]
+        text: Option<String>,
+        /// A photo or file to attach; repeat for several. Sent before the text.
         #[arg(long)]
-        text: String,
+        file: Vec<std::path::PathBuf>,
     },
 }
 
@@ -3030,17 +3033,30 @@ async fn run() -> anyhow::Result<()> {
                     paginate_vec(sources::messages::list(days, since).await?, offset, limit);
                 print_output(&serde_json::to_value(&records)?, cli.pretty, cli.envelope)?;
             }
-            Some(MessagesAction::Send { to, text }) => {
+            Some(MessagesAction::Send { to, text, file }) => {
                 if cli.no_op {
+                    let what = match (file.len(), text.is_some()) {
+                        (0, _) => "message".to_string(),
+                        (n, true) => format!("message with {n} attachment(s)"),
+                        (n, false) => format!("{n} attachment(s)"),
+                    };
                     print_dry_run(
                         "messages.send",
-                        format!("Would send message to {to}"),
+                        format!("Would send {what} to {to}"),
                         cli.pretty,
                         cli.envelope,
                     )?;
                 } else {
-                    let result = sources::messages::send(&to, &text).await?;
-                    print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    let mut result = None;
+                    for path in &file {
+                        result = Some(sources::messages::send_file(&to, path).await?);
+                    }
+                    if let Some(text) = &text {
+                        result = Some(sources::messages::send(&to, text).await?);
+                    }
+                    if let Some(result) = result {
+                        print_output(&serde_json::to_value(&result)?, cli.pretty, cli.envelope)?;
+                    }
                 }
             }
         },

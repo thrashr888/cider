@@ -73,6 +73,7 @@ cider music pause
 
 # Send a message
 cider messages send --to "+15551234567" --text "On my way"
+cider messages send --to "+15551234567" --file ~/Desktop/photo.png --text "Look"
 
 # Watchlist prices from Apple Stocks
 cider stocks
