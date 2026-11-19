@@ -1406,6 +1406,12 @@ enum SafariAction {
         #[command(flatten)]
         content: SafariContentArgs,
     },
+    /// Discover WebMCP tool metadata in an existing tab
+    #[command(name = "webmcp")]
+    WebMcp {
+        #[command(subcommand)]
+        command: SafariWebMcpAction,
+    },
     /// Open an HTTP(S) URL in a new tab, wait, and return page content; leaves tab open
     Fetch {
         url: String,
@@ -1560,6 +1566,18 @@ impl SafariContentArgs {
             sources::safari::ContentFormat::Text
         }
     }
+}
+
+#[derive(Subcommand)]
+enum SafariWebMcpAction {
+    /// List declarations without executing page JavaScript or running tools
+    List {
+        #[command(flatten)]
+        target: SafariTargetArgs,
+        /// Query a page-loaded WebMCP registry instead; allows page JavaScript
+        #[arg(long)]
+        allow_eval: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1989,6 +2007,12 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
         let mutating = name == "binary" || is_mutating_action(name);
         schema["kind"] = serde_json::json!(if mutating { "write" } else { "read" });
         schema["supports_dry_run"] = serde_json::json!(mutating);
+        if name == "webmcp" {
+            schema["supports_dry_run"] = serde_json::json!(true);
+            for action in schema["actions"].as_array_mut().unwrap() {
+                action["supports_dry_run"] = serde_json::json!(true);
+            }
+        }
         if name == "binary" {
             for action in schema["actions"].as_array_mut().unwrap() {
                 action["kind"] = serde_json::json!("write");
@@ -2033,6 +2057,7 @@ fn command_schema(command: &clap::Command, top_level: bool) -> serde_json::Value
             schema["eval"] = serde_json::json!({"gate":"allow-eval","async":"awaits returned promise","timeout_cancels_javascript":false,"read_only_mcp":false});
             schema["request"] = serde_json::json!({"default_method":"GET","custom_request_gate":"allow-mutation","same_origin":true,"redirects":false,"retries":false,"auth_inference":false,"read_only_mcp":false});
             schema["binary_transfer"] = serde_json::json!({"gate":"allow-eval","document_scoped":true,"max_chunk_bytes":128000,"total_bytes":"explicit consumer budget, at most 9007199254740991","max_live_transfers":4,"retries":false,"fetch_request_streaming":false,"read_only_mcp":false});
+            schema["webmcp"] = serde_json::json!({"default_backend":"declarative_html", "page_registry_gate":"allow-eval", "metadata_only":true, "invocation":false, "native_webmcp":false});
             schema["frame_targeting"] = serde_json::json!({"existing_tab_backend":"apple_events","existing_tab_cross_origin_frames":false,"native_frame_api":"Safari 27 MCP evaluate_javascript(frameId)","native_existing_tab_attachment":"not advertised or verified","evidence":"docs/safari-frame-targeting.md"});
         }
         if name == "mail" {
@@ -3380,6 +3405,29 @@ async fn run() -> anyhow::Result<()> {
                     cli.pretty,
                     cli.envelope
                 )
+            }
+            Some(SafariAction::WebMcp {
+                command: SafariWebMcpAction::List { target, allow_eval },
+            }) => {
+                target.target().validate()?;
+                if cli.no_op {
+                    print_dry_run(
+                        "webmcp-list",
+                        if allow_eval {
+                            "Query metadata from the selected page's WebMCP registry; requires page JavaScript"
+                        } else {
+                            "Read WebMCP form declarations from the selected page's HTML source"
+                        },
+                        cli.pretty,
+                        cli.envelope,
+                    )?;
+                } else {
+                    run_source!(
+                        sources::safari::webmcp_list(target.target(), allow_eval),
+                        cli.pretty,
+                        cli.envelope
+                    )
+                }
             }
             Some(SafariAction::Fetch {
                 url,
@@ -5168,6 +5216,32 @@ mod tests {
         );
     }
     #[test]
+    fn safari_webmcp_list_is_discovery_only() {
+        assert!(Cli::try_parse_from([
+            "cider",
+            "safari",
+            "webmcp",
+            "list",
+            "--tab",
+            "2",
+            "--allow-eval",
+            "--dry-run",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["cider", "safari", "webmcp", "call"]).is_err());
+        let schema = build_schema(Some("safari"));
+        assert_eq!(schema["webmcp"]["invocation"], false);
+        let action = schema["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["name"] == "webmcp")
+            .unwrap();
+        assert_eq!(action["actions"][0]["kind"], "read");
+        assert_eq!(action["actions"][0]["supports_dry_run"], true);
+    }
+
+    #[test]
     fn safari_schema_and_arguments_describe_side_effects() {
         assert!(Cli::try_parse_from([
             "cider",
@@ -5225,7 +5299,10 @@ mod tests {
                 action["name"].as_str(),
                 Some("fetch" | "request" | "network" | "monitor" | "eval" | "navigate" | "binary")
             );
-            assert_eq!(action["supports_dry_run"], write);
+            assert_eq!(
+                action["supports_dry_run"],
+                write || action["name"] == "webmcp"
+            );
             assert_eq!(action["kind"], if write { "write" } else { "read" });
         }
     }
