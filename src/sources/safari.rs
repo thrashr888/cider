@@ -12,6 +12,10 @@ pub use safari_binary::{
     write_binary_chunk, BinaryChunk, BinaryDirection, BinaryTransfer, BinaryTransferOptions,
 };
 
+#[path = "safari_webmcp.rs"]
+mod safari_webmcp;
+pub use safari_webmcp::{webmcp_list, WebMcpBackend, WebMcpList, WebMcpStatus, WebMcpTool};
+
 #[derive(Debug, Serialize)]
 pub struct Bookmark {
     pub title: String,

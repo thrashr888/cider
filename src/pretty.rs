@@ -143,7 +143,35 @@ pub fn render<W: Write>(mut w: W, value: &serde_json::Value) -> anyhow::Result<(
             }
         }
         serde_json::Value::Object(obj) => {
-            if obj.get("backend").and_then(|v| v.as_str()) == Some("resource_timing") {
+            if matches!(
+                obj.get("backend").and_then(|v| v.as_str()),
+                Some("declarative_html" | "page_registry")
+            ) && obj.get("tools").is_some_and(serde_json::Value::is_array)
+            {
+                writeln!(
+                    w,
+                    "WebMCP discovery ({}): {}",
+                    obj["backend"].as_str().unwrap_or_default(),
+                    obj["status"].as_str().unwrap_or("unknown")
+                )?;
+                let rows = obj["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tool| {
+                        let clean = |field| {
+                            tool[field]
+                                .as_str()
+                                .unwrap_or_default()
+                                .chars()
+                                .map(|c| if c.is_control() { ' ' } else { c })
+                                .collect::<String>()
+                        };
+                        serde_json::json!({"name": clean("name"), "description": clean("description")})
+                    })
+                    .collect::<Vec<_>>();
+                render_table_with_columns(&mut w, &rows, &["name", "description"])?;
+            } else if obj.get("backend").and_then(|v| v.as_str()) == Some("resource_timing") {
                 writeln!(
                     w,
                     "Partial retained Resource Timing (not full HTTP history)"
@@ -646,5 +674,24 @@ mod safari_network_tests {
         assert!(text.contains("captured"));
         assert!(!text.contains("private-body"));
         assert_eq!(value, before);
+    }
+}
+
+#[cfg(test)]
+mod safari_webmcp_tests {
+    #[test]
+    fn shows_metadata_without_page_control_characters_or_schemas() {
+        let output = serde_json::json!({
+            "backend":"page_registry", "status":"partial",
+            "tools":[{"name":"read", "description":"Search\nitems\u{001b}", "input_schema":{"title":"not-rendered"}}]
+        });
+        let mut bytes = Vec::new();
+        super::render(&mut bytes, &output).unwrap();
+        let pretty = String::from_utf8(bytes).unwrap();
+        assert!(pretty.contains("page_registry"));
+        assert!(pretty.contains("partial"));
+        assert!(pretty.contains("Search items"));
+        assert!(!pretty.contains("not-rendered"));
+        assert!(!pretty.contains("Search\nitems"));
     }
 }
